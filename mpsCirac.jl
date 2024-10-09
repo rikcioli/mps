@@ -63,10 +63,22 @@ function brickwork(psi::ITensorMPS.MPS, brick_odd::Matrix, brick_even::Matrix, t
     layerOdd, layerEven = layers(psi, brick_odd, brick_even)
     for i in 1:t
         println("Step $i")
-        layer = iseven(i) ? layerOdd : layerEven
+        layer = isodd(i) ? layerOdd : layerEven
         psi = ITensors.apply(layer, psi, cutoff = cutoff)
     end
     return psi
+end
+
+
+function random_unitary(N::Int)
+    x = (rand(N,N) + rand(N,N)*im) / sqrt(2)
+    f = qr(x)
+    diagR = sign.(real(diag(f.R)))
+    diagR[diagR.==0] .= 1
+    diagRm = diagm(diagR)
+    u = f.Q * diagRm
+    
+    return u
 end
 
 
@@ -152,14 +164,19 @@ end
 function blocking(mps::Union{Vector{ITensors.ITensor},ITensorMPS.MPS}, q::Int; combine_indices = false)
     N = length(mps)
     
-    if q > 13   # itensor only works with tensors up to 13 indices
-        qnew = 2
-        while div(q, qnew) > 13
-            qnew += 1
+    if q > 11   # itensor only works with tensors up to 13 indices
+        if mod(q, 2) == 1
+            throw(DomainError(q, "Blocking only possible for q even if q > 11"))
         end
-        mps = blocking(mps, qnew, combine_indices = true)
+        qnew = 2
+        q_by_qnew = div(q, qnew)
+        while q_by_qnew > 11
+            qnew *= 2
+            q_by_qnew = div(q, qnew)
+        end
+        mps, inds = blocking(mps, qnew, combine_indices = true)
         N = length(mps)
-        q = div(q, qnew)
+        q = q_by_qnew
     end
 
     newN = div(N, q)
@@ -174,7 +191,7 @@ function blocking(mps::Union{Vector{ITensors.ITensor},ITensorMPS.MPS}, q::Int; c
     siteinds = reduce(ITensors.noncommoninds, block_mps[1:end])
     sitegroups = [siteinds[q*(i-1)+1 : q*i] for i in 1:newN]
     if r != 0
-        push!(sitegroups, r > 1 ? siteinds[q * newN : end] : siteinds[end])
+        push!(sitegroups, r > 1 ? siteinds[q * newN : end] : [siteinds[end]])
         newN += 1
     end
     
@@ -189,24 +206,25 @@ end
 
 # Prepare initial state
 
-N = 4
-q_list = [2,]
+N = 72
+q_list = [24]
 avg_list = []
+all_runs_list = []
 err_list = []
-Nruns = 1
-rand = true 
+Nruns = 10
+rand = true
 
-
-test = ITensorMPS.random_mps(ITensors.siteinds("Qubit", 32), linkdims=2)
-
+# Loop over different values of q
 for q in q_list
+    if mod(N, q) != 0
+        throw(DomainError(q, "Inhomogeneous blocking is not supported, choose a q that divides N"))
+    end
+    println("Evaluating blocking size q = $q...")
 
     eps_per_block_array::Vector{Float64} = []
 
+    # Loop over different random mps
     for run in 1:Nruns
-        if mod(run, 100) == 0
-            println("$run done")
-        end
 
         sites = ITensors.siteinds("Qubit", N)
         randMPS = ITensorMPS.random_mps(sites, linkdims=2)
@@ -214,27 +232,25 @@ for q in q_list
 
         testMPS = initialize_vac(N)
         brick = CX * kron(H, Id)
-        testMPS = brickwork(testMPS, brick, brick, 2)
-        #testMPS = apply(CX * kron(H, Id), testMPS, 4)
-        ITensors.orthogonalize!(testMPS, N)
+        #testMPS = brickwork(testMPS, brick, brick, 2)
+        ##testMPS = apply(CX * kron(H, Id), testMPS, 4)
+        #ITensors.orthogonalize!(testMPS, N)
 
-        newN = div(N, q)
+        newN = mod(N,q) == 0 ? div(N,q) : div(N,q)+1
         mps = rand ? randMPS : testMPS
         sites = ITensors.siteinds(mps)
-        data_array = [Dict{String,Any}() for _ in 1:newN]
 
         # block array, polar decomp and save W and P matrices
+        data_array = [Dict{String,Any}() for _ in 1:newN]
+        blocked_mps, blocked_siteinds = blocking(mps, q);
         for i in 1:newN
-            block_i = reduce(*, mps[q*(i-1)+1 : q*i])       # extract q consecutive matrices
-            block_siteinds = sites[q*(i-1)+1 : q*i]
-            W, P = polar(block_i, block_siteinds)
-
+            W, P = polar(blocked_mps[i], blocked_siteinds[i])
             data_array[i]["W"] = W
             data_array[i]["P"] = P
         end
 
         # construct MPS of P matrices
-        blockMPS = [copy(data_array[i]["P"]) for i in 1:newN]
+        blockMPS = [copy(data_array[i]["P"]) for i in 1:newN];
         block_linkinds = ITensors.linkinds(mps)[q:q:end]
         linkinds_dims = [ind.space for ind in block_linkinds]
 
@@ -245,7 +261,9 @@ for q in q_list
             ITensors.replaceinds!(blockMPS[i], ind_to_increase, ind_to_increase')
         end
 
+        ## Start variational optimization to approximate P blocks
 
+        # construct projectors onto |0> for all sites
         zero_projs = []
         for ind in block_linkinds
             vec = [1; [0 for _ in 1:ind.space-1]]
@@ -253,9 +271,9 @@ for q in q_list
             push!(zero_projs, ITensors.ITensor(vec, ind''))
         end
 
-
-        current_env = copy(blockMPS)
-        npairs = newN-1
+        # prepare iteration
+        current_env = copy(blockMPS)        # copy current environment
+        npairs = newN-1                     # number of bell pairs
         W_list::Vector{ITensors.ITensor} = []
         first_sweep = true
         reverse = false
@@ -289,28 +307,38 @@ for q in q_list
 
             # build environment tensor by adding the two |0> projectors
             zero_j = [zero'' for zero in zero_projs[2j-1:2j]]       # add two primes since they must be traced at the end
-            env_tensor = leftmost_block * rightmost_block
-            Winds = ITensors.inds(env_tensor)           # extract indices to apply W
+            env_tensor = leftmost_block * rightmost_block           
+            Winds = ITensors.inds(env_tensor)                       # prepare W's input legs
             env_tensor = env_tensor * zero_j[1] * zero_j[2]         # construct environment tensor Ej
             # svd environment and construct Wj
             Uenv, Senv, Venv_dg = ITensors.svd(env_tensor, Winds, cutoff = 1E-14)       # SVD environment
             u, v = ITensors.commonind(Uenv, Senv), ITensors.commonind(Venv_dg, Senv)
             W_j = Uenv * ITensors.replaceind(Venv_dg, v, u)       # Construct Wj as UVdag
 
-
             newfid = real(tr(Array(Senv, (u, v))))^2
-            println("Step $j: ", newfid)
+            # println("Step $j: ", newfid)
 
+            # stop if fidelity converged
             if isapprox(newfid, fid) && (first_sweep == false)
                 break
             end
             fid = newfid
+
+            # store W_j in W_list
+            if first_sweep
+                push!(W_list, W_j)
+            else
+                Wnew = ITensors.replaceinds(W_j, Winds, Winds'''')
+                Wold = ITensors.replaceinds(W_list[j], Winds'', Winds'''')
+                W_list[j] = Wold * Wnew
+            end
 
             # dim = reduce(*, [ind.space for ind in Winds])
             # W_matrix = reshape(Array(W_j, [Winds; Winds'']), (dim, dim))
             # U_matrix = iso_to_unitary(W_matrix)
             # W_j = ITensors.ITensor(U_matrix, [Winds, Winds''])
 
+            # update current environment by applying Wdag
             Pj, Pjp1 = current_env[j], current_env[j+1]
             update_env = conj(W_j) * Pj * Pjp1
             # replace zero_j inds with Winds (i.e. remove '' from each index)
@@ -320,14 +348,8 @@ for q in q_list
             Pjnew, S, V = ITensors.svd(update_env, ITensors.uniqueinds(Pj, Pjp1), cutoff = 1E-14)
             Pjp1new = S*V
             current_env[j], current_env[j+1] = Pjnew, Pjp1new
-
-            if first_sweep
-                push!(W_list, W_j)
-            else
-                Wnew = ITensors.replaceinds(W_j, Winds, Winds'''')
-                Wold = ITensors.replaceinds(W_list[j], Winds'', Winds'''')
-                W_list[j] = Wold * Wnew
-            end
+            
+            ## while loop end conditions
 
             if npairs == 1
                 break
@@ -350,44 +372,51 @@ for q in q_list
         #W_unitaries = [iso_to_unitary(W) for W in W_matrices]
 
 
-        # Extract unitary matrices that must be applied on bell pairs
-        U_list = []
+        ## Extract unitary matrices that must be applied on bell pairs
+        # here we follow the sequential rg procedure
+        U_list::Vector{Vector{ITensors.ITensor}} = []
         linkinds = ITensors.linkinds(mps)
-# 
+        
         for i in 1:newN
-            block_i = mps[q*(i-1)+1 : q*i]
-# 
+
+            block_i = i < newN ? mps[q*(i-1)+1 : q*i] : mps[q*(i-1)+1 : end]
+   
+            # if i=1 no svd must be done, entire block 1 is already a series of isometries
             if i == 1
                 iR = block_linkinds[1]
                 block_i[end] = ITensors.replaceind(block_i[end], iR, iR')
                 push!(U_list, block_i)
                 continue
             end
-# 
+            
+            # prepare left index of block i
             block_i_Ulist = []
             iL = block_linkinds[i-1]
             local prev_SV
 # 
             for j in 1:q-1
-                A = block_i[j]
-                iR = ITensors.commoninds(A, linkinds)[2]
-                Aprime = j > 1 ? prev_SV*A : A
+                A = block_i[j]                              # j-th tensor in block_i
+                iR = ITensors.commoninds(A, linkinds)[2]    # right link index
+                Aprime = j > 1 ? prev_SV*A : A              # contract SV from previous svd (of the block on the left)
                 Uprime, S, V = ITensors.svd(Aprime, ITensors.uniqueinds(Aprime, iR, iL))
                 push!(block_i_Ulist, Uprime)
                 prev_SV = S*V
             end
+            # now we need to consider the last block C and apply P^-1
             C = block_i[end]
             P = data_array[i]["P"]
-# 
-            if i < newN     #if we are not at the end of the chain
+#           
+            if i < newN     #if we are not at the end of the whole spin chain
+                # extract P indices, convert to matrix and invert
                 PiL, PiR = block_linkinds[i-1:i]
                 dim = reduce(*, linkinds_dims[i-1:i])
                 P_matrix = reshape(Array(P, [PiL', PiR', PiL, PiR]), (dim, dim))
                 Pinv = inv(P_matrix)
-# 
+              
+                # convert back to tensor with inds ready to contract with Ctilde = prev_SV * C          
                 CindR = ITensors.commoninds(C, linkinds)[2]
                 Pinv = ITensors.ITensor(Pinv, [iL, CindR, iL'', CindR'])
-            else
+            else    #same here, only different indices
                 PiL = block_linkinds[i-1]
                 dim = linkinds_dims[i-1]
                 P_matrix = reshape(Array(P, [PiL', PiL]), (dim, dim))
@@ -405,91 +434,67 @@ for q in q_list
         ## Compute scalar product to check fidelity
 # 
         # prepare zero initial states to act with W on them
-        zero_projs = []
+        zero_projs::Vector{ITensors.ITensor} = []
         for ind in block_linkinds
             vec = [1; [0 for _ in 1:ind.space-1]]
             push!(zero_projs, ITensors.ITensor(vec, ind^3))
             push!(zero_projs, ITensors.ITensor(vec, ind^4))
         end
+        # act with W on zeros
         Wlayer = [W_list[i] * zero_projs[2*i-1] * zero_projs[2*i] for i in 1:npairs]
 # 
         # group blocks together
-        block_list = []
+        block_list::Vector{ITensors.ITensor} = []
         mps_primed = conj(mps)'''''
         siteinds = ITensors.siteinds(mps_primed)
+        local left_tensor
         for i in 1:newN
-            block_i = mps_primed[q*(i-1)+1 : q*i]
-            i_siteinds = siteinds[q*(i-1)+1 : q*i]
-            left_tensor = block_i[1] * ITensors.replaceinds(U_list[i][1], ITensors.noprime(i_siteinds), i_siteinds)
+            block_i = i < newN ? mps_primed[q*(i-1)+1 : q*i] : mps_primed[q*(i-1)+1 : end]
+            i_siteinds = i < newN ? siteinds[q*(i-1)+1 : q*i] : siteinds[q*(i-1)+1 : end]
+            left_tensor = (i == 1 ? block_i[1] : block_i[1]*left_tensor)
+            left_tensor *= ITensors.replaceinds(U_list[i][1], ITensors.noprime(i_siteinds), i_siteinds)
+
             for j in 2:q
-                left_tensor = left_tensor * block_i[j] * ITensors.replaceinds(U_list[i][j], ITensors.noprime(i_siteinds), i_siteinds)
+                left_tensor *= block_i[j] * ITensors.replaceinds(U_list[i][j], ITensors.noprime(i_siteinds), i_siteinds)
             end
-            push!(block_list, left_tensor)
+            if i < newN
+                left_tensor *= Wlayer[i]
+            end
         end
-# 
-        left_tensor = block_list[1]
-        for i in 2:newN
-            left_tensor = left_tensor * block_list[i] * Wlayer[i-1]
-        end
-# 
+
+
         fidelity = abs(Array(left_tensor)[1])
-        eps = 1-sqrt(fidelity)
+        @show fidelity
+        eps = abs(1-sqrt(fidelity))
+        if eps < 0
+            throw(DomainError(eps, "error is negative, something went wrong"))
+        end
         eps_per_block = eps/newN
         push!(eps_per_block_array, eps_per_block)
+
+        if mod(run, 100) == 0
+            println("$run done")
+        end
 
     end
 
     avg_perq = mean(eps_per_block_array)
-    err_perq = std(eps_per_block_array)/sqrt(1000)
+    err_perq = std(eps_per_block_array)
 # 
     push!(avg_list, avg_perq)
     push!(err_list, err_perq)
+    push!(all_runs_list, eps_per_block_array)
 
 end
 
-#A = randMPS[3]
-#Astar = conj(A)'
-#
-#delta_n3 = ITensors.delta([ITensors.inds(A)[1], ITensors.inds(Astar)[1]])
-#
-#T = delta_n3 * A * Astar
-#l2, l3 = ITensors.linkinds(randMPS)[2], ITensors.linkinds(randMPS)[3]
-#
-#U,S,V = ITensors.svd(T, (l2, l2'), cutoff = 1E-14)
-#indsS = ITensors.inds(S)
-#
-#delta_l2 = ITensors.delta(l2, l2')
-#@show delta_l2 * T
-#
-#u1 = reshape(Array(U, l2, l2', indsS[1])[:, :, 1], 4)
-#v1 = reshape(Array(V, l3, l3', indsS[2])[:, :, 1], 4)
-#proj = S[1] * u1 * v1'
-#
-#S[indsS[1] => 2, indsS[2] => 2] = 0
-#S[indsS[1] => 3, indsS[2] => 3] = 0
-#S[indsS[1] => 4, indsS[2] => 4] = 0
-#
-#T_trunc = U*S*V
-#reshape(Array(T_trunc, l2, l2', l3, l3'), (4,4))
-## see it is the same as proj
-#
-#delta_l3 = ITensors.delta(l3, l3')
-#@show delta_l2 * T_trunc
-#
-## Convert T to matrix and diagonalize to extract right eigenvector of eigenval=1
-#T_matrix = reshape(Array(T, l2, l2', l3, l3'), (4,4))
-#
-#Um, Sm, Vm = svd(T_matrix)
-#
-#eig = eigen(T_matrix)
-#right_eig = eig.vectors[:,4]
-#alpha = 1/tr(reshape(right_eig, (2,2)))
-#rho = alpha*right_eig
-#
-## Construct the td limit transfer matrix
-#T_inf = rho * [1 0 0 1]
-#
-#R = T_matrix - T_inf
-#
-## Extract rho and reshape
-##sqrt_rho = sqrt(reshape(rho, (2,2)))
+
+swapped_results = [getindex.(all_runs_list,i) for i=1:length(all_runs_list[1])]
+
+Plots.plot(q_list, swapped_results, lc=:gray90, legend=false)
+Plots.plot!(q_list, swapped_results, seriestype=:scatter, mc=:gray90, markersize=:3, legend=false)
+Plots.plot!(q_list, avg_list, lc=:green)
+Plots.plot!(q_list, avg_list, seriestype=:scatter, mc=:green)
+Plots.plot!(ylims = (1E-15, 1), yscale=:log)
+Plots.plot!(title = L"N="*string(N), ylabel = L"\epsilon / M", xlabel = L"q")
+
+#Plots.savefig("D:\\Julia\\MyProject\\Plots\\err_per_block");
