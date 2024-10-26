@@ -18,8 +18,20 @@ CX = [1 0 0 0
       0 0 0 1
       0 0 1 0]
 
-# Apply 2-site tensor to sites b and b+1
-function apply(U::AbstractMatrix, psi::itmps.MPS, b::Integer; cutoff::AbstractFloat = 1E-14)
+"Returns random N x N unitary matrix sampled with Haar measure"
+function random_unitary(N::Int)
+    x = (randn(N,N) + randn(N,N)*im) / sqrt(2)
+    f = qr(x)
+    diagR = sign.(real(diag(f.R)))
+    diagR[diagR.==0] .= 1
+    diagRm = diagm(diagR)
+    u = f.Q * diagRm
+    
+    return u
+end     
+
+"Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
+function apply(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
     psi = it.orthogonalize(psi, b)
     s = it.siteinds(psi)
     op = it.op(U, s[b+1], s[b])
@@ -32,6 +44,7 @@ function apply(U::AbstractMatrix, psi::itmps.MPS, b::Integer; cutoff::AbstractFl
     return psi
 end
 
+
 function initialize_vac(N::Int)
     nsites = N
     sites = it.siteinds("Qubit", nsites)
@@ -39,7 +52,6 @@ function initialize_vac(N::Int)
     psiMPS = itmps.MPS(sites, states)
     return psiMPS
 end
-
 
 
 function entropy(psi::itmps.MPS, b::Integer)  
@@ -54,25 +66,24 @@ function entropy(psi::itmps.MPS, b::Integer)
     return SvN
   end
 
-function layers(psi::itmps.MPS, brick_odd::Matrix, brick_even::Matrix)
+
+function brickwork(psi::itmps.MPS, brick_odd::Matrix, brick_even::Matrix, t::Integer; cutoff = 1E-14)
+    N = length(psi)
     sites = it.siteinds(psi)
     layerOdd = [it.op(brick_odd, sites[b+1], sites[b]) for b in 1:2:(N-1)]
     layerEven = [it.op(brick_even, sites[b+1], sites[b]) for b in 2:2:(N-1)]
-    return layerOdd, layerEven
-end
-
-function brickwork(psi::itmps.MPS, brick_odd::Matrix, brick_even::Matrix, t::Integer; cutoff = 1E-14)
-    layerOdd, layerEven = layers(psi, brick_odd, brick_even)
     for i in 1:t
-        println("Step $i")
+        println("Evolving step $i")
         layer = isodd(i) ? layerOdd : layerEven
         psi = it.apply(layer, psi, cutoff = cutoff)
     end
     return psi
 end
 
+
 "Apply depth-t brickwork of 2-local random unitaries"
 function brickwork(psi::itmps.MPS, t::Integer; cutoff = 1E-14)
+    N = length(psi)
     sites = it.siteinds(psi)
     d = sites[1].space
     for i in 1:t
@@ -81,19 +92,6 @@ function brickwork(psi::itmps.MPS, t::Integer; cutoff = 1E-14)
     end
     return psi
 end
-
-
-function random_unitary(N::Int)
-    x = (randn(N,N) + randn(N,N)*im) / sqrt(2)
-    f = qr(x)
-    diagR = sign.(real(diag(f.R)))
-    diagR[diagR.==0] .= 1
-    diagRm = diagm(diagR)
-    u = f.Q * diagRm
-    
-    return u
-end
-
 
 
 function polar(block::it.ITensor, inds::Vector{it.Index{Int64}})
@@ -131,7 +129,7 @@ function polar_P(block::Vector{it.ITensor}, inds::Vector{it.Index{Int64}})
     return P
 end
 
-
+"Extends m x n isometry to M x M unitary, where M = max(m, n)"
 function iso_to_unitary(V::Union{Matrix, Vector{Float64}})
     nrows, ncols = size(V, 1), size(V, 2)
     dagger = false
@@ -179,7 +177,8 @@ function blocking(mps::Union{Vector{it.ITensor},itmps.MPS}, q::Int)
     return block_mps, sitegroups
 end
 
-function rand_MPS(sites::Vector{<:it.Index}; linkdims=1)
+"Returns mps of Haar random isometries with bond dimension linkdims"
+function rand_MPS(sites::Vector{<:it.Index}, linkdims)
     d = sites[1].space
     D = linkdims
 
@@ -209,13 +208,15 @@ function rand_MPS(sites::Vector{<:it.Index}; linkdims=1)
     return mps
 end
 
+"Converts order-4 ITensor to N x N matrix following the order of indices in 'order'"
 function tensor_to_matrix(T::it.ITensor, order = [1,2,3,4])
     inds = it.inds(T)
     ord_inds = [inds[i] for i in order]
     M = reshape(Array(T, ord_inds), (ord_inds[1].space^2, ord_inds[1].space^2))
     return M
 end
-    
+
+
 function invertMPS(mps::itmps.MPS, tau::Int64, n_sweeps::Int64)
     mps = conj(mps)
     N = length(mps)
@@ -297,7 +298,7 @@ function invertMPS(mps::itmps.MPS, tau::Int64, n_sweeps::Int64)
 
             # evaluate fidelity and stop if converged
             newfid = real(tr(Array(S, (u, v))))^2
-            println("Step $j: ", newfid)
+            #println("Step $j: ", newfid)
 
             #replace gate_ji with optimized one, both in gates_j (used in this loop) and in circuit
             gate_ji_opt = U * it.replaceind(Vdag, v, u)
@@ -367,28 +368,122 @@ siteinds = it.siteinds(testMPS)
 #testMPS = brickwork(testMPS, kron(H, Id), kron(H, Id), 1)
 # brick = CX * kron(H, Id)
 # testMPS = apply(brick, testMPS, 1)
-# testMPS = apply(CX, testMPS, 2)
+# for i in 2:N-1
+#     global testMPS = apply(CX, testMPS, i)
+# end
 # testMPS = rand_MPS(it.siteinds("Qubit", N), linkdims = 4)
 
 
 # create random FDQC of depth 2
-testMPS = brickwork(testMPS, 2)
-# 
-# # measure at half chain
-# zero_projs::Vector{it.ITensor} = []
-# for ind in siteinds
-#     vec = [1; [0 for _ in 1:ind.space-1]]
-#     push!(zero_projs, it.ITensor(kron(vec, vec'), ind, ind'))
-# end
-# 
-# pos = div(N,2)
-# proj = zero_projs[pos]
-# 
-# testMPS[pos] = it.noprime(testMPS[pos]*proj)
-# it.normalize!(testMPS)
+testMPS = brickwork(testMPS, 3)
+
+# measure at half chain
+zero_projs::Vector{it.ITensor} = []
+for ind in siteinds
+    vec = [1; [0 for _ in 1:ind.space-1]]
+    push!(zero_projs, it.ITensor(kron(vec, vec'), ind, ind'))
+end
+
+pos = div(N,2)
+proj = zero_projs[pos]
+
+testMPS[pos] = it.noprime(testMPS[pos]*proj)
+it.normalize!(testMPS)
 
 
-fid, sweep = invertMPS(testMPS, 2, 100)
+fid, sweep = invertMPS(testMPS, 3, 100)
 println("Algorithm stopped after $sweep sweeps \nFidelity = $fid")
 
 #unitaries = [reshape(Array(circ[i,j], it.inds(circ[i,j])), (4, 4)) for i in 1:tau, j in 1:div(N,2)]
+
+## function execute(N::Int64; state_depth = 2, n_sweeps = 100, n_runs = 1000)
+## 
+##     fid1_depth_run::Vector{Vector{Float64}} = []
+##     fid2_depth_run::Vector{Vector{Float64}} = []
+##     avg_fid1::Vector{Float64} = []
+##     avg_fid2::Vector{Float64} = []
+## 
+##     for depth in 1:5
+##         println("Running depth $depth")
+##         fid1_run::Vector{Float64} = []
+##         fid2_run::Vector{Float64} = []
+## 
+##         for run in 1:n_runs
+##             if mod(run, 100) == 0
+##                 println("Run $run of n_runs")
+##             end
+##             # create random FDQC of depth 2
+##             testMPS = initialize_vac(N)
+##             siteinds = it.siteinds(testMPS)
+##             testMPS = brickwork(testMPS, state_depth)
+## 
+##             # try to invert it
+##             fid1, sweep1 = invertMPS(testMPS, depth, n_sweeps)
+##             err1 = 1-sqrt(fid1)
+##             push!(fid1_run, err1)
+## 
+##             # measure middle qubit
+##             pos = div(N,2)
+##             zero_projs::Vector{it.ITensor} = []
+##             for ind in siteinds
+##                 vec = [1; [0 for _ in 1:ind.space-1]]
+##                 push!(zero_projs, it.ITensor(kron(vec, vec'), ind, ind'))
+##             end
+##             proj = zero_projs[pos]
+##             testMPS[pos] = it.noprime(testMPS[pos]*proj)
+##             it.normalize!(testMPS)
+## 
+##             # try to invert measured one
+##             fid2, sweep2 = invertMPS(testMPS, depth, 100)
+##             err2 = 1-sqrt(fid2)
+##             push!(fid2_run, err2)
+##         end
+##         push!(fid1_depth_run, fid1_run)
+##         push!(fid2_depth_run, fid2_run)
+##         push!(avg_fid1, mean(fid1_run))
+##         push!(avg_fid2, mean(fid2_run))
+##     end
+## 
+##     return fid1_depth_run, fid2_depth_run, avg_fid1, avg_fid2
+## 
+## end
+## 
+## nruns = 10
+## err1_all, err2_all, err1, err2 = execute(21, state_depth = 3, n_runs = nruns)
+## 
+## swapped_results1 = [getindex.(err1_all,i) for i=1:length(err1_all[1])]
+## swapped_results2 = [getindex.(err2_all,i) for i=1:length(err2_all[1])]
+## 
+## Plots.plot(1:5, swapped_results1, lc=:gray90, primary=false)
+## Plots.plot!(1:5, swapped_results1, seriestype=:scatter, mc=:gray90, markersize=:3, primary=false)
+## Plots.plot!(1:5, err1, lc=:green, primary=false)
+## Plots.plot!(1:5, err1, seriestype=:scatter, mc=:green, legend=true, label="Depth-3")
+## Plots.plot!(yscale=:log)
+## Plots.plot!(title = L"N=21", ylabel = L"\epsilon = 1-|\langle \psi_2|\psi_\tau\rangle|", xlabel = L"\tau")
+## 
+## Plots.plot!(1:5, swapped_results2, lc=:gray90, primary=false)
+## Plots.plot!(1:5, swapped_results2, seriestype=:scatter, mc=:gray90, markersize=:3, primary=false)
+## Plots.plot!(1:5, err2, lc=:red, primary=false)
+## Plots.plot!(1:5, err2, seriestype=:scatter, mc=:red, label="Depth-3 + measure", legend=:bottomright)
+## #Plots.plot!(title = L"N="*string(N), ylabel = L"\epsilon / M", xlabel = L"\tau")
+## #Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\err_depth3.pdf");
+## 
+## 
+## fid1, fid2 = 1 .- err1, 1 .- err2
+## 
+## swapped_fid1 = [1 .- swapped_results1[i, 1] for i in 1:nruns]
+## swapped_fid2 = [1 .- swapped_results2[i, 1] for i in 1:nruns]
+## 
+## Plots.plot(1:5, swapped_fid1, lc=:gray90, primary=false)
+## Plots.plot!(1:5, swapped_fid1, seriestype=:scatter, mc=:gray90, markersize=:3, primary=false)
+## 
+## Plots.plot!(1:5, swapped_fid2, lc=:gray90, primary=false)
+## Plots.plot!(1:5, swapped_fid2, seriestype=:scatter, mc=:gray90, markersize=:3, primary=false)
+## 
+## Plots.plot!(1:5, fid1, lc=:green, primary=false)
+## Plots.plot!(1:5, fid1, seriestype=:scatter, mc=:green, label="Depth-3", legend=:bottomright)
+## Plots.plot!(ylims = (1E-1, 1.2), yscale=:log)
+## Plots.plot!(title = L"N=21", ylabel = L"F = |\langle \psi_2|\psi_\tau\rangle|", xlabel = L"\tau")
+## Plots.plot!(1:5, fid2, lc=:red, primary=false)
+## Plots.plot!(1:5, fid2, seriestype=:scatter, mc=:red, label="Depth-3 + measure")
+## #Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\fid_depth3.pdf");
