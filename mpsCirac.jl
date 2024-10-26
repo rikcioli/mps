@@ -1,7 +1,9 @@
 import ITensorMPS
 import ITensors
 import Plots
-using LaTeXStrings, LinearAlgebra, Statistics
+using LaTeXStrings, LinearAlgebra, Statistics, Random
+using DelimitedFiles
+
 
 H = [1 1
     1 -1]/sqrt(2)
@@ -17,7 +19,7 @@ CX = [1 0 0 0
       0 0 1 0]
 
 # Apply 2-site tensor to sites b and b+1
-function apply(U::AbstractMatrix, psi::ITensorMPS.MPS, b::Integer; cutoff::AbstractFloat = 1E-8)
+function apply(U::AbstractMatrix, psi::ITensorMPS.MPS, b::Integer; cutoff::AbstractFloat = 1E-14)
     psi = ITensors.orthogonalize(psi, b)
     s = ITensors.siteinds(psi)
     op = ITensors.op(U, s[b+1], s[b])
@@ -69,9 +71,21 @@ function brickwork(psi::ITensorMPS.MPS, brick_odd::Matrix, brick_even::Matrix, t
     return psi
 end
 
+"Apply depth-t brickwork of 2-local random unitaries"
+function brickwork(psi::itmps.MPS, t::Integer; cutoff = 1E-14)
+    N = length(psi)
+    sites = it.siteinds(psi)
+    d = sites[1].space
+    for i in 1:t
+        layer = [it.op(random_unitary(d^2), sites[b+1], sites[b]) for b in (isodd(i) ? 1 : 2):2:(N-1)]
+        psi = it.apply(layer, psi, cutoff = cutoff)
+    end
+    return psi
+end
+
 
 function random_unitary(N::Int)
-    x = (rand(N,N) + rand(N,N)*im) / sqrt(2)
+    x = (randn(N,N) + randn(N,N)*im) / sqrt(2)
     f = qr(x)
     diagR = sign.(real(diag(f.R)))
     diagR[diagR.==0] .= 1
@@ -99,6 +113,23 @@ function polar(block::ITensors.ITensor, inds::Vector{ITensors.Index{Int64}})
     W = U * V
 
     return W, P
+end
+
+"Computes polar decomposition but only returning P (efficient)"
+function polar_P(block::Vector{ITensors.ITensor}, inds::Vector{ITensors.Index{Int64}})
+    q = length(block)
+    block_conj = [conj(tens)' for tens in block]
+    left_tensor = block[1] * block_conj[1] * ITensors.delta(inds[1], inds[1]')
+    for j in 2:q
+        left_tensor *= block[j] * block_conj[j] * ITensors.delta(inds[j], inds[j]')
+    end
+
+    low_inds = reduce(ITensors.noncommoninds, [block; inds])
+    dim = reduce(*, [ind.space for ind in low_inds])
+    mat = reshape(Array(left_tensor, (low_inds', low_inds)), (dim, dim))
+    P = sqrt(mat)
+    P = ITensors.ITensor(P, (low_inds', low_inds))
+    return P
 end
 
 
@@ -134,7 +165,7 @@ function extract_rho(block::ITensors.ITensor, inds::NTuple{3, ITensors.Index{Int
     return sqrt_rho
 end
 
-function iso_to_unitary(V::Matrix)
+function iso_to_unitary(V::Union{Matrix, Vector{Float64}})
     nrows, ncols = size(V, 1), size(V, 2)
     dagger = false
     if ncols > nrows
@@ -161,58 +192,74 @@ function iso_to_unitary(V::Matrix)
 end
 
 "Performs blocking on an MPS, q sites at a time. Returns the blocked MPS as an array of ITensors, together with the siteinds."
-function blocking(mps::Union{Vector{ITensors.ITensor},ITensorMPS.MPS}, q::Int; combine_indices = false)
+function blocking(mps::Union{Vector{ITensors.ITensor},ITensorMPS.MPS}, q::Int)
     N = length(mps)
-    
-    if q > 11   # itensor only works with tensors up to 13 indices
-        if mod(q, 2) == 1
-            throw(DomainError(q, "Blocking only possible for q even if q > 11"))
-        end
-        qnew = 2
-        q_by_qnew = div(q, qnew)
-        while q_by_qnew > 11
-            qnew *= 2
-            q_by_qnew = div(q, qnew)
-        end
-        mps, inds = blocking(mps, qnew, combine_indices = true)
-        N = length(mps)
-        q = q_by_qnew
-    end
-
     newN = div(N, q)
     r = mod(N, q)
 
-    block_mps = [reduce(*, mps[q*(i-1)+1 : q*i]) for i in 1:newN] 
+    block_mps = [mps[q*(i-1)+1 : q*i] for i in 1:newN] 
     if r != 0
-        push!(block_mps, r > 1 ? reduce(*, mps[q * newN : end]) : mps[end])
+        push!(block_mps, r > 1 ? mps[q * newN : end] : [mps[end]])
     end
 
-    
-    siteinds = reduce(ITensors.noncommoninds, block_mps[1:end])
+    siteinds = reduce(ITensors.noncommoninds, mps[1:end])
     sitegroups = [siteinds[q*(i-1)+1 : q*i] for i in 1:newN]
     if r != 0
         push!(sitegroups, r > 1 ? siteinds[q * newN : end] : [siteinds[end]])
         newN += 1
     end
-    
-    if combine_indices
-        combiners = [ITensors.combiner(sitegroups[i]; tags="c$i") for i in 1:newN]
-        block_mps = [combiners[i]*block_mps[i] for i in 1:newN]
-    end
 
     return block_mps, sitegroups
 end
 
+function rand_MPS(sites::Vector{<:ITensors.Index}; linkdims=1)
+    d = sites[1].space
+    D = linkdims
+
+    mps = ITensorMPS.MPS(sites, linkdims = D)
+    links = ITensors.linkinds(mps)
+
+    U0 = ITensors.ITensor(random_unitary(d*D), (sites[1], links[1]', links[1], sites[1]'))
+    U_list = [ITensors.ITensor(random_unitary(d*D), (sites[i], links[i-1], links[i], sites[i]')) for i in 2:N-1]
+    UN = ITensors.ITensor(random_unitary(d*D), (sites[N], links[N-1], links[N-1]', sites[N]'))
+
+    zero_projs::Vector{ITensors.ITensor} = [ITensors.ITensor([1; [0 for _ in 2:d]], site') for site in sites]
+    zero_L = ITensors.ITensor([1; [0 for _ in 2:D]], links[1]')
+    zero_R = ITensors.ITensor([1; [0 for _ in 2:D]], links[N-1]')
+
+    U0 *= zero_L
+    UN *= zero_R
+    U_list = [U0; U_list; UN]
+
+    tensors = [zero_projs[i]*U_list[i] for i in 1:N]
+
+    for i in 1:N
+        mps[i] = tensors[i]
+    end
+    ITensors.orthogonalize!(mps, N)
+    ITensors.normalize!(mps)
+
+    return mps
+end
+    
 
 # Prepare initial state
 
-N = 72
-q_list = [24]
-avg_list = []
-all_runs_list = []
-err_list = []
-Nruns = 10
-rand = true
+N = 120
+q_list = [i for i in 2:2:12]
+avg_list::Vector{Float64} = []
+all_runs_list::Vector{Vector{Float64}} = []
+err_list::Vector{Float64} = []
+Nruns = 100
+random = true
+
+neg_eps_pos::Vector{Int64} = []
+t_vs_q = []
+
+t=4
+
+for t in 1:6
+    println("Evaluating depth t = $t...")
 
 # Loop over different values of q
 for q in q_list
@@ -226,31 +273,23 @@ for q in q_list
     # Loop over different random mps
     for run in 1:Nruns
 
-        sites = ITensors.siteinds("Qubit", N)
-        randMPS = ITensorMPS.random_mps(sites, linkdims=2)
-        ITensors.orthogonalize!(randMPS, N)
+        #sites = ITensors.siteinds("Qubit", N)
+        #randMPS = rand_MPS(sites, linkdims=2)
+        #ITensors.orthogonalize!(randMPS, N)
 
         testMPS = initialize_vac(N)
-        brick = CX * kron(H, Id)
-        #testMPS = brickwork(testMPS, brick, brick, 2)
-        ##testMPS = apply(CX * kron(H, Id), testMPS, 4)
-        #ITensors.orthogonalize!(testMPS, N)
+        testMPS = brickwork(testMPS, t)
+        #testMPS = apply(CX * kron(H, Id), testMPS, 4)
+        ITensors.orthogonalize!(testMPS, N)
 
         newN = mod(N,q) == 0 ? div(N,q) : div(N,q)+1
-        mps = rand ? randMPS : testMPS
+        mps = testMPS
         sites = ITensors.siteinds(mps)
 
-        # block array, polar decomp and save W and P matrices
-        data_array = [Dict{String,Any}() for _ in 1:newN]
-        blocked_mps, blocked_siteinds = blocking(mps, q);
-        for i in 1:newN
-            W, P = polar(blocked_mps[i], blocked_siteinds[i])
-            data_array[i]["W"] = W
-            data_array[i]["P"] = P
-        end
-
-        # construct MPS of P matrices
-        blockMPS = [copy(data_array[i]["P"]) for i in 1:newN];
+        # block array
+        blocked_mps, blocked_siteinds = blocking(mps, q)
+        # polar decomp and store P matrices in array
+        blockMPS = [polar_P(blocked_mps[i], blocked_siteinds[i]) for i in 1:newN]
         block_linkinds = ITensors.linkinds(mps)[q:q:end]
         linkinds_dims = [ind.space for ind in block_linkinds]
 
@@ -404,13 +443,13 @@ for q in q_list
             end
             # now we need to consider the last block C and apply P^-1
             C = block_i[end]
-            P = data_array[i]["P"]
+            P = blockMPS[i]
 #           
             if i < newN     #if we are not at the end of the whole spin chain
                 # extract P indices, convert to matrix and invert
                 PiL, PiR = block_linkinds[i-1:i]
                 dim = reduce(*, linkinds_dims[i-1:i])
-                P_matrix = reshape(Array(P, [PiL', PiR', PiL, PiR]), (dim, dim))
+                P_matrix = reshape(Array(P, [PiL'', PiR', PiL, PiR]), (dim, dim))
                 Pinv = inv(P_matrix)
               
                 # convert back to tensor with inds ready to contract with Ctilde = prev_SV * C          
@@ -419,7 +458,7 @@ for q in q_list
             else    #same here, only different indices
                 PiL = block_linkinds[i-1]
                 dim = linkinds_dims[i-1]
-                P_matrix = reshape(Array(P, [PiL', PiL]), (dim, dim))
+                P_matrix = reshape(Array(P, [PiL'', PiL]), (dim, dim))
                 Pinv = inv(P_matrix)
 # 
                 Pinv = ITensors.ITensor(Pinv, [iL, iL''])
@@ -464,11 +503,13 @@ for q in q_list
 
 
         fidelity = abs(Array(left_tensor)[1])
-        @show fidelity
-        eps = abs(1-sqrt(fidelity))
+
+        eps = 1-sqrt(fidelity)
         if eps < 0
-            throw(DomainError(eps, "error is negative, something went wrong"))
+            println("error is negative, saving -err at position $run")
+            push!(neg_eps_pos, run)
         end
+        eps = abs(eps)
         eps_per_block = eps/newN
         push!(eps_per_block_array, eps_per_block)
 
@@ -485,6 +526,14 @@ for q in q_list
     push!(err_list, err_perq)
     push!(all_runs_list, eps_per_block_array)
 
+    # break if it reached convergence
+    if avg_perq < 1E-14
+        push!(t_vs_q, (t, q))
+        break
+    end
+
+end
+
 end
 
 
@@ -494,7 +543,9 @@ Plots.plot(q_list, swapped_results, lc=:gray90, legend=false)
 Plots.plot!(q_list, swapped_results, seriestype=:scatter, mc=:gray90, markersize=:3, legend=false)
 Plots.plot!(q_list, avg_list, lc=:green)
 Plots.plot!(q_list, avg_list, seriestype=:scatter, mc=:green)
-Plots.plot!(ylims = (1E-15, 1), yscale=:log)
+Plots.plot!(ylims = (1E-20, 1), yscale=:log)
 Plots.plot!(title = L"N="*string(N), ylabel = L"\epsilon / M", xlabel = L"q")
 
-#Plots.savefig("D:\\Julia\\MyProject\\Plots\\err_per_block");
+#Plots.savefig("D:\\Julia\\MyProject\\Plots\\err_per_block_1600.pdf");
+
+#writedlm( "all_runs_list_1600.csv",  all_runs_list, ',')
