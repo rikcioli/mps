@@ -292,6 +292,7 @@ function invertMPS(mps::itmps.MPS, tau::Int64; n_sweeps::Int64)
     # create random circuit instead
     circuit = [it.prime(it.ITensor(random_unitary(4), siteinds[2*j-mod(i,2)], siteinds[2*j-mod(i,2)+1], siteinds[2*j-mod(i,2)]', siteinds[2*j-mod(i,2)+1]'), tau-i) for i in 1:tau, j in 1:div(N,2)]
 
+    # construct projectors onto |0> for all sites
     zero_projs::Vector{it.ITensor} = []
     for ind in siteinds
         vec = [1; [0 for _ in 1:ind.space-1]]
@@ -307,7 +308,6 @@ function invertMPS(mps::itmps.MPS, tau::Int64; n_sweeps::Int64)
     if tau > 1
         leftmost_block *= reduce(*, left_deltas)
     end
-
     push!(L_blocks, leftmost_block)
 
     # construct R_N
@@ -315,7 +315,7 @@ function invertMPS(mps::itmps.MPS, tau::Int64; n_sweeps::Int64)
     push!(R_blocks, rightmost_block) 
 
     # contract everything on the right and save rightmost_block at each intermediate step
-    # must be done only the first time, when j=2
+    # must be done only the first time, when j=2 (so contract up to j=3)
     for k in (N-1):-1:3
         # extract right gates associated with site k
         right_gates_k = [circuit[i, div(k,2)+mod(k,2)] for i in (2-mod(k,2)):2:tau]
@@ -356,7 +356,7 @@ function invertMPS(mps::itmps.MPS, tau::Int64; n_sweeps::Int64)
             U, S, Vdag = it.svd(env, inds, cutoff = 1E-14)
             u, v = it.commonind(U, S), it.commonind(Vdag, S)
 
-            # evaluate fidelity and stop if converged
+            # evaluate fidelity
             newfid = real(tr(Array(S, (u, v))))^2
             #println("Step $j: ", newfid)
 
