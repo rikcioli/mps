@@ -6,45 +6,65 @@ import Plots
 using LaTeXStrings, LinearAlgebra, Statistics, Random
 using DelimitedFiles
 
+
+
 # Prepare initial state
+q_found = []
+tau_found = []
+eps_array = [0.5, 0.2, 0.1, 0.05, 0.02, 0.01]
+q_list = [2,3,4,5,6,10]
+tau_list = [i for i in 1:10]
 
-N = 10
-tau = 2
-inverter_tau = 4 # 8 IS MAX TO CONTRACT ENVIRONMENT
 
-"Select case:
-1: FDQC of depth tau
-2: Random MPS of bond dim tau
-3: GHZ"
-case = 1
-proj = []
+N = 60
+eps = 0.1 
 
-# GHZ
+# Random bond 2 mps
+testMPS = mt.randMPS(it.siteinds("Qubit", N), 2)
 
-# Random bond D mps
-# testMPS = rand_MPS(it.siteinds("Qubit", N), linkdims = 4)
+for eps in eps_array
+    println("\nAssuming error threshold eps = $eps\n")
 
-let mps
-    if case == 1
-        # Random FDQC of depth tau
-        mps = mt.initialize_fdqc(N, tau)
-
-        if length(proj) > 0
-            mps = mt.project_tozero(mps, proj)
+    while true
+        q = q_list[1]
+        println("Inverting with q = $q...")
+        fid, sweep = mt.invertMPSMalz(testMPS, q, err = eps, n_sweeps = 1000)
+        err = 1-sqrt(fid)
+        println("Inverted q = $q with error $err, converged in $sweep sweeps")
+        if err < eps
+            push!(q_found, q)
+            break
+        else
+            global q_list = q_list[2:end]
         end
-
-    elseif case == 2
-        mps = mt.randMPS(it.siteinds("Qubit", N), tau)
-    
-    elseif case == 3
-        mps = mt.initialize_ghz(N)
     end
 
-    fid, sweep = mt.invertMPS(mps, inverter_tau, n_sweeps = 1000)
-    println("Algorithm stopped after $sweep sweeps \nFidelity = $fid")
+    while true
+        tau = tau_list[1]
+        println("Inverting with tau = $tau...")
+        fid, sweep = mt.invertMPS(testMPS, tau, err = eps, n_sweeps = 1000)
+        err = 1-sqrt(fid)
+        println("Inverted tau = $tau with error $err, converged in $sweep sweeps")
+        if err < eps
+            push!(tau_found, tau)
+            break
+        else
+            global tau_list = tau_list[2:end]
+        end
+    end
+
 end
 
 
+Plots.plot(title = L"N=60, \ D=2", ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
+Plots.plot!(eps_array, tau_found, lc=:green, primary=false)
+Plots.plot!(eps_array, tau_found, seriestype=:scatter, mc=:green, legend=true, label="Variational")
+
+Plots.plot!(eps_array, 2 .* q_found .- 1, lc=:red, primary=false)
+Plots.plot!(eps_array, 2 .* q_found .- 1, seriestype=:scatter, mc=:red, label="Malz", legend=:bottomright)
+Plots.plot!(xscale=:log)
+#Plots.plot!(title = L"N="*string(N), ylabel = L"\epsilon / M", xlabel = L"\tau")
+Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\MalzVSPollmann.pdf");
 
 
 
