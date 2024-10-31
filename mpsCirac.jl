@@ -180,7 +180,7 @@ for q in q_list
 
             j = reverse ? j-1 : j+1
         end
-
+        println(fid)
         # Save W matrices
         #W_matrices = [reshape(Array(W, it.inds(W)), (it.inds(W)[1].space^2, it.inds(W)[1].space^2)) for W in W_list]
         #W_unitaries = [iso_to_unitary(W) for W in W_matrices]
@@ -270,7 +270,7 @@ for q in q_list
         end
 
 
-        fidelity = abs(Array(left_tensor)[1])
+        fidelity = abs2(Array(left_tensor)[1])
 
         eps = 1-sqrt(fidelity)
         if eps < 0
