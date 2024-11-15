@@ -107,16 +107,17 @@ end
 
 "Project sites indexed by 'positions' array to zero. Normalizes at the end"
 function project_tozero(psi::itmps.MPS, positions::Vector{Int64})
-    psi = copy(psi)
-    N = length(psi)
+    psi = deepcopy(psi)
     sites = it.siteinds(psi)
     for b in positions
+        it.orthogonalize!(psi, b)
         ind = sites[b]
         zero_vec = [1; [0 for _ in 1:ind.space-1]]
         zero_proj = it.ITensor(kron(zero_vec, zero_vec'), ind, ind')
-        psi[b] = it.noprime(psi[b]*zero_proj)
+        new_psib = psi[b]*zero_proj
+        norm_psi = real(Array(new_psib * conj(new_psib))[1])
+        psi[b] = it.noprime(new_psib/sqrt(norm_psi))
     end
-    it.normalize!(psi)
     return psi
 end
 
@@ -176,8 +177,8 @@ function iso_to_unitary(V::Union{Matrix, Vector{Float64}})
     V = V[:, vec(sum(abs.(V), dims=1) .> 1E-10)]
     nrows, ncols = size(V, 1), size(V, 2)
 
-    bitlenght = length(digits(nrows-1, base=2))     # find number of sites of dim 2
-    D = 2^bitlenght
+    bitlength = length(digits(nrows-1, base=2))     # find number of sites of dim 2
+    D = 2^bitlength
 
     U = zeros(ComplexF64, (D, D))
     U[1:nrows, 1:ncols] = V
@@ -192,10 +193,16 @@ function iso_to_unitary(V::Union{Matrix, Vector{Float64}})
 end
 
 "Convert unitary to MPO via repeated svd"
-function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}, d = 2)
+function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}, d = 2; siteinds = nothing, skip_qudits = 0)
     D = size(U, 1)
     N = length(digits(D-1, base=d))     # N = logd(D)
-    sites = it.siteinds(d, N)
+
+    if isnothing(siteinds)
+        siteinds = it.siteinds(d, N)
+        skip_qudits = 0
+    end
+
+    sites = siteinds[1+skip_qudits:N+skip_qudits]
     mpo::Vector{it.ITensor} = []
 
     block = U
@@ -237,7 +244,40 @@ function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}, d = 2)
     end_tensor = it.ITensor(block, link, sites[end]', sites[end])
     push!(mpo, end_tensor)
 
-    return mpo, sites
+    # add identities left and right for every siteind that is not in sites
+    left_deltas::Vector{it.ITensor} = []
+    right_deltas::Vector{it.ITensor} = []
+    for left_site in siteinds[1:skip_qudits]
+        push!(left_deltas, it.delta(left_site', left_site))
+    end
+    for right_site in siteinds[N+1+skip_qudits:end]
+        push!(right_deltas, it.delta(right_site', right_site))
+    end
+
+    mpo = [left_deltas; mpo; right_deltas]
+    mpo_final = itmps.MPO(mpo)
+    it.orthogonalize!(mpo_final, length(siteinds))
+
+    return mpo_final
+end
+
+"multiply Vector{ITensors.ITensor} object together. Indices have to match in advance." 
+function Base.:*(mpo1::Vector{it.ITensor}, mpo2::Vector{it.ITensor})
+    if length(mpo1) != length(mpo2)
+        throw(DomainError, "The two objects have different length")
+    end
+    N = length(mpo1)
+    mpo = [mpo1[i]*mpo2[i] for i in 1:N]
+    for j in 1:N-1
+        linkinds = it.commoninds(mpo[j], mpo[j+1])
+        if length(linkinds) > 1
+            combiner = it.combiner(linkinds)
+            mpo[j] *= combiner
+            mpo[j+1] *= combiner
+        end
+    end
+
+    return mpo
 end
 
 
@@ -326,9 +366,9 @@ function extract_rho(block::it.ITensor, inds::NTuple{3, it.Index{Int64}})
     return sqrt_rho
 end
 
-"Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-quDit unitaries that approximates it;
+"Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertBW(mpo::Vector{it.ITensor}, tau::Int64, input_inds::Vector{<:it.Index}; D = 2, output_inds = nothing, err = 1E-6, n_sweeps = 1000)
+function invertBW(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}; d = 2, output_inds = nothing, conv_err = 1E-5, n_sweeps = 10000)
     N = length(mpo)
     siteinds = input_inds
     mpo_mode = !isnothing(output_inds)
@@ -340,7 +380,7 @@ function invertBW(mpo::Vector{it.ITensor}, tau::Int64, input_inds::Vector{<:it.I
     # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
     circuit::Vector{Vector{it.ITensor}} = []
     for i in 1:tau
-        layer_i = [it.prime(it.ITensor(random_unitary(D^2), siteinds[2*j-mod(i,2)], siteinds[2*j-mod(i,2)+1], siteinds[2*j-mod(i,2)]', siteinds[2*j-mod(i,2)+1]'), tau-i) for j in 1:(div(N,2)-mod(N+1,2)*mod(i+1,2))]
+        layer_i = [it.prime(it.ITensor(random_unitary(d^2), siteinds[2*j-mod(i,2)], siteinds[2*j-mod(i,2)+1], siteinds[2*j-mod(i,2)]', siteinds[2*j-mod(i,2)+1]'), tau-i) for j in 1:(div(N,2)-mod(N+1,2)*mod(i+1,2))]
         push!(circuit, layer_i)
     end
 
@@ -374,9 +414,18 @@ function invertBW(mpo::Vector{it.ITensor}, tau::Int64, input_inds::Vector{<:it.I
         u, v = it.commonind(U, S), it.commonind(Vdag, S)
 
         # evaluate fidelity
-        newfid = real(tr(Array(S, (u, v))))^2
+        newfid = real(tr(Array(S, (u, v))))
         gate_ji_opt = U * it.replaceind(Vdag, v, u)
         circuit[1][1] = gate_ji_opt
+
+        if mpo_mode
+            newfid /= 2^N # normalize if mpo mode
+            for i in 1:N
+                it.replaceind!(mpo[i], new_outinds[i], output_inds[i])
+            end
+        end
+
+        println("Matrix is 2-local, converged to fidelity $newfid immediately")
         return circuit, newfid, 0
     end
             
@@ -415,7 +464,7 @@ function invertBW(mpo::Vector{it.ITensor}, tau::Int64, input_inds::Vector{<:it.I
     # start the loop
     rev = false
     first_sweep = true
-    fid, newfid = 1, 0
+    fid, newfid = 0, 0
     j = 2  
     sweep = 0
 
@@ -480,13 +529,15 @@ function invertBW(mpo::Vector{it.ITensor}, tau::Int64, input_inds::Vector{<:it.I
             circuit[i][div(j,2) + mod(i,2)*mod(j,2)] = gate_ji_opt
         end
 
-        ## while loop end conditions
+        # while loop end conditions
+        if newfid >= 1
+            newfid = 1
+            break
+        end
 
-        ## if isapprox(newfid, fid) && (first_sweep == false)
-        ##     break
-        ## end
-
-        if abs((newfid - fid)/fid) < err
+        # compare the relative increase in frobenius norm
+        ratio = 1 - sqrt((1-newfid)/(1-fid))
+        if ratio < conv_err && first_sweep == false
             break
         end
         fid = newfid
@@ -532,7 +583,7 @@ function invertBW(mpo::Vector{it.ITensor}, tau::Int64, input_inds::Vector{<:it.I
 
     end
 
-    if !isnothing(output_inds)
+    if mpo_mode
         for i in 1:N
             it.replaceind!(mpo[i], new_outinds[i], output_inds[i])
         end
@@ -544,19 +595,69 @@ function invertBW(mpo::Vector{it.ITensor}, tau::Int64, input_inds::Vector{<:it.I
 
 end
 
+"Calls invertBW for Vector{ITensor} mpo input with increasing inversion depth tau until it converges with fidelity F = 1-err_to_one"
+function invertBW(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}; err_to_one = 1E-6, start_tau = 1, kargs...)
+    println("Tolerance $err_to_one, starting from depth $start_tau")
+    tau = start_tau
+    found = false
+
+    local bw, fid, sweep
+    while !found
+        println("Attempting depth $tau...")
+        bw, fid, sweep = invertBW(mpo, tau, input_inds; kargs...)
+
+        if abs(1-fid) < err_to_one
+            found = true
+            break
+        end
+        
+        if tau > 9
+            println("Attempt stopped at tau = $tau, ITensor cannot go above")
+            break
+        end
+
+        tau += 1
+    end
+
+    return bw, fid, sweep, tau
+end
+
 "Wrapper for ITensorsMPS.MPS input. Calls invertBW by first conjugating mps (mps to invert must be above)"
-function invertBW(mps::itmps.MPS, tau::Int64; kargs...)
+function invertBW(mps::itmps.MPS; tau = 0, kargs...)
+    obj = typeof(mps)
+    println("Attempting inversion of $obj")
     mps = conj(mps)
-    N = length(mps)
-    it.orthogonalize!(mps, N)
     siteinds = it.siteinds(mps)
 
-    bw, fid, sweep = invertBW(mps[1:end], tau, siteinds; kargs...)
-    return bw, fid, sweep
+    if iszero(tau)
+        results = invertBW(mps[1:end], siteinds; kargs...)
+    else
+        results = invertBW(mps[1:end], tau, siteinds; kargs...)
+    end
+    return results
+end
+
+"Wrapper for ITensorsMPS.MPO input. Calls invertBW by first conjugating and extracting upper and lower indices"
+function invertBW(mpo::itmps.MPO; tau = 0, kargs...)
+    obj = typeof(mpo)
+    println("Attempting inversion of $obj")
+    mpo = conj(mpo)
+    allinds = reduce(vcat, it.siteinds(mpo))
+    siteinds = it.inds(allinds, plev = 0)
+    outinds = it.uniqueinds(allinds, siteinds)
+
+    if iszero(tau)
+        results = invertBW(mpo[1:end], siteinds; output_inds = outinds, kargs...)
+    else
+        results = invertBW(mpo[1:end], tau, siteinds; output_inds = outinds, kargs...)
+    end
+    return results
 end
 
 "Wrapper for ITensors.ITensor input. Calls invertBW on isometry V by first promoting it to a unitary matrix U"
-function invertBW(V::it.ITensor, tau::Int64, input_ind::it.Index; kargs...)
+function invertBW(V::it.ITensor, input_ind::it.Index; tau = 0, kargs...)
+    obj = typeof(V)
+    println("Attempting inversion of $obj")
     input_dim = input_ind.space
     output_inds = it.uniqueinds(V, input_ind)
     output_dim = reduce(*, [ind.space for ind in output_inds])
@@ -566,90 +667,94 @@ function invertBW(V::it.ITensor, tau::Int64, input_ind::it.Index; kargs...)
     Umat = iso_to_unitary(Vmat)
     Umpo, sites = unitary_to_mpo(Umat)
 
-    bw, fid, sweep = invertBW(Umpo, tau, sites; output_inds = sites', kargs...)
-    return bw, fid, sweep
+    if iszero(tau)
+        results = invertBW(Umpo, sites; output_inds = sites', kargs...)
+    else
+        results = invertBW(Umpo, tau, sites; output_inds = sites', kargs...)
+    end
+    return results
 end
 
-"Calls invertBW for ITensor input with increasing inversion depth tau until it converges with fidelity F = 1-err_to_one"
-function invertBW(V::it.ITensor, input_ind::it.Index; err_to_one = 1E-6, kargs...)
-    tau = 1
-    found = false
 
-    local bw, fid, sweep
-    while !found
-        println("Attempting inversion of unitary with depth $tau, tolerance $err_to_one")
-        bw, fid, sweep = invertBW(V, tau, input_ind; kargs...)
-        println("Convergence reached at fidelity $fid")
 
-        if abs(1-fid) < err_to_one
-            found = true
+
+function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, eps_V = 1E-2, kargs...)
+    N = length(mps)
+    siteinds = it.siteinds(mps)
+    linkinds = it.linkinds(mps)
+    linkdims = [ind.space for ind in linkinds]
+    D = linkdims[div(N,2)]
+    d = siteinds[div(N,2)].space
+    bitlength = length(digits(D-1, base=d))     # how many qudits of dim d to represent bond dim D
+
+    local circuit, blockMPS, new_siteinds, newN, npairs, block_linkinds, block_linkinds_dims
+
+    q_list = iszero(q) ? [i for i in 2:N if mod(N,i) == 0] : [q]
+
+    local q_found
+    for q in q_list
+        println("Attempting blocking with q = $q...")
+        q_found = q
+        
+        if mod(N, q) != 0
+            throw(DomainError(q, "Inhomogeneous blocking is not supported, choose a q that divides N"))
+        end
+
+        if length(Set(linkdims)) > q
+            throw(DomainError(linkdims, "MPS has non-constant bond dimension, use a greater blocking size"))
+        end
+
+       
+        if q - 2*bitlength < 0
+            throw(DomainError(D, "Malz inversion only works if q - 2n >= 0, with n: D = d^n\nMax bond dimension D = $D, blocking size q = $q."))
+        end
+
+        newN = div(N,q)
+        npairs = newN-1
+
+        # block array
+        blocked_mps, blocked_siteinds = blocking(mps, q)
+        # polar decomp and store P matrices in array
+        blockMPS = [polar_P(blocked_mps[i], blocked_siteinds[i]) for i in 1:newN]
+
+        # save linkinds and create new siteinds
+        block_linkinds = it.linkinds(mps)[q:q:end]
+        block_linkinds_dims = [ind.space for ind in block_linkinds]
+        
+        new_siteinds = it.siteinds(D, 2*(newN-1))
+
+        # replace primed linkinds with new siteinds
+        it.replaceind!(blockMPS[1], block_linkinds[1]', new_siteinds[1])
+        it.replaceind!(blockMPS[end], block_linkinds[end]', new_siteinds[end])
+        for i in 2:(newN-1)
+            it.replaceind!(blockMPS[i], block_linkinds[i-1]', new_siteinds[2*i-2])
+            it.replaceind!(blockMPS[i], block_linkinds[i]', new_siteinds[2*i-1])
+        end
+
+        # separate each block into 2 different sites for optimization
+        sep_mps::Vector{it.ITensor} = [blockMPS[1]]
+        for i in 2:newN-1
+            iL, nL = block_linkinds[i-1], new_siteinds[2*i-2]
+            bL, S, bR = it.svd(blockMPS[i], iL, nL)
+            push!(sep_mps, bL, S*bR)
+        end
+        push!(sep_mps, blockMPS[end])
+
+        ## Start variational optimization to approximate P blocks
+        circuit, fid, sweep = invertBW(conj(sep_mps), 1, new_siteinds; d = D, kargs...)
+        
+        if abs(1 - fid) < eps_malz
             break
         end
-        
-        tau += 1
     end
-
-    return bw, fid, sweep, tau
-end
-
-
-function invertMPSMalz(mps::itmps.MPS, q::Int64; kargs...)
-
-    N = length(mps)
-    if mod(N, q) != 0
-        throw(DomainError(q, "Inhomogeneous blocking is not supported, choose a q that divides N"))
-    end
-    linkdims = [ind.space for ind in it.linkinds(mps)]
-    if length(Set(linkdims)) > q
-        throw(DomainError(linkdims, "MPS has non-constant bond dimension, use a greater blocking size"))
-    end
-    D = linkdims[div(N,2)]
-
-    bitlenght = length(digits(D-1, base=2))     # how many qubits to represent bond dim D
-    if q - 2*bitlenght < 0
-        throw(DomainError(q, "Malz inversion only works if q - 2n >= 0, with n: D = d^n"))
-    end
-
-    newN = div(N,q)
-    npairs = newN-1
-
-    # block array
-    blocked_mps, blocked_siteinds = blocking(mps, q)
-    # polar decomp and store P matrices in array
-    blockMPS = [polar_P(blocked_mps[i], blocked_siteinds[i]) for i in 1:newN]
-
-    # save linkinds and create new siteinds
-    block_linkinds = it.linkinds(mps)[q:q:end]
-    linkinds_dims = [ind.space for ind in block_linkinds]
     
-    new_siteinds = it.siteinds(D, 2*(newN-1))
-
-    # replace primed linkinds with new siteinds
-    it.replaceind!(blockMPS[1], block_linkinds[1]', new_siteinds[1])
-    it.replaceind!(blockMPS[end], block_linkinds[end]', new_siteinds[end])
-    for i in 2:(newN-1)
-        it.replaceind!(blockMPS[i], block_linkinds[i-1]', new_siteinds[2*i-2])
-        it.replaceind!(blockMPS[i], block_linkinds[i]', new_siteinds[2*i-1])
-    end
-
-    # separate each block into 2 different sites for optimization
-    sep_mps::Vector{it.ITensor} = [blockMPS[1]]
-    for i in 2:newN-1
-        iL, nL = block_linkinds[i-1], new_siteinds[2*i-2]
-        bL, S, bR = it.svd(blockMPS[i], iL, nL)
-        push!(sep_mps, bL, S*bR)
-    end
-    push!(sep_mps, blockMPS[end])
-
-    ## Start variational optimization to approximate P blocks
-    circuit, fid, sweep = invertBW(conj(sep_mps), 1, new_siteinds; D = D, kargs...)
+    q = q_found
     W_list = circuit[1]
 
     ## Extract unitary matrices that must be applied on bell pairs
     # here we follow the sequential rg procedure
     V_list::Vector{Vector{it.ITensor}} = []
-    linkinds = it.linkinds(mps)
-    siteinds = it.siteinds(mps)
+    V_tau_list = []
     
     for i in 1:newN
 
@@ -657,59 +762,92 @@ function invertMPSMalz(mps::itmps.MPS, q::Int64; kargs...)
 
         # if i=1 no svd must be done, entire block 1 is already a series of isometries
         if i == 1
+
             iR = block_linkinds[1]
             block_i[end] = it.replaceind(block_i[end], iR, new_siteinds[1])
-            push!(V_list, block_i)
+            block_i_Ulist = block_i
+            push!(V_list, block_i_Ulist)
 
+        else
 
-            continue
+            # prepare left index of block i
+            block_i_Ulist = []
+            iL = block_linkinds[i-1]
+            local prev_SV
+
+            total_tau = 0
+            for j in 1:q-1
+                A = block_i[j]                              # j-th tensor in block_i
+                iR = it.commoninds(A, linkinds)[2]    # right link index
+                Aprime = j > 1 ? prev_SV*A : A              # contract SV from previous svd (of the block on the left)
+                Uprime, S, V = it.svd(Aprime, it.uniqueinds(Aprime, iR, iL))
+                push!(block_i_Ulist, Uprime)
+                prev_SV = S*V
+            end
+            # now we need to consider the last block C and apply P^-1
+            C = block_i[end]
+            P = blockMPS[i]
+
+            if i < newN     #if we are not at the end of the whole spin chain
+                # extract P indices, convert to matrix and invert
+                PiL, PiR = block_linkinds[i-1:i]
+                PnL, PnR = new_siteinds[2*i-2:2*i-1]
+                dim = reduce(*, block_linkinds_dims[i-1:i])
+                P_matrix = reshape(Array(P, [PnL, PnR, PiL, PiR]), (dim, dim))
+                Pinv = inv(P_matrix)
+            
+                # convert back to tensor with inds ready to contract with Ctilde = prev_SV * C   
+                # and with blockMPS[i] siteinds       
+                CindR = it.commoninds(C, linkinds)[2]
+                Pinv = it.ITensor(Pinv, [iL, CindR, PnL, PnR])
+            else    #same here, only different indices
+                PiL = block_linkinds[i-1]
+                PnL = new_siteinds[2*i-2]
+                dim = block_linkinds_dims[i-1]
+                P_matrix = reshape(Array(P, [PnL, PiL]), (dim, dim))
+                Pinv = inv(P_matrix)
+
+                Pinv = it.ITensor(Pinv, [iL, PnL])
+            end
+
+            Ctilde = prev_SV * C * Pinv
+            push!(block_i_Ulist, Ctilde)
+            push!(V_list, block_i_Ulist)
+
         end
+
+        # Approximate total V_i unitary with bw circuit
+        # contract isometries in block_i_Ulist as long as dimension <= d^2bitlength (efficient for D low, independent from q)
+        upinds = siteinds[q*(i-1)+1 : q*i]
+        V = reduce(*, block_i_Ulist[1:2*bitlength])
+        V_upinds = upinds[1:2*bitlength]
+        V_downinds = it.uniqueinds(V, V_upinds)
+        down_d = reduce(*, [ind.space for ind in V_downinds])  # will be D for i=1, D^2 elsewhere
+        V_matrix = reshape(Array(V, V_upinds, V_downinds), (d^(2*bitlength), down_d))      # MUST BE MODIFIED WHEN i=1 or newN THE OUTPUT LEG IS ONLY D
+        V_mpo = unitary_to_mpo(iso_to_unitary(V_matrix), siteinds = upinds)
+        it.prime!(V_mpo, q - 2*bitlength)
         
-        # prepare left index of block i
-        block_i_Ulist = []
-        iL = block_linkinds[i-1]
-        local prev_SV
-
-        for j in 1:q-1
-            A = block_i[j]                              # j-th tensor in block_i
-            iR = it.commoninds(A, linkinds)[2]    # right link index
-            Aprime = j > 1 ? prev_SV*A : A              # contract SV from previous svd (of the block on the left)
-            Uprime, S, V = it.svd(Aprime, it.uniqueinds(Aprime, iR, iL))
-            push!(block_i_Ulist, Uprime)
-            prev_SV = S*V
-        end
-        # now we need to consider the last block C and apply P^-1
-        C = block_i[end]
-        P = blockMPS[i]
-
-        if i < newN     #if we are not at the end of the whole spin chain
-            # extract P indices, convert to matrix and invert
-            PiL, PiR = block_linkinds[i-1:i]
-            PnL, PnR = new_siteinds[2*i-2:2*i-1]
-            dim = reduce(*, linkinds_dims[i-1:i])
-            P_matrix = reshape(Array(P, [PnL, PnR, PiL, PiR]), (dim, dim))
-            Pinv = inv(P_matrix)
-          
-            # convert back to tensor with inds ready to contract with Ctilde = prev_SV * C   
-            # and with blockMPS[i] siteinds       
-            CindR = it.commoninds(C, linkinds)[2]
-            Pinv = it.ITensor(Pinv, [iL, CindR, PnL, PnR])
-        else    #same here, only different indices
-            PiL = block_linkinds[i-1]
-            PnL = new_siteinds[2*i-2]
-            dim = linkinds_dims[i-1]
-            P_matrix = reshape(Array(P, [PnL, PiL]), (dim, dim))
-            Pinv = inv(P_matrix)
-
-            Pinv = it.ITensor(Pinv, [iL, PnL])
+        # transform next isometries to mpo and contract with previous ones
+        for k in 2*bitlength+1:q
+            uk = block_i_Ulist[k]
+            prev_u = block_i_Ulist[k-1]
+            uk_upinds = [it.commoninds(uk, prev_u); upinds[k]]
+            uk_downinds = it.uniqueinds(uk, uk_upinds)
+            up_d = reduce(*, [ind.space for ind in uk_upinds])
+            down_d = reduce(*, [ind.space for ind in uk_downinds])
+            uk_matrix = reshape(Array(uk, uk_upinds, uk_downinds), (up_d, down_d))
+            uk_mpo = unitary_to_mpo(iso_to_unitary(uk_matrix), siteinds = upinds, skip_qudits = k-2*bitlength-1)
+            it.prime!(uk_mpo, q-k)
+            V_mpo = V_mpo*uk_mpo
         end
 
-        Ctilde = prev_SV * C * Pinv
-        push!(block_i_Ulist, Ctilde)
-        push!(V_list, block_i_Ulist)
+        it.replaceprime!(V_mpo, q-2*bitlength+1 => 1)
+        # invert final V
+        _, _, _, tau = invertBW(V_mpo; d = d, err_to_one = eps_V/(newN*d^N), kargs...)
+        
+        push!(V_tau_list, tau)
+
     end
-
-    ## Compute scalar product to check fidelity
 
     zero_projs::Vector{it.ITensor} = []
     for ind in new_siteinds
@@ -720,439 +858,56 @@ function invertMPSMalz(mps::itmps.MPS, q::Int64; kargs...)
     # act with W on zeros
     Wlayer = [W_list[i] * zero_projs[2*i-1] * zero_projs[2*i] for i in 1:npairs]
 
-    # group blocks together
-    block_list::Vector{it.ITensor} = []
-    mps_primed = conj(mps)'''''
-    siteinds = it.siteinds(mps_primed)
-    local left_tensor
-    for i in 1:newN
-        block_i = i < newN ? mps_primed[q*(i-1)+1 : q*i] : mps_primed[q*(i-1)+1 : end]
-        i_siteinds = i < newN ? siteinds[q*(i-1)+1 : q*i] : siteinds[q*(i-1)+1 : end]
-        left_tensor = (i == 1 ? block_i[1] : block_i[1]*left_tensor)
-        left_tensor *= it.replaceinds(V_list[i][1], it.noprime(i_siteinds), i_siteinds)
-
-        for j in 2:q
-            left_tensor *= block_i[j] * it.replaceinds(V_list[i][j], it.noprime(i_siteinds), i_siteinds)
-        end
-        if i < newN
-            left_tensor *= Wlayer[i]
-        end
-    end
-
-
-    fidelity = abs(Array(left_tensor)[1])
-
-    println(fid)
-    println(fidelity)
-
-    return Wlayer, V_list, fidelity, sweep
-end
-
-
-
-"Old function for inverting MPS variationally. To be deprecated in favour of invertBW, which is universal."
-function invertMPS(mps::itmps.MPS, tau::Int64; err::Float64 = 1E-10, n_sweeps::Int64 = 1000)
-    mps = conj(mps)
-    N = length(mps)
-    it.orthogonalize!(mps, N)
-    siteinds = it.siteinds(mps)
-
-    L_blocks::Vector{it.ITensor} = []
-    R_blocks::Vector{it.ITensor} = []
-
-    # create circuit of identities
-    # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    #circuit = [it.prime(it.delta(siteinds[2*j-mod(i,2)], siteinds[2*j-mod(i,2)]') * it.delta(siteinds[2*j-mod(i,2)+1], siteinds[2*j-mod(i,2)+1]'), tau-i) for i in 1:tau, j in 1:div(N,2)]
-    # create random circuit instead
-    circuit::Vector{Vector{it.ITensor}} = []
-    for i in 1:tau
-        layer_i = [it.prime(it.ITensor(random_unitary(4), siteinds[2*j-mod(i,2)], siteinds[2*j-mod(i,2)+1], siteinds[2*j-mod(i,2)]', siteinds[2*j-mod(i,2)+1]'), tau-i) for j in 1:(div(N,2)-mod(N+1,2)*mod(i+1,2))]
-        push!(circuit, layer_i)
-    end
-
-    # construct projectors onto |0> for all sites
-    zero_projs::Vector{it.ITensor} = []
-    for ind in siteinds
-        vec = [1; [0 for _ in 1:ind.space-1]]
-        push!(zero_projs, it.ITensor(vec, it.prime(ind, tau)))
-    end
-
-    # prepare gates on the edges, which are just identities
-    left_deltas = [it.prime(it.delta(siteinds[1], siteinds[1]'), tau-i) for i in 2:2:tau]
-    right_deltas = [it.prime(it.delta(siteinds[N], siteinds[N]'), tau-i) for i in 2-mod(N,2):2:tau]
-
-    # construct L_1
-    # first item is zero projector, then there are the gates in ascending order, then the mps site
-    leftmost_block = [zero_projs[1]; left_deltas; mps[1]]
-    leftmost_block = reduce(*, leftmost_block)  # t+2 indices
-    push!(L_blocks, leftmost_block)
-
-    # construct R_N
-    rightmost_block = [zero_projs[N]; right_deltas; mps[N]]
-    rightmost_block = reduce(*, rightmost_block)
-    push!(R_blocks, rightmost_block)
-
-    # contract everything on the right and save rightmost_block at each intermediate step
-    # must be done only the first time, when j=2 (so contract up to j=3)
-    for k in (N-1):-1:3
-        # extract right gates associated with site k
-        right_gates_k = [circuit[i][div(k,2)+mod(k,2)] for i in (2-mod(k,2)):2:tau]
-        all_blocks = [zero_projs[k]; right_gates_k; mps[k]]
-
-        # if k even contract in descending order, else ascending
-        all_blocks = iseven(k) ? reverse(all_blocks) : all_blocks
-        for block in all_blocks
-            rightmost_block *= block
-        end
-        push!(R_blocks, rightmost_block)
-    end
-    reverse!(R_blocks)
-
-    # start the loop
-    rev = false
-    first_sweep = true
-    fid, newfid = 0, 0
-    j = 2  
-    sweep = 0
-
-    while sweep < n_sweeps
-
-        # extract all gates touching site j
-        gates_j = [circuit[i][div(j,2) + mod(i,2)*mod(j,2)] for i in 1:tau]
-        # determine which gates are on left
-        is_onleft = [isodd(j+i) for i in 1:tau]
-
-        # optimize each gate
-        for i in 1:tau
-            gate_ji = gates_j[i]    # extract gate j
-            is_j_onleft = isodd(i+j)
-
-            sameside_gates = [gates_j[2-mod(i,2):2:i-2]; gates_j[i+2:2:end]]
-            otherside_gates = gates_j[1+mod(i,2):2:end]
-            
-            left_gates = is_j_onleft ? sameside_gates : otherside_gates
-            right_gates = is_j_onleft ? otherside_gates : sameside_gates
-
-            contract_left = []
-            contract_right = []
-            if isodd(1+j)
-                push!(contract_left, zero_projs[j])
-            else
-                push!(contract_right, zero_projs[j])
-            end
-            if isodd(tau+j)
-                push!(contract_left, mps[j])
-            else
-                push!(contract_right, mps[j])
-            end
-            contract_left = [contract_left; left_gates]
-            contract_right = [contract_right; right_gates]
-            
-            env_left = leftmost_block
-            for gate in contract_left
-                env_left *= gate
-            end
-            env_right = rightmost_block
-            for gate in contract_right
-                env_right *= gate
-            end
-
-            env = conj(env_left*env_right)
-
-            inds = it.commoninds(it.prime(siteinds, tau-i), gate_ji)
-            U, S, Vdag = it.svd(env, inds, cutoff = 1E-14)
-            u, v = it.commonind(U, S), it.commonind(Vdag, S)
-
-            # evaluate fidelity
-            newfid = real(tr(Array(S, (u, v))))^2
-            #println("Step $j: ", newfid)
-
-            #replace gate_ji with optimized one, both in gates_j (used in this loop) and in circuit
-            gate_ji_opt = U * it.replaceind(Vdag, v, u)
-            gates_j[i] = gate_ji_opt    
-            circuit[i][div(j,2) + mod(i,2)*mod(j,2)] = gate_ji_opt
-        end
-
-        ## while loop end conditions
-
-        ## if isapprox(newfid, fid) && (first_sweep == false)
-        ##     break
-        ## end
-        if abs(1 - newfid) < err
-            break
-        end
-        fid = newfid
-
-        if j == N-1
-            first_sweep = false
-            rev = true
-            sweep += 1
-        end
-
-        if j == 2 && first_sweep == false
-            rev = false
-            sweep += 1
-        end
-
-        # update L_blocks or R_blocks depending on sweep direction
-        if rev == false
-            gates_to_append = gates_j[(1+mod(j,2)):2:end]     # follow fig. 6
-            all_blocks = [zero_projs[j]; gates_to_append; mps[j]]
-            all_blocks = isodd(j) ? reverse(all_blocks) : all_blocks
-            for block in all_blocks
-                leftmost_block *= block
-            end
-            if first_sweep == true
-                push!(L_blocks, leftmost_block)
-            else
-                L_blocks[j] = leftmost_block
-            end
-            rightmost_block = R_blocks[j]       #it should be j+2 but R_blocks starts from site 3
-        else
-            gates_to_append = gates_j[(2-mod(j,2)):2:end]
-            all_blocks = [zero_projs[j]; gates_to_append; mps[j]]
-            all_blocks = iseven(j) ? reverse(all_blocks) : all_blocks
-            for block in all_blocks
-                rightmost_block *= block
-            end
-            R_blocks[j-2] = rightmost_block         #same argument
-            leftmost_block = L_blocks[j-2]
-        end
-
-        j = rev ? j-1 : j+1
-
-    end
-
-    return newfid, sweep
-end
-
-"Old function to invert mps à la Malz"
-function invertMPSMalzOld(mps::itmps.MPS, q::Int64; err::Float64 = 1E-10, n_sweeps::Int64 = 1000)
-
-    N = length(mps)
-    if mod(N, q) != 0
-        throw(DomainError(q, "Inhomogeneous blocking is not supported, choose a q that divides N"))
-    end
-    newN = div(N,q)
-    sites = it.siteinds(mps)
-
-    # block array
-    blocked_mps, blocked_siteinds = blocking(mps, q)
-    # polar decomp and store P matrices in array
-    blockMPS = [polar_P(blocked_mps[i], blocked_siteinds[i]) for i in 1:newN]
-    block_linkinds = it.linkinds(mps)[q:q:end]
-    linkinds_dims = [ind.space for ind in block_linkinds]
-
-    # prime left index of each block to distinguish it from right index of previous block
-    for i in 2:newN
-        ind_to_increase = it.uniqueinds(blockMPS[i], block_linkinds)
-        ind_to_increase = it.commoninds(ind_to_increase, blockMPS[i-1])
-        it.replaceinds!(blockMPS[i], ind_to_increase, ind_to_increase')
-    end
-
-    ## Start variational optimization to approximate P blocks
-    
-    # prepare iteration
-    L_blocks::Vector{it.ITensor} = []
-    R_blocks::Vector{it.ITensor} = []
-    npairs = newN-1     # number of bell pairs
-
-    # prepare array of initial random W tensors
-    Wdg_list::Vector{it.ITensor} = []     
-    for j in 1:npairs
-        ind = block_linkinds[j]
-        d = ind.space
-        push!(Wdg_list, it.ITensor(random_unitary(d^2), ind''', ind'''', ind', ind''))
-    end
-
-    # construct projectors onto |0> for all sites
-    zero_projs::Vector{it.ITensor} = []
-    for ind in block_linkinds
-        vec = [1; [0 for _ in 1:ind.space-1]]
-        push!(zero_projs, it.ITensor(vec, ind'''))
-        push!(zero_projs, it.ITensor(vec, ind''''))
-    end
-
-    # construct L_1
-    leftmost_block = blockMPS[1]
-    push!(L_blocks, leftmost_block)
-
-    # construct R_N
-    rightmost_block = blockMPS[end]
-    push!(R_blocks, rightmost_block) 
-
-    # contract everything on the right and save rightmost_block at each intermediate step
-    # must be done only the first time, when j=1 (so contract up to j=2)
-    for k in npairs:-1:2
-        block_k = blockMPS[k]   # extract block k
-        zero_L, zero_R = zero_projs[2k-1:2k]    # extract zero projectors for this pair
-        Wdg_k = Wdg_list[k]     # extract Wdg_k
-        rightmost_block *= block_k * Wdg_k * zero_L * zero_R 
-        push!(R_blocks, rightmost_block)
-    end
-    reverse!(R_blocks)
-
-    # start the loop        
-    first_sweep = true
-    reverse = false
-    sweep = 0
-
-    j = 1   # W1 position (pair)
-    fid = 0
-
-    # Start iteration
-    while sweep < n_sweeps
-
-        # build environment tensor by adding the two |0> projectors 
-        env_tensor = leftmost_block * rightmost_block 
-        Winds = it.inds(env_tensor)     # extract W's input legs
-        zero_L, zero_R = zero_projs[2j-1:2j] 
-        env_tensor *= zero_L * zero_R         # construct environment tensor Ej
-
-        # svd environment and construct Wj
-        Uenv, Senv, Venv_dg = it.svd(env_tensor, Winds, cutoff = 1E-14)       # SVD environment
-        u, v = it.commonind(Uenv, Senv), it.commonind(Venv_dg, Senv)
-        W_j = Uenv * it.replaceind(Venv_dg, v, u)       # Construct Wj as UVdag
-
-        # Save optimized Wdg_j in the list
-        Wdg_j = conj(W_j) 
-        Wdg_list[j] = Wdg_j
-
-        newfid = real(tr(Array(Senv, (u, v))))^2
-        #println("Step $j: ", newfid)
-
-        # stop if fidelity converged
-        if abs(1 - newfid) < err
-            break
-        end
-        fid = newfid
-
-        if npairs == 1
-            break
-        end
-
-        if j == npairs
-            first_sweep = false
-            reverse = true
-            sweep += 1
-        end
-
-        if j == 1 && first_sweep == false
-            reverse = false
-            sweep += 1
-        end
-
-        # update L_blocks or R_blocks depending on sweep direction
-        if reverse == false
-            next_block = blockMPS[j+1]
-            leftmost_block *= next_block * Wdg_j * zero_L * zero_R 
-            if first_sweep == true
-                push!(L_blocks, leftmost_block)
-            else
-                L_blocks[j+1] = leftmost_block
-            end
-            rightmost_block = R_blocks[j+1]
-        else
-            prev_block = blockMPS[j]
-            rightmost_block *= prev_block * Wdg_j * zero_L * zero_R
-            R_blocks[j-1] = rightmost_block
-            leftmost_block = L_blocks[j-1]
-        end
-
-        j = reverse ? j-1 : j+1
-    end
-
-    println(fid)
-    # Save W matrices
-    #W_matrices = [reshape(Array(W, it.inds(W)), (it.inds(W)[1].space^2, it.inds(W)[1].space^2)) for W in W_list]
-    #W_unitaries = [iso_to_unitary(W) for W in W_matrices]
-
-    ## Extract unitary matrices that must be applied on bell pairs
-    # here we follow the sequential rg procedure
-    U_list::Vector{Vector{it.ITensor}} = []
-    linkinds = it.linkinds(mps)
-    
-    for i in 1:newN
-
-        block_i = i < newN ? mps[q*(i-1)+1 : q*i] : mps[q*(i-1)+1 : end]
-
-        # if i=1 no svd must be done, entire block 1 is already a series of isometries
-        if i == 1
-            iR = block_linkinds[1]
-            block_i[end] = it.replaceind(block_i[end], iR, iR')
-            push!(U_list, block_i)
-            continue
-        end
-        
-        # prepare left index of block i
-        block_i_Ulist = []
-        iL = block_linkinds[i-1]
-        local prev_SV
- 
-        for j in 1:q-1
-            A = block_i[j]                              # j-th tensor in block_i
-            iR = it.commoninds(A, linkinds)[2]    # right link index
-            Aprime = j > 1 ? prev_SV*A : A              # contract SV from previous svd (of the block on the left)
-            Uprime, S, V = it.svd(Aprime, it.uniqueinds(Aprime, iR, iL))
-            push!(block_i_Ulist, Uprime)
-            prev_SV = S*V
-        end
-        # now we need to consider the last block C and apply P^-1
-        C = block_i[end]
-        P = blockMPS[i]
-
-        if i < newN     #if we are not at the end of the whole spin chain
-            # extract P indices, convert to matrix and invert
-            PiL, PiR = block_linkinds[i-1:i]
-            dim = reduce(*, linkinds_dims[i-1:i])
-            P_matrix = reshape(Array(P, [PiL'', PiR', PiL, PiR]), (dim, dim))
-            Pinv = inv(P_matrix)
-          
-            # convert back to tensor with inds ready to contract with Ctilde = prev_SV * C          
-            CindR = it.commoninds(C, linkinds)[2]
-            Pinv = it.ITensor(Pinv, [iL, CindR, iL'', CindR'])
-        else    #same here, only different indices
-            PiL = block_linkinds[i-1]
-            dim = linkinds_dims[i-1]
-            P_matrix = reshape(Array(P, [PiL'', PiL]), (dim, dim))
-            Pinv = inv(P_matrix)
-
-            Pinv = it.ITensor(Pinv, [iL, iL''])
-        end
-
-        Ctilde = prev_SV * C * Pinv
-        push!(block_i_Ulist, Ctilde)
-        push!(U_list, block_i_Ulist)
-    end
 
     ## Compute scalar product to check fidelity
+    # just a check, can be disabled
 
-    # act with W on zeros
-    Wlayer = [conj(Wdg_list[i]) * zero_projs[2*i-1] * zero_projs[2*i] for i in 1:npairs]
+    # # group blocks together
+    # block_list::Vector{it.ITensor} = []
+    # mps_primed = conj(mps)'''''
+    # siteinds = it.siteinds(mps_primed)
+    # local left_tensor
+    # for i in 1:newN
+    #     block_i = i < newN ? mps_primed[q*(i-1)+1 : q*i] : mps_primed[q*(i-1)+1 : end]
+    #     i_siteinds = i < newN ? siteinds[q*(i-1)+1 : q*i] : siteinds[q*(i-1)+1 : end]
+    #     left_tensor = (i == 1 ? block_i[1] : block_i[1]*left_tensor)
+    #     left_tensor *= it.replaceinds(V_list[i][1], it.noprime(i_siteinds), i_siteinds)
 
-    # group blocks together
-    block_list::Vector{it.ITensor} = []
-    mps_primed = conj(mps)'''''
-    siteinds = it.siteinds(mps_primed)
-    local left_tensor
-    for i in 1:newN
-        block_i = i < newN ? mps_primed[q*(i-1)+1 : q*i] : mps_primed[q*(i-1)+1 : end]
-        i_siteinds = i < newN ? siteinds[q*(i-1)+1 : q*i] : siteinds[q*(i-1)+1 : end]
-        left_tensor = (i == 1 ? block_i[1] : block_i[1]*left_tensor)
-        left_tensor *= it.replaceinds(U_list[i][1], it.noprime(i_siteinds), i_siteinds)
+    #     for j in 2:q
+    #         left_tensor *= block_i[j] * it.replaceinds(V_list[i][j], it.noprime(i_siteinds), i_siteinds)
+    #     end
+    #     if i < newN
+    #         left_tensor *= Wlayer[i]
+    #     end
+    # end
 
-        for j in 2:q
-            left_tensor *= block_i[j] * it.replaceinds(U_list[i][j], it.noprime(i_siteinds), i_siteinds)
-        end
-        if i < newN
-            left_tensor *= Wlayer[i]
-        end
+
+    # fidelity = abs(Array(left_tensor)[1])
+    # println(fidelity)
+
+    println(fid)
+
+    # prepare W|0> states to turn into mps
+    Wmps_list = []
+    for i in 1:npairs
+        W_ext = zeros(ComplexF64, (2^bitlength, 2^bitlength))   # embed W in n = bitlength qudits
+        W = Wlayer[i]
+        W = reshape(Array(W, it.inds(W)), (D, D))
+        W_ext[1:D, 1:D] = W
+        W_ext = reshape(W_ext, 2^(2*bitlength))
+        sites = it.siteinds(d, 2*bitlength)
+        W_mps = itmps.MPS(W_ext, sites)
+        push!(Wmps_list, W_mps)
     end
 
+    # invert each mps in the list
+    results = [invertBW(Wmps; d = d, err_to_one = eps_bell/npairs) for Wmps in Wmps_list]
 
-    fidelity = abs2(Array(left_tensor)[1])
+    W_tau_list = [res[4] for res in results]
 
-    return fidelity, sweep
+    return Wlayer, V_list, fid, sweep, W_tau_list, V_tau_list
 end
+
+
 
 end
