@@ -43,6 +43,15 @@ function apply(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
     return psi
 end
 
+function apply!(U::it.ITensor, psi::Vector{it.ITensor}, b; cutoff = 1E-15)
+    W = U*psi[b]*psi[b+1]
+    indsb = it.uniqueinds(psi[b], psi[b+1])
+    U, S, V = it.svd(W, indsb, cutoff = cutoff)
+    psi[b] = U
+    psi[b+1] = S*V
+end
+
+
 function entropy(psi::itmps.MPS, b::Integer)  
     it.orthogonalize!(psi, b)
     indsb = it.uniqueinds(psi[b], psi[b+1])
@@ -192,15 +201,19 @@ function iso_to_unitary(V::Union{Matrix, Vector{Float64}})
     return U
 end
 
-"Convert unitary to MPO via repeated svd"
-function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}, d = 2; siteinds = nothing, skip_qudits = 0)
+"Convert unitary to MPO via repeated SVD"
+function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}; d = 2, siteinds = nothing, skip_qudits = 0, orthogonalize = true)
     D = size(U, 1)
     N = length(digits(D-1, base=d))     # N = logd(D)
 
     if isnothing(siteinds)
         siteinds = it.siteinds(d, N)
         skip_qudits = 0
+    else # check that you're not skipping too many qubit
+        N + skip_qudits > length(siteinds) &&
+            throw(DomainError(skip_qudits, "Skipping too many qubits for the siteinds given."))
     end
+
 
     sites = siteinds[1+skip_qudits:N+skip_qudits]
     mpo::Vector{it.ITensor} = []
@@ -256,7 +269,9 @@ function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}, d = 2; siteinds = not
 
     mpo = [left_deltas; mpo; right_deltas]
     mpo_final = itmps.MPO(mpo)
-    it.orthogonalize!(mpo_final, length(siteinds))
+    if orthogonalize
+        it.orthogonalize!(mpo_final, length(siteinds))
+    end
 
     return mpo_final
 end
@@ -352,7 +367,7 @@ function extract_rho(block::it.ITensor, inds::NTuple{3, it.Index{Int64}})
     eig = eigen(T_matrix)
     pos_1 = findmax(abs.(eig.values))
     if pos_1[1] < 0.99
-        throw(BoundsError(pos_1[1], "Max eigenvalue less than 1"))
+        throw(DomainError(pos_1[1], "Max eigenvalue less than 1"))
     end
     pos_1 = pos_1[2]
     right_eig = eig.vectors[:, pos_1]
@@ -368,7 +383,7 @@ end
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertBW(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}; d = 2, output_inds = nothing, conv_err = 1E-5, n_sweeps = 10000)
+function invertBW(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}; d = 2, output_inds = nothing, conv_err = 1E-6, n_sweeps = 1E6)
     N = length(mpo)
     siteinds = input_inds
     mpo_mode = !isnothing(output_inds)
@@ -513,7 +528,7 @@ function invertBW(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}; 
             env = conj(env_left*env_right)
 
             inds = it.commoninds(it.prime(siteinds, tau-i), gate_ji)
-            U, S, Vdag = it.svd(env, inds, cutoff = 1E-14)
+            U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
             u, v = it.commonind(U, S), it.commonind(Vdag, S)
 
             # evaluate fidelity as Tr(Env*Gate), i.e. the overlap (NOT SQUARED)
@@ -537,10 +552,13 @@ function invertBW(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}; 
 
         # compare the relative increase in frobenius norm
         ratio = 1 - sqrt((1-newfid)/(1-fid))
-        if ratio < conv_err && first_sweep == false
+        if -conv_err < ratio < conv_err && first_sweep == false
             break
         end
-        fid = newfid
+
+        if ratio >= 0   # only register if the ratio has increased, otherwise it's useless
+            fid = newfid
+        end
 
         if j == 2 && first_sweep == false
             rev = false
@@ -596,18 +614,30 @@ function invertBW(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}; 
 end
 
 "Calls invertBW for Vector{ITensor} mpo input with increasing inversion depth tau until it converges with fidelity F = 1-err_to_one"
-function invertBW(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}; err_to_one = 1E-6, start_tau = 1, kargs...)
+function invertBW(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}; err_to_one = 1E-6, start_tau = 1, n_runs = 10, kargs...)
     println("Tolerance $err_to_one, starting from depth $start_tau")
     tau = start_tau
     found = false
 
-    local bw, fid, sweep
+    local bw_best, sweep_best
+    fid_best = 0
     while !found
-        println("Attempting depth $tau...")
-        bw, fid, sweep = invertBW(mpo, tau, input_inds; kargs...)
+        println("Attempting depth $tau with $n_runs runs...")
+        fids = []
+        for _ in 1:n_runs
+            bw, fid, sweep = invertBW(mpo, tau, input_inds; kargs...)
+            push!(fids, fid)
+            if fid > fid_best
+                fid_best = fid
+                bw_best, sweep_best = bw, sweep
+            end
+        end
+        avgfid = mean(fids)
+        println("Avg fidelity = $avgfid")
 
-        if abs(1-fid) < err_to_one
+        if abs(1-fid_best) < err_to_one
             found = true
+            println("Convergence within desired error achieved with depth $tau\n")
             break
         end
         
@@ -618,8 +648,7 @@ function invertBW(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}; err_t
 
         tau += 1
     end
-
-    return bw, fid, sweep, tau
+    return bw_best, fid_best, sweep_best, tau
 end
 
 "Wrapper for ITensorsMPS.MPS input. Calls invertBW by first conjugating mps (mps to invert must be above)"
@@ -643,7 +672,17 @@ function invertBW(mpo::itmps.MPO; tau = 0, kargs...)
     println("Attempting inversion of $obj")
     mpo = conj(mpo)
     allinds = reduce(vcat, it.siteinds(mpo))
-    siteinds = it.inds(allinds, plev = 0)
+    # determine primelevel of inputinds, which will be the lowest found in allinds
+    first2inds = allinds[1:2]   
+    plev_in = 0
+    while true
+        ind = it.inds(first2inds, plev = plev_in)
+        if length(ind) > 0
+            break
+        end
+        plev_in += 1
+    end
+    siteinds = it.inds(allinds, plev = plev_in)
     outinds = it.uniqueinds(allinds, siteinds)
 
     if iszero(tau)
@@ -687,11 +726,11 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
     d = siteinds[div(N,2)].space
     bitlength = length(digits(D-1, base=d))     # how many qudits of dim d to represent bond dim D
 
-    local circuit, blockMPS, new_siteinds, newN, npairs, block_linkinds, block_linkinds_dims
+    local blockMPS, new_siteinds, newN, npairs, block_linkinds, block_linkinds_dims
 
     q_list = iszero(q) ? [i for i in 2:N if mod(N,i) == 0] : [q]
 
-    local q_found
+    local q_found, circuit, fid, sweepB
     for q in q_list
         println("Attempting blocking with q = $q...")
         q_found = q
@@ -741,7 +780,7 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
         push!(sep_mps, blockMPS[end])
 
         ## Start variational optimization to approximate P blocks
-        circuit, fid, sweep = invertBW(conj(sep_mps), 1, new_siteinds; d = D, kargs...)
+        circuit, fid, sweepB = invertBW(conj(sep_mps), 1, new_siteinds; d = D, kargs...)
         
         if abs(1 - fid) < eps_malz
             break
@@ -775,7 +814,7 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
             iL = block_linkinds[i-1]
             local prev_SV
 
-            total_tau = 0
+
             for j in 1:q-1
                 A = block_i[j]                              # j-th tensor in block_i
                 iR = it.commoninds(A, linkinds)[2]    # right link index
@@ -836,15 +875,21 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
             up_d = reduce(*, [ind.space for ind in uk_upinds])
             down_d = reduce(*, [ind.space for ind in uk_downinds])
             uk_matrix = reshape(Array(uk, uk_upinds, uk_downinds), (up_d, down_d))
-            uk_mpo = unitary_to_mpo(iso_to_unitary(uk_matrix), siteinds = upinds, skip_qudits = k-2*bitlength-1)
+            # need to decide how many identities to put to the left of uk unitaries based on up_d
+            nskips = k - length(digits(up_d-1, base=d))
+            uk_mpo = unitary_to_mpo(iso_to_unitary(uk_matrix), siteinds = upinds, skip_qudits = nskips)
             it.prime!(uk_mpo, q-k)
             V_mpo = V_mpo*uk_mpo
         end
 
         it.replaceprime!(V_mpo, q-2*bitlength+1 => 1)
         # invert final V
-        _, _, _, tau = invertBW(V_mpo; d = d, err_to_one = eps_V/(newN*d^N), kargs...)
+        _, _, _, tau = invertBW(V_mpo; d = d, err_to_one = eps_V/((newN^2)*d^q), kargs...)
         
+        # account for the swap gates 
+        if i > 1
+            tau += q - bitlength - 1
+        end
         push!(V_tau_list, tau)
 
     end
@@ -885,7 +930,7 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
     # fidelity = abs(Array(left_tensor)[1])
     # println(fidelity)
 
-    println(fid)
+    #println(fid)
 
     # prepare W|0> states to turn into mps
     Wmps_list = []
@@ -905,7 +950,7 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
 
     W_tau_list = [res[4] for res in results]
 
-    return Wlayer, V_list, fid, sweep, W_tau_list, V_tau_list
+    return Wlayer, V_list, fid, sweepB, W_tau_list, V_tau_list
 end
 
 
