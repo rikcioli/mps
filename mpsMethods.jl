@@ -29,6 +29,116 @@ function random_unitary(N::Int)
     return u
 end     
 
+
+mutable struct Lightcone
+    circuit::Vector{Vector{it.ITensor}}     # circuit[i] is the i-th layer, circuit[odd][1] acts on sites (1, 2), circuit[even][1] acts on sites (2, 3)
+    d::Int64                                # dimension of the physical space
+    size::Int64                             # number of qubits the whole circuit acts on
+    depth::Int64                            # circuit depth
+    lightbounds::Tuple{Bool, Bool}          # (leftslope == 'light', rightslope == 'light')
+    sitesAB::Vector{it.Index}               # siteinds of AB region
+    coords                                  # coordinates of all unitaries
+    id_coords                               # coordinates of all identities
+    layers                                  # coordinates of all gates ordered by layer
+    range::Vector{Tuple{Int64, Int64}}      # leftmost and rightmost sites on which each layer acts non-trivially
+end
+
+
+function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, lightbounds = (true, true))
+
+    # extract number of sites on which lightcone acts
+    sizeAB = length(siteinds)
+    isodd(sizeAB) &&
+        throw(DomainError(sizeAB, "Choose an even number for sizeAB"))
+
+    # count the minimum sizeAB has to be to construct a circuit of depth 'depth'
+    n_light = count(lightbounds)    # count how many boundaries have 'light' type structure
+    min_size = n_light*(depth+1) - 2*div(n_light,2)
+    sizeAB < min_size &&
+        throw(DomainError(sizeAB, "Cannot construct a depth $depth lightcone of with lightbounds $lightbounds with only $sizeAB sites"))
+    
+    # if U_array is not given, construct an array of random d-by-d unitaries
+    d = siteinds[1].space
+    if isnothing(U_array)
+        n_unitaries = (sizeAB-1)*div(depth,2) + div(sizeAB,2)
+        if depth > 2
+            dep_m2 = depth-2
+            n_unitaries -= n_light*(div(dep_m2+1,2)^2 + mod(dep_m2+1,2)*div(dep_m2+1,2))
+        end
+        U_array = [random_unitary(d^2) for _ in 1:n_unitaries]
+    end
+
+    # finally convert the U_array 
+    circuit::Vector{Vector{it.ITensor}} = []
+    coords = []
+    id_coords = []
+    layers_coords = []
+    range = []
+
+    k = 1
+    for i in 1:depth
+        layer_i::Vector{it.ITensor} = []
+        llim, rlim = 1, div(sizeAB,2)-mod(sizeAB+1,2)*mod(i+1,2)
+        lslope, rslope = llim, rlim
+        lrange, rrange = 1+mod(i+1,2), sizeAB-mod(i+1,2)
+        if lightbounds[1]
+            lslope += div(i-1,2)
+            lrange += 2*div(i-1,2)
+        end
+        if lightbounds[2]
+            rslope -= div(i-1,2)
+            rrange -= 2*div(i-1,2)
+        end
+        push!(range, (lrange, rrange))
+
+        layer_i_coords = []
+        for j in llim:rlim
+            inds = it.prime((siteinds[2*j-mod(i,2)], siteinds[2*j-mod(i,2)+1]), depth-i)
+            fullinds = (inds[1], inds[2], inds[1]', inds[2]')
+            if j < lslope || j > rslope
+                brick = it.delta(inds[1], inds[1]') * it.delta(inds[2], inds[2]')
+                push!(id_coords, ((i,j), fullinds))
+            else
+                brick = it.ITensor(U_array[k], fullinds)
+                push!(coords, ((i,j), fullinds))
+                k += 1
+            end
+            push!(layer_i, brick)
+            push!(layer_i_coords, ((i,j), fullinds))
+        end
+        push!(circuit, layer_i)
+        push!(layers_coords, layer_i_coords)
+    end
+
+    return Lightcone(circuit, d, sizeAB, depth, lightbounds, siteinds, coords, id_coords, layers_coords, range)
+
+end
+
+function updateLightcone!(lightcone::Lightcone, U_array::Vector{<:Matrix})
+    n_unitaries = length(U_array)
+    if length(lightcone.coords) != n_unitaries
+        throw(BoundsError(n_unitaries, "Number of updated unitaries does not match lightcone structure"))
+    end
+
+    for k in 1:n_unitaries
+        (i,j), inds = lightcone.coords[k]
+        U = U_array[k]
+        U_tensor = it.ITensor(U, inds)
+        lightcone.circuit[i][j] = U_tensor
+    end
+end
+
+"Extracts unitaries inside Lightcone to form a 1D array"
+function Base.Array(lightcone::Lightcone)
+    arr::Vector{Matrix} = []
+    d = lightcone.d
+    for ((i,j), inds) in lightcone.coords
+        push!(arr, reshape(Array(lightcone.circuit[i][j], inds), (d^2,d^2)))
+    end
+    return arr
+end
+
+
 "Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
 function apply(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
     psi = it.orthogonalize(psi, b)
@@ -43,12 +153,50 @@ function apply(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
     return psi
 end
 
-function apply!(U::it.ITensor, psi::Vector{it.ITensor}, b; cutoff = 1E-15)
+function contract!(psi::Vector{it.ITensor}, U::it.ITensor, b; cutoff = 1E-15)
+    summed_inds = it.commoninds(U, it.unioninds(psi[b], psi[b+1]))
+    outinds = it.uniqueinds(U, summed_inds)
     W = U*psi[b]*psi[b+1]
+    it.replaceinds!(W, outinds, summed_inds)
     indsb = it.uniqueinds(psi[b], psi[b+1])
     U, S, V = it.svd(W, indsb, cutoff = cutoff)
-    psi[b] = U
-    psi[b+1] = S*V
+    psi[b] = it.replaceinds(U, summed_inds, outinds)
+    psi[b+1] = it.replaceinds(S*V, summed_inds, outinds)
+end
+
+"Apply k-th unitary of lightcone to mps psi"
+function contract!(psi::Vector{it.ITensor}, lightcone::Lightcone, k::Int64; cutoff = 1E-15)
+    (i,j), inds = lightcone.coords[k]
+    U = lightcone.circuit[i][j]
+    b = 2*j-mod(i,2)    # where to apply the unitary
+
+    W = psi[b]*psi[b+1]
+    suminds = it.commoninds(inds, W)
+    outinds = it.uniqueinds(U, suminds)
+    W *= U
+    
+    it.replaceinds!(W, outinds, suminds)
+    indsb = it.uniqueinds(psi[b], psi[b+1])
+    U, S, V = it.svd(W, indsb, cutoff = cutoff)
+    psi[b] = it.replaceinds(U, suminds, outinds)
+    psi[b+1] = it.replaceinds(S*V, suminds, outinds) 
+end
+
+"Apply lightcone to mps psi, from base to top"
+function contract!(psi::Vector{it.ITensor}, lightcone::Lightcone; cutoff = 1E-15)
+    for k in 1:length(lightcone.coords)
+        contract!(psi, lightcone, k)
+    end
+end
+
+
+function contract(psi1::Vector{it.ITensor}, psi2::Vector{it.ITensor})
+    left_tensor = psi1[1] * psi2[1]
+    for i in 2:length(psi1)
+        left_tensor *= psi1[i]
+        left_tensor *= psi2[i]
+    end
+    return left_tensor
 end
 
 
@@ -200,6 +348,8 @@ function iso_to_unitary(V::Union{Matrix, Vector{Float64}})
 
     return U
 end
+
+"Convert layer of 2-qudit unitaries ITensor objects"
 
 "Convert unitary to MPO via repeated SVD"
 function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}; d = 2, siteinds = nothing, skip_qudits = 0, orthogonalize = true)
