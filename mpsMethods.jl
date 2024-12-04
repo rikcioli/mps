@@ -30,6 +30,10 @@ function random_unitary(N::Int)
 end     
 
 
+
+
+### LIGHTCONE METHODS ###
+
 mutable struct Lightcone
     circuit::Vector{Vector{it.ITensor}}     # circuit[i] is the i-th layer, circuit[odd][1] acts on sites (1, 2), circuit[even][1] acts on sites (2, 3)
     d::Int64                                # dimension of the physical space
@@ -54,8 +58,17 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
     # count the minimum sizeAB has to be to construct a circuit of depth 'depth'
     n_light = count(lightbounds)    # count how many boundaries have 'light' type structure
     min_size = n_light*(depth+1) - 2*div(n_light,2)
-    sizeAB < min_size &&
-        throw(DomainError(sizeAB, "Cannot construct a depth $depth lightcone of with lightbounds $lightbounds with only $sizeAB sites"))
+    if sizeAB < min_size
+        @warn "Cannot construct a depth $depth lightcone with lightbounds $lightbounds with only $sizeAB sites. Attempting to change lightbounds..."
+        lightbounds = (true, false)
+        n_light = count(lightbounds)    
+        min_size = n_light*(depth+1) - 2*div(n_light,2)
+        if sizeAB >= min_size
+            @warn "Lightbounds changed to $lightbounds"
+        else
+            throw(DomainError(sizeAB, "Cannot construct a depth $depth lightcone with lightbounds $lightbounds with only $sizeAB sites."))
+        end
+    end
     
     # if U_array is not given, construct an array of random d-by-d unitaries
     d = siteinds[1].space
@@ -93,8 +106,22 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
 
         layer_i_coords = []
         for j in llim:rlim
+            # prepare inds for current unitary
             inds = it.prime((siteinds[2*j-mod(i,2)], siteinds[2*j-mod(i,2)+1]), depth-i)
             fullinds = (inds[1], inds[2], inds[1]', inds[2]')
+
+            # add a clause for boundary terms: for even layers, a delta should be placed at the extremities
+            # we simulate this by increasing the lower index of the first and last gate of the odd layers
+            # so that they are connected directly to the odd layer below
+            if isodd(i) && i>1
+                if j == llim
+                    fullinds = (inds[1], inds[2], inds[1]'', inds[2]')
+                elseif j == rlim
+                    fullinds = (inds[1], inds[2], inds[1]', inds[2]'')
+                end
+            end
+
+            # insert unitaries according to lightbounds, inserting identities if we are outside the lightcone
             if j < lslope || j > rslope
                 brick = it.delta(inds[1], inds[1]') * it.delta(inds[2], inds[2]')
                 push!(id_coords, ((i,j), fullinds))
@@ -114,6 +141,7 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
 
 end
 
+"Update Lightcone in-place"
 function updateLightcone!(lightcone::Lightcone, U_array::Vector{<:Matrix})
     n_unitaries = length(U_array)
     if length(lightcone.coords) != n_unitaries
@@ -128,7 +156,7 @@ function updateLightcone!(lightcone::Lightcone, U_array::Vector{<:Matrix})
     end
 end
 
-"Extracts unitaries inside Lightcone to form a 1D array"
+"Flatten Lightcone to 1D array, from bottom to top"
 function Base.Array(lightcone::Lightcone)
     arr::Vector{Matrix} = []
     d = lightcone.d
@@ -138,34 +166,11 @@ function Base.Array(lightcone::Lightcone)
     return arr
 end
 
-
-"Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
-function apply(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
-    psi = it.orthogonalize(psi, b)
-    s = it.siteinds(psi)
-    op = it.op(U, s[b+1], s[b])
-
-    wf = it.noprime((psi[b]*psi[b+1])*op)
-    indsb = it.uniqueinds(psi[b], psi[b+1])
-    U, S, V = it.svd(wf, indsb, cutoff = cutoff)
-    psi[b] = U
-    psi[b+1] = S*V
-    return psi
-end
-
-function contract!(psi::Vector{it.ITensor}, U::it.ITensor, b; cutoff = 1E-15)
-    summed_inds = it.commoninds(U, it.unioninds(psi[b], psi[b+1]))
-    outinds = it.uniqueinds(U, summed_inds)
-    W = U*psi[b]*psi[b+1]
-    it.replaceinds!(W, outinds, summed_inds)
-    indsb = it.uniqueinds(psi[b], psi[b+1])
-    U, S, V = it.svd(W, indsb, cutoff = cutoff)
-    psi[b] = it.replaceinds(U, summed_inds, outinds)
-    psi[b+1] = it.replaceinds(S*V, summed_inds, outinds)
-end
-
 "Apply k-th unitary of lightcone to mps psi"
 function contract!(psi::Vector{it.ITensor}, lightcone::Lightcone, k::Int64; cutoff = 1E-15)
+    if length(psi) < lightcone.size
+        raise(DomainError(length(psi), "Cannot apply lightcone to psi vector, length of psi vector is too small"))
+    end
     (i,j), inds = lightcone.coords[k]
     U = lightcone.circuit[i][j]
     b = 2*j-mod(i,2)    # where to apply the unitary
@@ -189,7 +194,184 @@ function contract!(psi::Vector{it.ITensor}, lightcone::Lightcone; cutoff = 1E-15
     end
 end
 
+"Apply vector of Lightcone to mps"
+function contract!(mps::itmps.MPS, lightcones::Vector{Lightcone}, initial_pos; cutoff = 1E-15)
+    
+    depth = lightcones[1].depth
+    it.prime!(mps, depth)
+    n_lightcones = length(initial_pos)
+    
+    for l in 1:n_lightcones
+        lc = lightcones[l]
+        initpos = initial_pos[l]
 
+        for k in 1:length(lc.coords)
+            (i,j), inds = lc.coords[k]
+            U = lc.circuit[i][j]
+            b = initpos-1 + 2*j-mod(i,2)
+            it.orthogonalize!(mps, b+1)
+            norm0 = norm(mps)
+
+            W = mps[b]*mps[b+1]
+            suminds = it.commoninds(inds, W)
+            outinds = it.uniqueinds(U, suminds)
+            W *= U
+            
+            it.replaceinds!(W, outinds, suminds)
+            indsb = it.uniqueinds(mps[b], mps[b+1])
+            U, S, V = it.svd(W, indsb, cutoff = cutoff)
+            mps[b] = it.replaceinds(U, suminds, outinds)
+            mps[b+1] = it.replaceinds(S*V, suminds, outinds) 
+
+            norm1 = norm(mps)
+            if abs(norm0-norm1)>1E-14
+                throw(DomainError(norm1, "MPS norm has changed during the application of lightcone of initpos $initpos"))
+            end
+        end
+    end
+
+end
+
+"Convert lightcone to MPO"
+function MPO(lightcone::Lightcone)
+    # convert lightcone to mpo by using the ij_dict and the itmps.MPO(it.ITensor) function, keeping track of the deltas for even depths
+
+    circ = lightcone.circuit
+    depth = lightcone.depth
+    siteinds = lightcone.siteinds
+
+    mpo_list = []
+    for layer in lightcone.layers
+        qr_list::Vector{it.ITensor} = []
+        i = layer[1][1][1]
+        if iseven(i)    # add a delta at the edges for even layers
+            push!(qr_list, it.prime(it.delta(siteinds[1], siteinds[1]'), depth-i))
+        end
+        for (pos, inds) in layer
+            Q, R = it.qr(circ[pos[1]][pos[2]], inds[1], inds[3])
+            push!(qr_list, Q)
+            push!(qr_list, R)
+        end
+        if iseven(i)    # add a delta at the edges for even layers
+            push!(qr_list, it.prime(it.delta(siteinds[end], siteinds[end]'), depth-i))
+        end
+        layer_mpo = itmps.MPO(qr_list)
+        push!(mpo_list, layer_mpo)
+    end
+
+    return mpo_list
+end
+
+
+
+
+
+### CUSTOM ITENSOR METHODS
+
+"Converts order-4 ITensor to N x N matrix following the order of indices in 'order'"
+function tensor_to_matrix(T::it.ITensor, order = [1,2,3,4])
+    inds = it.inds(T)
+    ord_inds = [inds[i] for i in order]
+    M = reshape(Array(T, ord_inds), (ord_inds[1].space^2, ord_inds[1].space^2))
+    return M
+end
+
+"Extends m x n isometry to M x M unitary, where M is the power of 2 which bounds max(m, n) from above"
+function iso_to_unitary(V::Union{Matrix, Vector{Float64}})
+    nrows, ncols = size(V, 1), size(V, 2)
+    dagger = false
+    if ncols > nrows
+        V = V'
+        nrows, ncols = ncols, nrows
+        dagger = true
+    end
+    V = V[:, vec(sum(abs.(V), dims=1) .> 1E-10)]
+    nrows, ncols = size(V, 1), size(V, 2)
+
+    bitlength = length(digits(nrows-1, base=2))     # find number of sites of dim 2
+    D = 2^bitlength
+
+    U = zeros(ComplexF64, (D, D))
+    U[1:nrows, 1:ncols] = V
+    kerU = nullspace(U')
+    U[:, ncols+1:D] = kerU
+
+    if dagger
+        U = copy(U')
+    end
+
+    return U
+end
+
+"Computes full polar decomposition"
+function polar(block::it.ITensor, inds::Vector{it.Index{Int64}})
+    spaceU = reduce(*, [ind.space for ind in inds])
+    spaceV = reduce(*, [ind.space for ind in it.uniqueinds(block, inds)])
+    #if spaceU > spaceV
+    #    throw("Polar decomposition of block failed: make sure link space is bigger than physical space")
+    #end
+    U, S, V = it.svd(block, inds)
+    u, v = it.inds(S)
+    
+    Vdag = it.replaceind(conj(V)', v', u)
+    P = Vdag * S * V
+
+    V = it.replaceind(V', v', u)
+    W = U * V
+
+    return W, P
+end
+
+"Computes polar decomposition but only returning P (efficient)"
+function polar_P(block::Vector{it.ITensor}, inds::Vector{it.Index{Int64}})
+    q = length(block)
+    block_conj = [conj(tens)' for tens in block]
+    left_tensor = block[1] * block_conj[1] * it.delta(inds[1], inds[1]')
+    for j in 2:q
+        left_tensor *= block[j] * block_conj[j] * it.delta(inds[j], inds[j]')
+    end
+
+    low_inds = reduce(it.noncommoninds, [block; inds])
+    dim = reduce(*, [ind.space for ind in low_inds])
+    mat = reshape(Array(left_tensor, (low_inds', low_inds)), (dim, dim))
+    P = sqrt(mat)
+    P = it.ITensor(P, (low_inds', low_inds))
+    return P
+end
+
+
+
+
+
+### CUSTOM MPS METHODS ###
+
+"Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
+function apply(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
+    psi = it.orthogonalize(psi, b)
+    s = it.siteinds(psi)
+    op = it.op(U, s[b+1], s[b])
+
+    wf = it.noprime((psi[b]*psi[b+1])*op)
+    indsb = it.uniqueinds(psi[b], psi[b+1])
+    U, S, V = it.svd(wf, indsb, cutoff = cutoff)
+    psi[b] = U
+    psi[b+1] = S*V
+    return psi
+end
+
+"Apply 2-qubit ITensors.ITensor U to sites b and b+1 of Vector{ITensors.ITensor} psi"
+function contract!(psi::Vector{it.ITensor}, U::it.ITensor, b; cutoff = 1E-15)
+    summed_inds = it.commoninds(U, it.unioninds(psi[b], psi[b+1]))
+    outinds = it.uniqueinds(U, summed_inds)
+    W = U*psi[b]*psi[b+1]
+    it.replaceinds!(W, outinds, summed_inds)
+    indsb = it.uniqueinds(psi[b], psi[b+1])
+    U, S, V = it.svd(W, indsb, cutoff = cutoff)
+    psi[b] = it.replaceinds(U, summed_inds, outinds)
+    psi[b+1] = it.replaceinds(S*V, summed_inds, outinds)
+end
+
+"Multiply two Vector{ITensors.ITensor} objects respecting their indices"
 function contract(psi1::Vector{it.ITensor}, psi2::Vector{it.ITensor})
     left_tensor = psi1[1] * psi2[1]
     for i in 2:length(psi1)
@@ -203,7 +385,7 @@ end
 function entropy(psi::itmps.MPS, b::Integer)  
     it.orthogonalize!(psi, b)
     indsb = it.uniqueinds(psi[b], psi[b+1])
-    U, S, V = it.svd(psi[b], indsb, cutoff = 1E-14)
+    U, S, V = it.svd(psi[b], indsb, cutoff = 1E-15)
     SvN = 0.0
     for n in 1:it.dim(S, 1)
       p = S[n,n]^2
@@ -262,6 +444,39 @@ function initialize_fdqc(N::Int, tau::Int)
     return fdqc
 end
 
+
+"Returns mps of Haar random isometries with bond dimension D"
+function randMPS(sites::Vector{<:it.Index}, D::Int)
+    N = length(sites)
+    d = sites[1].space
+
+    mps = itmps.MPS(sites, linkdims = D)
+    links = it.linkinds(mps)
+
+    U0 = it.ITensor(random_unitary(d*D), (sites[1], links[1]', links[1], sites[1]'))
+    U_list = [it.ITensor(random_unitary(d*D), (sites[i], links[i-1], links[i], sites[i]')) for i in 2:N-1]
+    UN = it.ITensor(random_unitary(d*D), (sites[N], links[N-1], links[N-1]', sites[N]'))
+
+    zero_projs::Vector{it.ITensor} = [it.ITensor([1; [0 for _ in 2:d]], site') for site in sites]
+    zero_L = it.ITensor([1; [0 for _ in 2:D]], links[1]')
+    zero_R = it.ITensor([1; [0 for _ in 2:D]], links[N-1]')
+
+    U0 *= zero_L
+    UN *= zero_R
+    U_list = [U0; U_list; UN]
+
+    tensors = [zero_projs[i]*U_list[i] for i in 1:N]
+
+    for i in 1:N
+        mps[i] = tensors[i]
+    end
+    it.orthogonalize!(mps, div(N,2))
+    it.normalize!(mps)
+    it.orthogonalize!(mps, N)   # never touch again
+    return mps
+end
+
+
 "Project sites indexed by 'positions' array to zero. Normalizes at the end"
 function project_tozero(psi::itmps.MPS, positions::Vector{Int64})
     psi = deepcopy(psi)
@@ -279,77 +494,10 @@ function project_tozero(psi::itmps.MPS, positions::Vector{Int64})
 end
 
 
-function polar(block::it.ITensor, inds::Vector{it.Index{Int64}})
-    spaceU = reduce(*, [ind.space for ind in inds])
-    spaceV = reduce(*, [ind.space for ind in it.uniqueinds(block, inds)])
-    #if spaceU > spaceV
-    #    throw("Polar decomposition of block failed: make sure link space is bigger than physical space")
-    #end
-    U, S, V = it.svd(block, inds)
-    u, v = it.inds(S)
-    
-    Vdag = it.replaceind(conj(V)', v', u)
-    P = Vdag * S * V
 
-    V = it.replaceind(V', v', u)
-    W = U * V
 
-    return W, P
-end
 
-"Computes polar decomposition but only returning P (efficient)"
-function polar_P(block::Vector{it.ITensor}, inds::Vector{it.Index{Int64}})
-    q = length(block)
-    block_conj = [conj(tens)' for tens in block]
-    left_tensor = block[1] * block_conj[1] * it.delta(inds[1], inds[1]')
-    for j in 2:q
-        left_tensor *= block[j] * block_conj[j] * it.delta(inds[j], inds[j]')
-    end
-
-    low_inds = reduce(it.noncommoninds, [block; inds])
-    dim = reduce(*, [ind.space for ind in low_inds])
-    mat = reshape(Array(left_tensor, (low_inds', low_inds)), (dim, dim))
-    P = sqrt(mat)
-    P = it.ITensor(P, (low_inds', low_inds))
-    return P
-end
-
-"Converts order-4 ITensor to N x N matrix following the order of indices in 'order'"
-function tensor_to_matrix(T::it.ITensor, order = [1,2,3,4])
-    inds = it.inds(T)
-    ord_inds = [inds[i] for i in order]
-    M = reshape(Array(T, ord_inds), (ord_inds[1].space^2, ord_inds[1].space^2))
-    return M
-end
-
-"Extends m x n isometry to M x M unitary, where M is the power of 2 which bounds max(m, n) from above"
-function iso_to_unitary(V::Union{Matrix, Vector{Float64}})
-    nrows, ncols = size(V, 1), size(V, 2)
-    dagger = false
-    if ncols > nrows
-        V = V'
-        nrows, ncols = ncols, nrows
-        dagger = true
-    end
-    V = V[:, vec(sum(abs.(V), dims=1) .> 1E-10)]
-    nrows, ncols = size(V, 1), size(V, 2)
-
-    bitlength = length(digits(nrows-1, base=2))     # find number of sites of dim 2
-    D = 2^bitlength
-
-    U = zeros(ComplexF64, (D, D))
-    U[1:nrows, 1:ncols] = V
-    kerU = nullspace(U')
-    U[:, ncols+1:D] = kerU
-
-    if dagger
-        U = U'
-    end
-
-    return U
-end
-
-"Convert layer of 2-qudit unitaries ITensor objects"
+### CUSTOM MPO METHODS ###
 
 "Convert unitary to MPO via repeated SVD"
 function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}; d = 2, siteinds = nothing, skip_qudits = 0, orthogonalize = true)
@@ -446,6 +594,10 @@ function Base.:*(mpo1::Vector{it.ITensor}, mpo2::Vector{it.ITensor})
 end
 
 
+
+
+### MALZ-RELATED METHODS ###
+
 "Performs blocking on an MPS, q sites at a time. Returns the blocked MPS as an array of it, together with the siteinds."
 function blocking(mps::Union{Vector{it.ITensor},itmps.MPS}, q::Int)
     N = length(mps)
@@ -465,37 +617,6 @@ function blocking(mps::Union{Vector{it.ITensor},itmps.MPS}, q::Int)
     end
 
     return block_mps, sitegroups
-end
-
-"Returns mps of Haar random isometries with bond dimension D"
-function randMPS(sites::Vector{<:it.Index}, D::Int)
-    N = length(sites)
-    d = sites[1].space
-
-    mps = itmps.MPS(sites, linkdims = D)
-    links = it.linkinds(mps)
-
-    U0 = it.ITensor(random_unitary(d*D), (sites[1], links[1]', links[1], sites[1]'))
-    U_list = [it.ITensor(random_unitary(d*D), (sites[i], links[i-1], links[i], sites[i]')) for i in 2:N-1]
-    UN = it.ITensor(random_unitary(d*D), (sites[N], links[N-1], links[N-1]', sites[N]'))
-
-    zero_projs::Vector{it.ITensor} = [it.ITensor([1; [0 for _ in 2:d]], site') for site in sites]
-    zero_L = it.ITensor([1; [0 for _ in 2:D]], links[1]')
-    zero_R = it.ITensor([1; [0 for _ in 2:D]], links[N-1]')
-
-    U0 *= zero_L
-    UN *= zero_R
-    U_list = [U0; U_list; UN]
-
-    tensors = [zero_projs[i]*U_list[i] for i in 1:N]
-
-    for i in 1:N
-        mps[i] = tensors[i]
-    end
-    it.orthogonalize!(mps, div(N,2))
-    it.normalize!(mps)
-    it.orthogonalize!(mps, N)
-    return mps
 end
 
 
@@ -1013,6 +1134,8 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
         V_downinds = it.uniqueinds(V, V_upinds)
         down_d = reduce(*, [ind.space for ind in V_downinds])  # will be D for i=1, D^2 elsewhere
         V_matrix = reshape(Array(V, V_upinds, V_downinds), (d^(2*bitlength), down_d))      # MUST BE MODIFIED WHEN i=1 or newN THE OUTPUT LEG IS ONLY D
+        @show typeof(V_matrix)
+        @show typeof(iso_to_unitary(V_matrix))
         V_mpo = unitary_to_mpo(iso_to_unitary(V_matrix), siteinds = upinds)
         it.prime!(V_mpo, q - 2*bitlength)
         
