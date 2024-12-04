@@ -87,21 +87,21 @@ end
 
 
 "Compute cost and riemannian gradient"
-function fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITensor})
+function fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::itmps.MPS)
     mt.updateLightcone!(lightcone, U_array)
 
-    mps = [it.prime(tensor, lightcone.depth) for tensor in reduced_mps]
-    conj_mps = deepcopy(mps)
-
-    d = lightcone.d
-    zero_vec = [1; [0 for _ in 1:d-1]]
-    zero_mat = kron(zero_vec, zero_vec')
+    reduced_mps = it.prime(reduced_mps, lightcone.depth)
+    conj_mps = deepcopy(reduced_mps)
 
     # apply each unitary to mps
     mt.contract!(conj_mps, lightcone)
     conj_mps = conj(conj_mps)
+
     # project A region onto |0><0| (using the range property of 
     # lightcone to determine which sites are involved)
+    d = lightcone.d
+    zero_vec = [1; [0 for _ in 1:d-1]]
+    zero_mat = kron(zero_vec, zero_vec')
     for l in lightcone.range[end][1]:lightcone.range[end][2]
         ind = lightcone.sitesAB[l]
         zero_proj = it.ITensor(zero_mat, ind, ind')
@@ -111,7 +111,7 @@ function fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITen
     len = length(lightcone.coords)
     grad::Vector{Matrix} = []
     for k in 1:len
-        mps_low = deepcopy(mps)
+        mps_low = deepcopy(reduced_mps)
         mps_up = deepcopy(conj_mps)
         for l in 1:k-1
             mt.contract!(mps_low, lightcone, l)
@@ -129,14 +129,13 @@ function fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITen
     
     riem_grad = project(U_array, grad)
 
-    # check that the gradient STAYS TANGENT
-    #arrUinv = [U' for U in U_array]
-    #grad_id = arrUinv .* riem_grad
-    #non_skewness = norm(grad_id - skew.(grad_id))
-    #@show non_skewness
+    # # check that the gradient STAYS TANGENT
+    # arrUinv = [U' for U in U_array]
+    # grad_id = arrUinv .* riem_grad
+    # non_skewness = norm(grad_id - skew.(grad_id))
 
-    mt.contract!(mps, lightcone)
-    fid = real(Array(mt.contract(mps, conj_mps))[1])
+    mt.contract!(reduced_mps, lightcone)
+    fid = real(Array(mt.contract(reduced_mps, conj_mps))[1])
     cost = 1-fid
     riem_grad = - riem_grad
 
@@ -154,7 +153,7 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
     N = length(mps)
     siteinds = it.siteinds(mps)
     i = 2
-    initial_pos = []
+    initial_pos::Vector{Int64} = []
     while i < N
         push!(initial_pos, i)
         i += sizeAB+spacing
@@ -169,7 +168,7 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
         it.orthogonalize!(mps, div(i+last_site, 2))
 
         # extract reduced mps on k_sites and construct lightcone structure of depth tau
-        reduced_mps = mps[i:last_site]
+        reduced_mps = itmps.MPS(mps[i:last_site])
         lightcone = mt.newLightcone(k_sites, tau)
 
         # setup optimization stuff
@@ -183,8 +182,8 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
         grad_norms = []
         function finalize!(x, f, g, numiter)
             if f < eps()
-                f = 0
-                g *= eps()
+                #f = 0
+                #g *= eps()
             end
             push!(grad_norms, sqrt(inner(g, g)))
             return x,f,g
@@ -205,7 +204,9 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
         push!(err_list, err)
     end
 
+    it.prime!(mps, tau)
     mt.contract!(mps, lc_list, initial_pos)
+    mps = it.noprime(mps)
 
     return V_list, err_list, mps, lc_list
 end
@@ -220,6 +221,7 @@ siteinds = it.siteinds(mps)
 results = invertMPSLiu(mps, 2, 8, 4)
 mpsfinal, lclist = results[3:4]
 entropies = [mt.entropy(mpsfinal, i) for i in 1:N-1]
+norms = [norm(mpsfinal - mt.project_tozero(mpsfinal, [i])) for i in 1:N]
 
 # reduced_mps = mps[2:9]
 # reduced_inds = siteinds[2:9]

@@ -105,7 +105,9 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
         push!(range, (lrange, rrange))
 
         layer_i_coords = []
-        for j in llim:rlim
+        # sweep over unitaries, from left to right if depth odd, otherwise from right to left
+        # this will be helpful with the og center
+        for j in (isodd(i) ? (llim:rlim) : (rlim:-1:llim))
             # prepare inds for current unitary
             inds = it.prime((siteinds[2*j-mod(i,2)], siteinds[2*j-mod(i,2)+1]), depth-i)
             fullinds = (inds[1], inds[2], inds[1]', inds[2]')
@@ -132,6 +134,9 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
             end
             push!(layer_i, brick)
             push!(layer_i_coords, ((i,j), fullinds))
+        end
+        if iseven(i)
+            reverse!(layer_i)
         end
         push!(circuit, layer_i)
         push!(layers_coords, layer_i_coords)
@@ -166,14 +171,16 @@ function Base.Array(lightcone::Lightcone)
     return arr
 end
 
-"Apply k-th unitary of lightcone to mps psi"
-function contract!(psi::Vector{it.ITensor}, lightcone::Lightcone, k::Int64; cutoff = 1E-15)
-    if length(psi) < lightcone.size
-        raise(DomainError(length(psi), "Cannot apply lightcone to psi vector, length of psi vector is too small"))
+"Apply k-th unitary of lightcone to MPS psi. Lightcone.size must be equal to length(psi)"
+function contract!(psi::itmps.MPS, lightcone::Lightcone, k::Int64; cutoff = 1E-15)
+    l1, l2 = length(psi), lightcone.size
+    if l1 != l2
+        raise(DomainError(l1, "Cannot apply lightcone of size $l2 to mps of length $l1: the two lengths must be equal"))
     end
     (i,j), inds = lightcone.coords[k]
     U = lightcone.circuit[i][j]
     b = 2*j-mod(i,2)    # where to apply the unitary
+    #it.orthogonalize!(psi, b+1)
 
     W = psi[b]*psi[b+1]
     suminds = it.commoninds(inds, W)
@@ -187,18 +194,16 @@ function contract!(psi::Vector{it.ITensor}, lightcone::Lightcone, k::Int64; cuto
     psi[b+1] = it.replaceinds(S*V, suminds, outinds) 
 end
 
-"Apply lightcone to mps psi, from base to top"
-function contract!(psi::Vector{it.ITensor}, lightcone::Lightcone; cutoff = 1E-15)
+"Apply lightcone to mps psi, from base to top. Lightcone.size must be equal to length(psi)"
+function contract!(psi::itmps.MPS, lightcone::Lightcone; cutoff = 1E-15)
     for k in 1:length(lightcone.coords)
         contract!(psi, lightcone, k)
     end
 end
 
-"Apply vector of Lightcone to mps"
-function contract!(mps::itmps.MPS, lightcones::Vector{Lightcone}, initial_pos; cutoff = 1E-15)
+"Apply vector of Lightcones to mps, from base to top. The lightcones positions are specified by the ints contained in initial_pos. Prime level of mps siteinds must be the same as lightcones'."
+function contract!(mps::itmps.MPS, lightcones::Vector{Lightcone}, initial_pos::Vector{<:Int}; cutoff = 1E-15)
     
-    depth = lightcones[1].depth
-    it.prime!(mps, depth)
     n_lightcones = length(initial_pos)
     
     for l in 1:n_lightcones
@@ -371,8 +376,8 @@ function contract!(psi::Vector{it.ITensor}, U::it.ITensor, b; cutoff = 1E-15)
     psi[b+1] = it.replaceinds(S*V, summed_inds, outinds)
 end
 
-"Multiply two Vector{ITensors.ITensor} objects respecting their indices"
-function contract(psi1::Vector{it.ITensor}, psi2::Vector{it.ITensor})
+"Multiply two mps respecting their indices"
+function contract(psi1::Union{itmps.MPS, Vector{it.ITensor}}, psi2::Union{itmps.MPS, Vector{it.ITensor}})
     left_tensor = psi1[1] * psi2[1]
     for i in 2:length(psi1)
         left_tensor *= psi1[i]
