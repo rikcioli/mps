@@ -172,7 +172,7 @@ function Base.Array(lightcone::Lightcone)
 end
 
 "Apply k-th unitary of lightcone to MPS psi. Lightcone.size must be equal to length(psi)"
-function contract!(psi::itmps.MPS, lightcone::Lightcone, k::Int64; cutoff = 1E-15)
+function contract!(psi::Union{itmps.MPS, Vector{it.ITensor}}, lightcone::Lightcone, k::Int64; cutoff = 1E-15)
     l1, l2 = length(psi), lightcone.size
     if l1 != l2
         raise(DomainError(l1, "Cannot apply lightcone of size $l2 to mps of length $l1: the two lengths must be equal"))
@@ -180,7 +180,6 @@ function contract!(psi::itmps.MPS, lightcone::Lightcone, k::Int64; cutoff = 1E-1
     (i,j), inds = lightcone.coords[k]
     U = lightcone.circuit[i][j]
     b = 2*j-mod(i,2)    # where to apply the unitary
-    #it.orthogonalize!(psi, b+1)
 
     W = psi[b]*psi[b+1]
     suminds = it.commoninds(inds, W)
@@ -195,7 +194,7 @@ function contract!(psi::itmps.MPS, lightcone::Lightcone, k::Int64; cutoff = 1E-1
 end
 
 "Apply lightcone to mps psi, from base to top. Lightcone.size must be equal to length(psi)"
-function contract!(psi::itmps.MPS, lightcone::Lightcone; cutoff = 1E-15)
+function contract!(psi::Union{itmps.MPS, Vector{it.ITensor}}, lightcone::Lightcone; cutoff = 1E-15)
     for k in 1:length(lightcone.coords)
         contract!(psi, lightcone, k)
     end
@@ -213,6 +212,13 @@ function contract!(mps::itmps.MPS, lightcones::Vector{Lightcone}, initial_pos::V
         for k in 1:length(lc.coords)
             (i,j), inds = lc.coords[k]
             U = lc.circuit[i][j]
+            Umat = reshape(Array(U, inds), (inds[1].space^2, inds[1].space^2))
+            non_unitarity = norm(Umat'Umat - I)
+            if non_unitarity > 1E-14
+                coords = (i,j)
+                throw(DomainError(non_unitarity, "Non-unitary matrix found in lightcone number $l at coords $coords"))
+            end
+
             b = initpos-1 + 2*j-mod(i,2)
             it.orthogonalize!(mps, b+1)
             norm0 = norm(mps)
@@ -308,6 +314,7 @@ function iso_to_unitary(V::Union{Matrix, Vector{Float64}})
     return U
 end
 
+
 "Computes full polar decomposition"
 function polar(block::it.ITensor, inds::Vector{it.Index{Int64}})
     spaceU = reduce(*, [ind.space for ind in inds])
@@ -397,7 +404,20 @@ function entropy(psi::itmps.MPS, b::Integer)
       SvN -= p * log(p)
     end
     return SvN
-  end
+end
+
+"Truncate mps at position b until bond dimension of link (b, b+1) becomes 1"
+function cut!(psi::itmps.MPS, b::Integer)
+    it.orthogonalize!(psi, b)
+    linkind = it.commonind(psi[b], psi[b+1])
+    indsb = it.uniqueinds(psi[b], psi[b+1])
+    U, S, V = it.svd(psi[b], indsb, cutoff = 1E-15)
+    if length(Array(S, it.inds(S)))>1
+        U, S, V = it.svd(psi[b], indsb, cutoff = S[2]+eps())
+        psi[b] = U*S*V
+        it.normalize!(psi)
+    end
+end
 
 
 function brickwork(psi::itmps.MPS, brick_odd::Matrix, brick_even::Matrix, t::Integer; cutoff = 1E-14)
@@ -498,6 +518,20 @@ function project_tozero(psi::itmps.MPS, positions::Vector{Int64})
     return psi
 end
 
+
+"Project sites indexed by 'positions' array to zero. Normalizes at the end"
+function project_tozero!(psi::itmps.MPS, positions::Vector{Int64})
+    sites = it.siteinds(psi)
+    for b in positions
+        it.orthogonalize!(psi, b)
+        ind = sites[b]
+        zero_vec = [1; [0 for _ in 1:ind.space-1]]
+        zero_proj = it.ITensor(kron(zero_vec, zero_vec'), ind, ind')
+        new_psib = psi[b]*zero_proj
+        norm_psi = real(Array(new_psib * conj(new_psib))[1])
+        psi[b] = it.noprime(new_psib/sqrt(norm_psi))
+    end
+end
 
 
 

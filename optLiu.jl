@@ -36,7 +36,7 @@ end
 
 function skew(arrX::Vector{<:AbstractMatrix})
     arrXinv = [X' for X in arrX]
-    return (arrX - arrXinv)/2
+    return (arrX .- arrXinv)/2
 end
 
 "Project arbitrary array of unitaries arrD onto the tangent space at arrU"
@@ -45,22 +45,45 @@ function project(arrU::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix})
     return arrU .* skew([U' for U in arrU] .* arrD)
 end
 
+function polar(M)
+    U, S, V = svd(M)
+    P = V*diagm(S)*V'
+    W = U*V'
+    return P, W
+end
+
+function polar(arrM::Vector{<:AbstractMatrix})
+    arrU = [polar(M)[2] for M in arrM]
+    return arrU
+end
+
 
 #move  U in the direction of X with step length t, 
 #X is the gradient obtained using projection.
 #return both the "retracted" unitary as well as the tangent vector at the retracted point
+# always stabilize unitarity and skewness, it could leave tangent space due to numerical errors
 function retract(arrU, arrX, t)
-    # check that arrX is tangent at arrU
+
+    # ensure unitarity of arrU
+    arrU_polar = polar(arrU)
+    # non_unitarity = norm(arrU - arrU_polar)/length(arrU)
+    # @show non_unitarity
+    arrU = arrU_polar
+
     arrUinv = [U' for U in arrU]
     arrX_id = arrUinv .* arrX
-    non_skewness = norm(arrX_id - skew.(arrX_id))/length(arrU)
-    if non_skewness > 1E-10
-        throw(DomainError(non_skewness, "arrX is not in the tangent space at arrU"))
-    end
+
+    # ensure skewness of arrX_id
+    # non_skewness = norm(arrX_id - skew(arrX_id))/length(arrU)
+    # @show non_skewness
+    # if non_skewness > 1E-15 + eps()
+    #     throw(DomainError(non_skewness, "arrX is not in the tangent space at arrU"))
+    # end
+    arrX_id = skew(arrX_id)
 
     # construct the geodesic at the tangent space at unity
     # then move it to the correct point by multiplying by arrU
-    arrU_new = arrU .* exp.(t*skew.(arrX_id))
+    arrU_new = arrU .* exp.(t*arrX_id)
 
     # move arrX to the new tangent space arrU_new
     arrX_new = arrU_new .* arrX_id #move first to the tangent space at unity, then to the new point
@@ -87,10 +110,11 @@ end
 
 
 "Compute cost and riemannian gradient"
-function fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::itmps.MPS)
+function fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITensor})
     mt.updateLightcone!(lightcone, U_array)
 
-    reduced_mps = it.prime(reduced_mps, lightcone.depth)
+    #reduced_mps = it.prime(reduced_mps, lightcone.depth)
+    reduced_mps = [it.prime(tensor, lightcone.depth) for tensor in reduced_mps]
     conj_mps = deepcopy(reduced_mps)
 
     # apply each unitary to mps
@@ -136,7 +160,7 @@ function fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::itmps.MPS)
 
     mt.contract!(reduced_mps, lightcone)
     fid = real(Array(mt.contract(reduced_mps, conj_mps))[1])
-    cost = 1-fid
+    cost = -fid
     riem_grad = - riem_grad
 
     return cost, riem_grad
@@ -158,18 +182,26 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
         push!(initial_pos, i)
         i += sizeAB+spacing
     end
+    rangesAB = [(i, min(i+sizeAB-1, N)) for i in initial_pos]
 
     V_list = []
     lc_list::Vector{mt.Lightcone} = []
     err_list = []
     for i in initial_pos
-        last_site = min(i+sizeAB+spacing-1, N)
+        last_site = min(i+sizeAB-1, N)
         k_sites = siteinds[i:last_site]
         it.orthogonalize!(mps, div(i+last_site, 2))
 
         # extract reduced mps on k_sites and construct lightcone structure of depth tau
-        reduced_mps = itmps.MPS(mps[i:last_site])
-        lightcone = mt.newLightcone(k_sites, tau)
+        reduced_mps = mps[i:last_site]
+        lightbounds = (true, true)
+        # FOR NOW CAN ONLY DEAL WITH (TRUE, TRUE) 
+        # if i == 1
+        #     lightbounds = (false, true)
+        # elseif last_site == N
+        #     lightbounds = (true, false)
+        # end
+        lightcone = mt.newLightcone(k_sites, tau; lightbounds = lightbounds)
 
         # setup optimization stuff
         arrU0 = Array(lightcone)
@@ -178,13 +210,9 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
         # Quasi-Newton method
         m = 5
         iter = 1000
-        algorithm = LBFGS(m;maxiter = iter, verbosity = 2)
+        algorithm = LBFGS(m;maxiter = iter, gradtol = 1E-8, verbosity = 2)
         grad_norms = []
         function finalize!(x, f, g, numiter)
-            if f < eps()
-                #f = 0
-                #g *= eps()
-            end
             push!(grad_norms, sqrt(inner(g, g)))
             return x,f,g
         end
@@ -207,8 +235,53 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
     it.prime!(mps, tau)
     mt.contract!(mps, lc_list, initial_pos)
     mps = it.noprime(mps)
+    
 
-    return V_list, err_list, mps, lc_list
+    ncones = length(lc_list)
+    rangesC = []
+    for i in 1:ncones-1
+        rel_range = lc_list[i].range[end][2]
+        ninit = initial_pos[i] + rel_range
+        nend = ninit + 2*(tau-1) + spacing - 1
+        push!(rangesC, (ninit,nend))
+    end
+    
+    @show rangesC
+
+    # project to 0 the sites which are supposed to be already 0
+    mps_trunc = deepcopy(mps)
+    
+    rangesA = [(1, rangesC[1][1]-1)]
+    nC = length(rangesC)
+    for l in 2:nC
+        push!(rangesA, (rangesC[l-1][2]+1, rangesC[l][1]-1))
+    end
+    push!(rangesA, (rangesC[end][2]+1, N))
+    @show rangesA
+
+    for range in rangesA
+        mt.project_tozero!(mps_trunc, [i for i in range[1]:range[2]])
+    end
+    siteinds = it.siteinds(mps_trunc)
+
+    results_second_part = []
+    for range in rangesC
+        # extract reduced mps and remove external linkind (which will be 1-dim)
+        reduced_mps = mps_trunc[range[1]:range[2]]
+
+        comb1 = it.combiner(it.linkinds(mps_trunc)[range[1]-1], siteinds[range[1]])
+        reduced_mps[1] *= comb1
+
+        comb2 = it.combiner(it.linkinds(mps_trunc)[range[2]], siteinds[range[2]])
+        reduced_mps[end] *= comb2
+
+
+        reduced_mps = itmps.MPS(reduced_mps)
+        _, fid_best, _, tau_best = mt.invertBW(reduced_mps)
+        push!(results_second_part, [fid_best, tau_best])
+    end
+
+    return V_list, err_list, mps, lc_list, mps_trunc, results_second_part
 end
 
 
@@ -219,9 +292,12 @@ mps = mt.initialize_fdqc(N, 2)
 siteinds = it.siteinds(mps)
 
 results = invertMPSLiu(mps, 2, 8, 4)
-mpsfinal, lclist = results[3:4]
+mpsfinal, lclist, mps_trunc, second_part = results[3:6]
 entropies = [mt.entropy(mpsfinal, i) for i in 1:N-1]
 norms = [norm(mpsfinal - mt.project_tozero(mpsfinal, [i])) for i in 1:N]
+
+
+
 
 # reduced_mps = mps[2:9]
 # reduced_inds = siteinds[2:9]
