@@ -176,9 +176,9 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
     mps = deepcopy(mps)
     N = length(mps)
     siteinds = it.siteinds(mps)
-    i = 2
+    i = spacing+1
     initial_pos::Vector{Int64} = []
-    while i < N
+    while i+sizeAB-1 < N+1
         push!(initial_pos, i)
         i += sizeAB+spacing
     end
@@ -194,13 +194,9 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
 
         # extract reduced mps on k_sites and construct lightcone structure of depth tau
         reduced_mps = mps[i:last_site]
-        lightbounds = (true, true)
-        # FOR NOW CAN ONLY DEAL WITH (TRUE, TRUE) 
-        # if i == 1
-        #     lightbounds = (false, true)
-        # elseif last_site == N
-        #     lightbounds = (true, false)
-        # end
+        # FOR NOW CAN ONLY DEAL WITH (TRUE, TRUE)
+        lightbounds = (i==1 ? false : true, last_site==N ? false : true)
+
         lightcone = mt.newLightcone(k_sites, tau; lightbounds = lightbounds)
 
         # setup optimization stuff
@@ -229,7 +225,7 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
 
         push!(lc_list, lightcone)
         push!(V_list, arrUmin)
-        push!(err_list, err)
+        push!(err_list, 1+err)
     end
 
     it.prime!(mps, tau)
@@ -247,56 +243,58 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
     end
     
     @show rangesC
-
-    # project to 0 the sites which are supposed to be already 0
-    mps_trunc = deepcopy(mps)
-    
-    rangesA = [(1, rangesC[1][1]-1)]
-    nC = length(rangesC)
-    for l in 2:nC
-        push!(rangesA, (rangesC[l-1][2]+1, rangesC[l][1]-1))
-    end
-    push!(rangesA, (rangesC[end][2]+1, N))
-    @show rangesA
-
-    for range in rangesA
-        mt.project_tozero!(mps_trunc, [i for i in range[1]:range[2]])
-    end
-    siteinds = it.siteinds(mps_trunc)
-
     results_second_part = []
-    for range in rangesC
-        # extract reduced mps and remove external linkind (which will be 1-dim)
-        reduced_mps = mps_trunc[range[1]:range[2]]
+    mps_trunc = deepcopy(mps)
+    if length(rangesC) > 0
+        # project to 0 the sites which are supposed to be already 0
+        
+        rangesA = [(1, rangesC[1][1]-1)]
+        nC = length(rangesC)
+        for l in 2:nC
+            push!(rangesA, (rangesC[l-1][2]+1, rangesC[l][1]-1))
+        end
+        push!(rangesA, (rangesC[end][2]+1, N))
+        @show rangesA
 
-        comb1 = it.combiner(it.linkinds(mps_trunc)[range[1]-1], siteinds[range[1]])
-        reduced_mps[1] *= comb1
+        for range in rangesA
+            mt.project_tozero!(mps_trunc, [i for i in range[1]:range[2]])
+        end
+        siteinds = it.siteinds(mps_trunc)
 
-        comb2 = it.combiner(it.linkinds(mps_trunc)[range[2]], siteinds[range[2]])
-        reduced_mps[end] *= comb2
+        for range in rangesC
+            # extract reduced mps and remove external linkind (which will be 1-dim)
+            reduced_mps = mps_trunc[range[1]:range[2]]
+
+            comb1 = it.combiner(it.linkinds(mps_trunc)[range[1]-1], siteinds[range[1]])
+            reduced_mps[1] *= comb1
+
+            comb2 = it.combiner(it.linkinds(mps_trunc)[range[2]], siteinds[range[2]])
+            reduced_mps[end] *= comb2
 
 
-        reduced_mps = itmps.MPS(reduced_mps)
-        _, fid_best, _, tau_best = mt.invertBW(reduced_mps)
-        push!(results_second_part, [fid_best, tau_best])
+            reduced_mps = itmps.MPS(reduced_mps)
+            
+            _, fid_best, _, tau_best = mt.invertBW(reduced_mps)
+            push!(results_second_part, [fid_best, tau_best])
+        end
     end
 
     return V_list, err_list, mps, lc_list, mps_trunc, results_second_part
 end
 
 
-N = 31
+N = 8
 #siteinds = it.siteinds("Qubit", N)
 #mps = mt.randMPS(siteinds, 2)
-mps = mt.initialize_fdqc(N, 2)
+mps = mt.initialize_fdqc(N, 3)
 siteinds = it.siteinds(mps)
 
-results = invertMPSLiu(mps, 2, 8, 4)
+results = invertMPSLiu(mps, 3, 8, 0)
 mpsfinal, lclist, mps_trunc, second_part = results[3:6]
 entropies = [mt.entropy(mpsfinal, i) for i in 1:N-1]
 norms = [norm(mpsfinal - mt.project_tozero(mpsfinal, [i])) for i in 1:N]
 
-
+res = mt.invertBW(mps)
 
 
 # reduced_mps = mps[2:9]
