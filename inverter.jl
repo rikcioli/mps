@@ -8,33 +8,6 @@ using DelimitedFiles
 
 
 
-function invertMPSLiu(mps::itmps.MPS, sizeAB, tau; d = 2)
-
-    isodd(sizeAB) &&
-        throw(DomainError(sizeAB, "Choose an even number for sizeAB"))
-
-    siteinds = it.siteinds(mps)
-    k_sites = siteinds[1:sizeAB]
-    # select lightcone shape 
-    # left shape can be 'light' (/) or 'straight' (|)
-    # right shape can be 'light' (\) or 'straight' (|)
-    lshape = "light"
-    rshape = "light"
-
-    # iterate over regions
-    for region in mps
-
-        # for each region, we construct the cost function and its gradient
-        # items needed for the cost: whole mps to access inds (actually only region needed for computations)
-        # depth, array of unitary matrices which is a point on U(4)^n
-
-
-
-    end
-
-
-end
-
 # Prepare initial state
 
 N = 6

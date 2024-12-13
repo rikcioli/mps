@@ -3,110 +3,8 @@ import .MPSMethods as mt
 import ITensorMPS as itmps
 import ITensors as it
 import Plots
-using OptimKit, LaTeXStrings, LinearAlgebra
 
-
-#this function fixes the phases; each column of a unitary has an arbitrary phase
-# by choosing the phase ϕ_i to be the phase of the largest entry in the i'th column
-function fix_phase(U)
-    ϕs = []
-    for v in eachcol(U)
-        i = argmax(abs.(v))
-        ϕ = atan(imag(v[i]),real(v[i]))
-        push!(ϕs,ϕ)
-    end
-    return U*diagm(exp.(-1im*ϕs))
-end
-
-"Geodesic distance between two arrays of unitaries"
-function dist_un(arrU1::Vector{<:AbstractMatrix}, arrU2::Vector{<:AbstractMatrix})
-    distances_sq = []
-    for k in length(arrU1)
-        U1, U2 = arrU1[k], arrU2[k]
-        V = eigvals(fix_phase(U1)'fix_phase(U2))
-        dist_sq = sum(map(x->atan(imag(x),real(x))^2,V)) +eps()
-        push!(distances_sq, dist_sq)
-    end
-    return sqrt(sum(distances_sq)) 
-end
-
-function skew(X)
-    return (X - X')/2
-end
-
-function skew(arrX::Vector{<:AbstractMatrix})
-    arrXinv = [X' for X in arrX]
-    return (arrX .- arrXinv)/2
-end
-
-"Project arbitrary array of unitaries arrD onto the tangent space at arrU"
-function project(arrU::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix})
-    #return (arrD .- (arrU .* [D' for D in arrD] .* arrU))/2
-    return arrU .* skew([U' for U in arrU] .* arrD)
-end
-
-function polar(M)
-    U, S, V = svd(M)
-    P = V*diagm(S)*V'
-    W = U*V'
-    return P, W
-end
-
-function polar(arrM::Vector{<:AbstractMatrix})
-    arrU = [polar(M)[2] for M in arrM]
-    return arrU
-end
-
-
-#move  U in the direction of X with step length t, 
-#X is the gradient obtained using projection.
-#return both the "retracted" unitary as well as the tangent vector at the retracted point
-# always stabilize unitarity and skewness, it could leave tangent space due to numerical errors
-function retract(arrU, arrX, t)
-
-    # ensure unitarity of arrU
-    arrU_polar = polar(arrU)
-    # non_unitarity = norm(arrU - arrU_polar)/length(arrU)
-    # @show non_unitarity
-    arrU = arrU_polar
-
-    arrUinv = [U' for U in arrU]
-    arrX_id = arrUinv .* arrX
-
-    # ensure skewness of arrX_id
-    # non_skewness = norm(arrX_id - skew(arrX_id))/length(arrU)
-    # @show non_skewness
-    # if non_skewness > 1E-15 + eps()
-    #     throw(DomainError(non_skewness, "arrX is not in the tangent space at arrU"))
-    # end
-    arrX_id = skew(arrX_id)
-
-    # construct the geodesic at the tangent space at unity
-    # then move it to the correct point by multiplying by arrU
-    arrU_new = arrU .* exp.(t*arrX_id)
-
-    # move arrX to the new tangent space arrU_new
-    arrX_new = arrU_new .* arrX_id #move first to the tangent space at unity, then to the new point
-    return arrU_new, arrX_new
-end
-
-function inner(arrU, arrX, arrY)
-    return real(tr(arrX'*arrY))
-end
-function inner(arrX, arrY)
-    return real(tr(arrX'*arrY))
-end
-
-#parallel transport
-"""transport tangent vector ξ along the retraction of x in the direction η (same type as a gradient) 
-with step length α, can be in place but the return value is used. 
-Transport also receives x′ = retract(x, η, α)[1] as final argument, 
-which has been computed before and can contain useful data that does not need to be recomputed"""
-function transport!(ξ, arrU, η, α, arrU_new)
-    arrUinv = [U' for U in arrU]
-    ξ = arrU_new .* arrUinv .* ξ
-    return ξ
-end
+using OptimKit, LaTeXStrings, LinearAlgebra, Statistics
 
 
 "Compute cost and riemannian gradient"
@@ -151,7 +49,7 @@ function fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITen
         push!(grad, ddUk)
     end
     
-    riem_grad = project(U_array, grad)
+    riem_grad = mt.project(U_array, grad)
 
     # # check that the gradient STAYS TANGENT
     # arrUinv = [U' for U in U_array]
@@ -170,11 +68,13 @@ end
 function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
 
     @assert tau > 0
+    
     isodd(sizeAB) && throw(DomainError(sizeAB, "Choose an even number for sizeAB"))
     isodd(spacing) && throw(DomainError(spacing, "Choose an even number for the spacing between regions"))
 
-    mps = deepcopy(mps)
     N = length(mps)
+    isodd(N) && throw(DomainError(N, "Choose an even number for N"))
+    mps = deepcopy(mps)
     siteinds = it.siteinds(mps)
     i = spacing+1
     initial_pos::Vector{Int64} = []
@@ -207,15 +107,10 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
         m = 5
         iter = 1000
         algorithm = LBFGS(m;maxiter = iter, gradtol = 1E-8, verbosity = 2)
-        grad_norms = []
-        function finalize!(x, f, g, numiter)
-            push!(grad_norms, sqrt(inner(g, g)))
-            return x,f,g
-        end
 
         # optimize and store results
         # note that arrUmin is already stored in current lightcone, ready to be applied to mps
-        arrUmin, err, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport =true , inner = inner, finalize! = finalize!);
+        arrUmin, err, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = mt.retract, transport! = mt.transport!, isometrictransport =true , inner = mt.inner);
         
         # reduced_mps = [it.prime(tensor, tau) for tensor in reduced_mps]
         # mt.contract!(reduced_mps, lightcone)
@@ -283,14 +178,205 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
 end
 
 
-N = 8
-#siteinds = it.siteinds("Qubit", N)
-#mps = mt.randMPS(siteinds, 2)
-mps = mt.initialize_fdqc(N, 3)
+function _fgGlobal(U_array::Vector{<:Matrix}, lightcone, mpo, mpo_low)
+    mpo = deepcopy(mpo)
+    mpo_low = deepcopy(mpo_low)
+    mt.updateLightcone!(lightcone, U_array)
+    len = length(lightcone.coords)
+    # compute gradient by removing one unitary at a time and applying
+    # all unitaries that come before to the virtual mpo_low
+    # all unitaries that come after to the original mpo
+    # the shift to the next unitary is made by applying U_k Udag_k+1
+    grad::Vector{Matrix} = []
+    for k in len:-1:2   # contract up to first unitary
+        mt.contract!(mpo, lightcone, k)
+    end
+
+    # evaluate gradient by sweeping over snake of unitaries
+    d = lightcone.d
+    for k in 1:len
+        _, inds_k = lightcone.coords[k]
+        ddUk = mt.contract(mpo, mpo_low)
+        ddUk = Array(ddUk, inds_k)
+        ddUk = conj(reshape(ddUk, (d^2, d^2)))
+        push!(grad, ddUk)
+        if k < len
+            mt.contract!(mpo_low, lightcone, k)
+            mt.contract!(mpo, lightcone, k+1; dagger=true)
+        end
+    end
+    # compute total overlap (which is a complex number)
+    mt.contract!(mpo_low, lightcone, len)
+    overlap = Array(mt.contract(mpo, mpo_low))[1]
+    abs_ov = abs(overlap)
+
+    # correct gradient to account for a smooth cost function (the overlap squared)
+    grad *= overlap/abs_ov
+    riem_grad = mt.project(U_array, grad)
+
+    # put a - sign so that it minimizes
+    cost = -abs_ov
+    riem_grad = -riem_grad
+
+    return cost, riem_grad
+end
+
+# NEW VERSION USING OPT TECH
+"Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
+If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
+function invertGlobal(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; d = 2, conv_err = 1E-6, n_sweeps = 1E6)
+    mpo = deepcopy(mpo)
+    N = length(mpo)
+    siteinds = input_inds
+
+    # create random brickwork circuit
+    # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
+    lightcone = mt.newLightcone(siteinds, tau; lightbounds = (false, false))
+
+    if N == 2   #solution is immediate via SVD
+        env = conj(mpo[1]*mpo[2])
+
+        inds = siteinds
+        U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
+        u, v = it.commonind(U, S), it.commonind(Vdag, S)
+
+        # evaluate fidelity
+        newfid = real(tr(Array(S, (u, v))))
+        gate_ji_opt = U * it.replaceind(Vdag, v, u)
+        lightcone.circuit[1][1] = gate_ji_opt
+
+        if mpo_mode
+            newfid /= 2^N # normalize if mpo mode
+        end
+
+        println("Matrix is 2-local, converged to fidelity $newfid immediately")
+        return lightcone, newfid
+    end
+
+    # we create a virtual lower mpo to temporarily contract left snakes with
+    # it will just be an array of deltas that will be contracted at the end with the 
+    # upper mpo (which is the original mpo) and the left snakes
+    dim = output_inds[1].space
+    new_outinds = it.siteinds(dim, N)
+    mpo_low::Vector{it.ITensor} = []
+    for i in 1:N
+        it.replaceind!(mpo[i], output_inds[i], new_outinds[i])
+        push!(mpo_low, it.delta(new_outinds[i], it.prime(siteinds[i], tau)))
+    end
+
+
+    # setup optimization stuff
+    arrU0 = Array(lightcone)
+    fg = arrU -> _fgGlobal(arrU, lightcone, mpo, mpo_low)
+
+
+    # testing riemannian gradient
+    n_unitaries = length(lightcone.coords)
+    # generate random point on M
+    arrU0 = [mt.random_unitary(4) for _ in 1:n_unitaries]
+    arrU0dag = [U' for U in arrU0]
+    # 
+    # # generate random tangent Vector
+    arrV = [mt.random_unitary(4) for _ in 1:n_unitaries]
+    arrV = mt.skew.(arrV)
+    arrV = arrU0 .* arrV
+    arrV /= sqrt(mt.inner(arrV, arrV))
+    
+    func, grad = fg(arrU0)
+    prod = mt.inner(grad, arrV)
+    
+    # compute E(t) for several values of t
+    E = t -> abs(fg(mt.retract(arrU0, arrV, t)[1])[1] - func - t*prod)
+    
+    tvals = exp10.(-8:0.1:0)
+    
+    Plots.plot(tvals, E.(tvals), yscale=:log10, xscale=:log10, legend=:bottomright)
+    Plots.plot!(tvals, tvals .^2, yscale=:log10, xscale=:log10, label=L"O(t^2)")
+    Plots.plot!(tvals, tvals, yscale=:log10, xscale=:log10, label=L"O(t)")
+    Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\gradtest2.png");
+
+    # Quasi-Newton method
+    m = 5
+    iter = 1000
+    algorithm = LBFGS(m;maxiter = iter, gradtol = 1E-8, verbosity = 2)
+
+    # optimize and store results
+    # note that arrUmin is already stored in current lightcone, ready to be applied to mps
+    arrUmin, cost, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = mt.retract, transport! = mt.transport!, isometrictransport =true , inner = mt.inner);
+
+    return lightcone, 1+cost, gradmin, numfg, normgradhistory
+
+end
+
+"Calls invertBW for Vector{ITensor} mpo input with increasing inversion depth tau until it converges with fidelity F = 1-err_to_one"
+function invertGlobal(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; err_to_one = 1E-6, start_tau = 1, n_runs = 10, kargs...)
+    println("Tolerance $err_to_one, starting from depth $start_tau")
+    tau = start_tau
+    found = false
+
+    while !found
+        println("Attempting depth $tau...")
+        bw, err, sweep = invertGlobal(mpo, tau, input_inds, output_inds; kargs...)
+
+        if abs(err) < err_to_one
+            found = true
+            println("Convergence within desired error achieved with depth $tau\n")
+            return bw, err, sweep
+        end
+        
+        #if tau > 9
+        #    println("Attempt stopped at tau = $tau, ITensor cannot go above")
+        #    break
+        #end
+
+        tau += 1
+    end
+    return bw_best, err_best, sweep_best, tau
+end
+
+"Wrapper for ITensorsMPS.MPS input. Calls invertBW by first conjugating mps (mps to invert must be above)
+and then preparing a layer of zero bras to construct the mpo |0><psi|"
+function invertGlobal(mps::itmps.MPS; tau = 0, kargs...)
+    N = length(mps)
+    obj = typeof(mps)
+    println("Attempting inversion of $obj")
+    mps = conj(mps)
+    siteinds = it.siteinds(mps)
+    outinds = siteinds'
+
+    for i in 1:N
+        ind = siteinds[i]
+        vec = [1; [0 for _ in 1:ind.space-1]]
+        mps[i] *= it.ITensor(vec, ind')
+    end
+
+
+    if iszero(tau)
+        results = invertGlobal(mps[1:end], siteinds, outinds; kargs...)
+    else
+        results = invertGlobal(mps[1:end], tau, siteinds, outinds; kargs...)
+    end
+    return results
+end
+
+
+N = 15
+
+mps = mt.randMPS(N, 2)
+#mps = mt.initialize_fdqc(N, 3)
 siteinds = it.siteinds(mps)
 
-results = invertMPSLiu(mps, 3, 8, 0)
-mpsfinal, lclist, mps_trunc, second_part = results[3:6]
+#results = invertMPSLiu(mps, 3, 8, 0)
+#mpsfinal, lclist, mps_trunc, second_part = results[3:6]
+
+results = invertGlobal(mps, tau=2)
+#results2 = mt.invertMPSMalz(mps)
+
+Plots.plot(results[5][:,2],label ="L-BFGS",yscale =:log10)
+Plots.plot!(xlabel = "iterations",ylabel = L"||\nabla{f}||")
+Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\gradhist.png");
+
+
 entropies = [mt.entropy(mpsfinal, i) for i in 1:N-1]
 norms = [norm(mpsfinal - mt.project_tozero(mpsfinal, [i])) for i in 1:N]
 
@@ -343,16 +429,16 @@ res = mt.invertBW(mps)
 
 
 # # testing riemannian gradient
-# 
+# n_unitaries = length(lightcone.coords)
 # # generate random point on M
 # arrU0 = [mt.random_unitary(4) for _ in 1:n_unitaries]
 # arrU0dag = [U' for U in arrU0]
 # # 
 # # # generate random tangent Vector
 # arrV = [mt.random_unitary(4) for _ in 1:n_unitaries]
-# arrV = skew.(arrV)
+# arrV = mt.skew.(arrV)
 # arrV = arrU0 .* arrV
-# arrV /= sqrt(inner(arrV, arrV))
+# arrV /= sqrt(mt.inner(arrV, arrV))
 # 
 # # compute f and gradf, check that gradf is in TxM and compute inner prod in x
 # fg = arrU -> fgLiu(arrU, lightcone, reduced_mps)
@@ -377,7 +463,7 @@ res = mt.invertBW(mps)
 # 
 # 
 # # compute E(t) for several values of t
-# E = t -> abs(fg(retract(arrU0, arrV, t)[1])[1] - func - t*prod)
+# E = t -> abs(fg(mt.retract(arrU0, arrV, t)[1])[1] - func - t*prod)
 # 
 # tvals = exp10.(-8:0.1:0)
 # 
