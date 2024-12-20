@@ -19,8 +19,14 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
 
     # extract number of sites on which lightcone acts
     sizeAB = length(siteinds)
-    isodd(sizeAB) && lightbounds[2] == true &&
-        throw(DomainError(sizeAB, "Right lightbound can't be true for sizeAB odd"))
+    if isodd(sizeAB) 
+        lightbounds[2] == true && throw(DomainError(sizeAB, "Right lightbound can't be true for sizeAB odd"))
+        if depth == 1 
+            @warn "Odd number of sites for depth 1 lightcone leaves the last site empty, reducing size by 1"
+            sizeAB -= 1
+            siteinds = siteinds[1:end-1]
+        end
+    end
 
     # count the minimum sizeAB has to be to construct a circuit of depth 'depth'
     n_light = count(lightbounds)    # count how many boundaries have 'light' type structure

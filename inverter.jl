@@ -10,15 +10,15 @@ using DelimitedFiles
 
 # Prepare initial state
 
-N = 6
-tau = 2
-inverter_tau = 4 # 8 IS MAX TO CONTRACT ENVIRONMENT
+N = 15
+tau = 4
+inverter_tau = 4 # 10 IS MAX TO CONTRACT ENVIRONMENT
 
 "Select case:
 1: FDQC of depth tau
 2: Random MPS of bond dim tau
 3: GHZ"
-case = 2
+case = 1
 proj = []
 
 # unitary = mt.CX * kron(mt.H, mt.Id)
@@ -50,11 +50,10 @@ let mps
     elseif case == 3
         mps = mt.initialize_ghz(N)
     end
-
+        
     # NOTE: if malz is used, inverter_tau sets the value of blocking size q
-    global W_list, U_list, fid, sweep, W_tau_list, U_tau_list = mt.invertMPSMalz(mps; eps_malz = 0.1, eps_bell = 0.1, eps_V = 0.3)
-    println("Algorithm stopped after $sweep sweeps \nFidelity = $fid")
-
+    
+    global W_list, U_list, err, W_tau_list, U_tau_list = mt.invertMPSMalzGlobal(mps; eps_malz = 0.1, eps_bell = 0.1, eps_V = 0.3)
     #U = U_list[1][3]
     #inputind = it.inds(U_list[1][3])[end]
     #results = mt.invertBW(U, inputind, n_sweeps = 100)
@@ -66,7 +65,9 @@ let mps
 end
 
 
-
+# U = mt.random_unitary(8)
+# mpo = mt.unitary_to_mpo(U)
+# results = mt.invertGlobal(mpo)
 
 
 #unitaries = [reshape(Array(circ[i,j], it.inds(circ[i,j])), (4, 4)) for i in 1:tau, j in 1:div(N,2)]

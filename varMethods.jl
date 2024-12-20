@@ -382,8 +382,8 @@ end
 # NEW VERSION USING OPT TECH
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertGlobal(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; d = 2, conv_err = 1E-6, n_sweeps = 1E6)
-    mpo = deepcopy(mpo)
+function invertGlobal(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; maxiter = 1000, gradtol = 1E-8)
+    mpo = deepcopy(mpo[1:end])
     N = length(mpo)
     siteinds = input_inds
 
@@ -404,7 +404,7 @@ function invertGlobal(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Inde
         lightcone.circuit[1][1] = gate_ji_opt
 
         println("Matrix is 2-local, converged to fidelity $newfid immediately")
-        return lightcone, newfid
+        return lightcone, -newfid, nothing
     end
 
     # we create a virtual lower mpo to temporarily contract left snakes with
@@ -418,58 +418,54 @@ function invertGlobal(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Inde
         push!(mpo_low, it.delta(new_outinds[i], it.prime(siteinds[i], tau)))
     end
 
-
     # setup optimization stuff
     arrU0 = Array(lightcone)
     fg = arrU -> _fgGlobal(arrU, lightcone, mpo, mpo_low)
 
     # Quasi-Newton method
     m = 5
-    iter = 1000
-    algorithm = LBFGS(m;maxiter = iter, gradtol = 1E-8, verbosity = 2)
+    algorithm = LBFGS(m;maxiter = maxiter, gradtol = gradtol, verbosity = 1)
 
     # optimize and store results
     # note that arrUmin is already stored in current lightcone, ready to be applied to mps
-    arrUmin, cost, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport =true , inner = inner);
+    arrUmin, neg_overlap, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport =true , inner = inner);
 
-    return lightcone, 1+cost, gradmin, numfg, normgradhistory
+    return lightcone, neg_overlap, gradmin, numfg, normgradhistory
 
 end
 
 
-"Calls invertBW for Vector{ITensor} mpo input with increasing inversion depth tau until it converges with fidelity F = 1-err_to_one"
-function invertGlobal(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; err_to_one = 1E-6, start_tau = 1, n_runs = 10, kargs...)
-    println("Tolerance $err_to_one, starting from depth $start_tau")
+"Calls invertBW for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
+function invertGlobal(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; overlap = 1, eps = 1E-6, start_tau = 2, kargs...)
+    obj = typeof(mpo)
+    println("Attempting inversion of $obj to overlap $overlap up to error $eps, starting from depth $start_tau")
     tau = start_tau
     found = false
 
     while !found
         println("Attempting depth $tau...")
-        bw, err, sweep = invertGlobal(mpo, tau, input_inds, output_inds; kargs...)
-
-        if abs(err) < err_to_one
+        lc, neg_overlap, rest... = invertGlobal(mpo, tau, input_inds, output_inds; kargs...)
+        err = abs(overlap + neg_overlap)
+        if err < eps
             found = true
             println("Convergence within desired error achieved with depth $tau\n")
-            return bw, err, sweep
+            return tau, lc, err, rest...
         end
         
-        #if tau > 9
-        #    println("Attempt stopped at tau = $tau, ITensor cannot go above")
-        #    break
-        #end
+        if tau > 15
+            println("Attempt stopped at tau = $tau, ITensor cannot go above")
+            break
+        end
 
         tau += 1
     end
-    return bw_best, err_best, sweep_best, tau
 end
 
 
-"Wrapper for ITensorsMPS.MPS input. Calls invertBW by first conjugating mps (mps to invert must be above)
-and then preparing a layer of zero bras to construct the mpo |0><psi|"
+"Wrapper for ITensorsMPS.MPS input. Before calling invertGlobal, it conjugates mps (mps to invert must be above)
+and prepares a layer of zero bras to construct the mpo |0><psi|. Then calls invertGlobal with overlap 1 and error eps"
 function invertGlobal(mps::itmps.MPS; tau = 0, kargs...)
     N = length(mps)
-    obj = typeof(mps)
-    println("Attempting inversion of $obj")
     mps = conj(mps)
     siteinds = it.siteinds(mps)
     outinds = siteinds'
@@ -482,10 +478,40 @@ function invertGlobal(mps::itmps.MPS; tau = 0, kargs...)
 
 
     if iszero(tau)
-        results = invertGlobal(mps[1:end], siteinds, outinds; kargs...)
+        tau, lc, err, rest... = invertGlobal(mps, siteinds, outinds; overlap=1, kargs...)
+        return tau, lc, err, rest...
     else
-        results = invertGlobal(mps[1:end], tau, siteinds, outinds; kargs...)
+        lc, neg_overlap, rest... = invertGlobal(mps, tau, siteinds, outinds; kargs...)
+        return lc, abs(1+neg_overlap), rest...
     end
-    return results
+
 end
 
+
+"Wrapper for ITensorsMPS.MPO input. Calls invertGlobal by first conjugating and extracting upper and lower indices"
+function invertGlobal(mpo::itmps.MPO; tau = 0, kargs...)
+    N = length(mpo)
+    mpo = conj(mpo)
+    allinds = reduce(vcat, it.siteinds(mpo))
+    # determine primelevel of inputinds, which will be the lowest found in allinds
+    first2inds = allinds[1:2]   
+    plev_in = 0
+    while true
+        ind = it.inds(first2inds, plev = plev_in)
+        if length(ind) > 0
+            break
+        end
+        plev_in += 1
+    end
+    siteinds = it.inds(allinds, plev = plev_in)
+    outinds = it.uniqueinds(allinds, siteinds)
+
+    if iszero(tau)
+        tau, lc, err, rest... = invertGlobal(mpo, siteinds, outinds; overlap = 2^N, kargs...)
+        return tau, lc, err, rest...
+    else
+        lc, neg_overlap, rest... = invertGlobal(mpo, tau, siteinds, outinds; kargs...)
+        return lc, abs(2^N+neg_overlap), rest...
+    end
+
+end
