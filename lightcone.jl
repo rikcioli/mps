@@ -20,12 +20,10 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
     # extract number of sites on which lightcone acts
     sizeAB = length(siteinds)
     if isodd(sizeAB) 
-        lightbounds[2] == true && throw(DomainError(sizeAB, "Right lightbound can't be true for sizeAB odd"))
-        if depth == 1 
-            @warn "Odd number of sites for depth 1 lightcone leaves the last site empty, reducing size by 1"
-            sizeAB -= 1
-            siteinds = siteinds[1:end-1]
-        end
+        lightbounds[2] == true && 
+            throw(DomainError(sizeAB, "Right lightbound can't be true for sizeAB odd"))
+        depth == 1 &&
+            throw(DomainError(depth, "Depth 1 lightcone for an odd number of sites leaves the last site empty"))
     end
 
     # count the minimum sizeAB has to be to construct a circuit of depth 'depth'
@@ -93,16 +91,22 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
             # we simulate this by decreasing the prime level of the upper index of the first and last gate of the odd layers
             # so that they are connected directly to the odd layer above
             if i < depth
-                if j == llim && isodd(i)
-                    fullinds[1] = it.prime(inds[1],-1)
+                if j == llim 
+                    if lightbounds[1]
+                        fullinds[1] = it.noprime(inds[1])
+                    elseif isodd(i)
+                        fullinds[1] = it.prime(inds[1],-1)
+                    end
                 elseif j == rlim
+                    if lightbounds[2]
+                        fullinds[2] = it.noprime(inds[2])
                     # if size even increase the right index of the odd layers, if size odd increase right index of even layers
-                    if (iseven(sizeAB) && isodd(i)) || (isodd(sizeAB) && iseven(i))
+                    elseif (iseven(sizeAB) && isodd(i)) || (isodd(sizeAB) && iseven(i))
                         fullinds[2] = it.prime(inds[2],-1)
                     end
                 end
             end
-            # special case for i=2 since we have to connect the rightmost unitary to the max prime level
+            # special case for i=2 and odd sizeAB since we have to connect the rightmost unitary to the max prime level
             if i == 2 && isodd(sizeAB) && j == rlim
                 fullinds[4] = inds[2]''
             end
@@ -161,7 +165,7 @@ end
 function contract!(psi::Union{itmps.MPS, Vector{it.ITensor}}, lightcone::Lightcone, k::Int64; dagger = false, cutoff = 1E-15)
     l1, l2 = length(psi), lightcone.size
     if l1 != l2
-        raise(DomainError(l1, "Cannot apply lightcone of size $l2 to mps of length $l1: the two lengths must be equal"))
+        throw(DomainError(l1, "Cannot apply lightcone of size $l2 to mps of length $l1: the two lengths must be equal"))
     end
     (i,j), inds = lightcone.coords[k]
     U = lightcone.circuit[i][j]

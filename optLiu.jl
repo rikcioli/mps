@@ -83,6 +83,8 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
         i += sizeAB+spacing
     end
     rangesAB = [(i, min(i+sizeAB-1, N)) for i in initial_pos]
+    @show rangesAB
+    rangesA = []
 
     V_list = []
     lc_list::Vector{mt.Lightcone} = []
@@ -96,8 +98,12 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
         reduced_mps = mps[i:last_site]
         # FOR NOW CAN ONLY DEAL WITH (TRUE, TRUE)
         lightbounds = (i==1 ? false : true, last_site==N ? false : true)
+        lightbounds != (true, true) && 
+            throw(DomainError(lightbounds, "Try to choose spacing so that regions to invert are away from boundaries"))
 
         lightcone = mt.newLightcone(k_sites, tau; lightbounds = lightbounds)
+        rangeA = lightcone.range[end]
+        push!(rangesA, (rangeA[1]+i-1, rangeA[2]+i-1))
 
         # setup optimization stuff
         arrU0 = Array(lightcone)
@@ -106,7 +112,7 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
         # Quasi-Newton method
         m = 5
         iter = 1000
-        algorithm = LBFGS(m;maxiter = iter, gradtol = 1E-8, verbosity = 2)
+        algorithm = LBFGS(m;maxiter = iter, gradtol = 1E-8, verbosity = 1)
 
         # optimize and store results
         # note that arrUmin is already stored in current lightcone, ready to be applied to mps
@@ -127,249 +133,70 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
     mt.contract!(mps, lc_list, initial_pos)
     mps = it.noprime(mps)
     
-
-    ncones = length(lc_list)
-    rangesC = []
-    for i in 1:ncones-1
-        rel_range = lc_list[i].range[end][2]
-        ninit = initial_pos[i] + rel_range
-        nend = ninit + 2*(tau-1) + spacing - 1
-        push!(rangesC, (ninit,nend))
-    end
-    
-    @show rangesC
     results_second_part = []
     mps_trunc = deepcopy(mps)
-    if length(rangesC) > 0
-        # project to 0 the sites which are supposed to be already 0
+
+    @show rangesA
+    boundaries = [0]
+    for rangeA in rangesA
+        if rangeA[1]>1
+            mt.cut!(mps_trunc, rangeA[1]-1)
+            push!(boundaries, rangeA[1]-1)
+        end
+        if rangeA[end]<N
+            mt.cut!(mps_trunc, rangeA[end])
+            push!(boundaries, rangeA[end])
+        end
+    end
+    err_trunc = norm(mps - mps_trunc)
+    @show err_trunc
+
+    trunc_siteinds = it.siteinds(mps_trunc)
+    trunc_linkinds = it.linkinds(mps_trunc)
+
+    ranges = []
+    for l in 1:length(boundaries)-1
+        push!(ranges, (boundaries[l]+1, boundaries[l+1]))
+    end
+    push!(ranges, (boundaries[end], N))
+    @show ranges
+
+    for range in ranges
+        # extract reduced mps and remove external linkind (which will be 1-dim)
+        reduced_mps = mps_trunc[range[1]:range[2]]
         
-        rangesA = [(1, rangesC[1][1]-1)]
-        nC = length(rangesC)
-        for l in 2:nC
-            push!(rangesA, (rangesC[l-1][2]+1, rangesC[l][1]-1))
-        end
-        push!(rangesA, (rangesC[end][2]+1, N))
-        @show rangesA
-
-        for range in rangesA
-            mt.project_tozero!(mps_trunc, [i for i in range[1]:range[2]])
-        end
-        siteinds = it.siteinds(mps_trunc)
-
-        for range in rangesC
-            # extract reduced mps and remove external linkind (which will be 1-dim)
-            reduced_mps = mps_trunc[range[1]:range[2]]
-
-            comb1 = it.combiner(it.linkinds(mps_trunc)[range[1]-1], siteinds[range[1]])
+        if range[1]>1
+            comb1 = it.combiner(trunc_linkinds[range[1]-1], trunc_siteinds[range[1]])
             reduced_mps[1] *= comb1
-
-            comb2 = it.combiner(it.linkinds(mps_trunc)[range[2]], siteinds[range[2]])
+        end
+        if range[end]<N
+            comb2 = it.combiner(trunc_linkinds[range[2]], trunc_siteinds[range[2]])
             reduced_mps[end] *= comb2
-
-
-            reduced_mps = itmps.MPS(reduced_mps)
-            
-            _, fid_best, _, tau_best = mt.invertBW(reduced_mps)
-            push!(results_second_part, [fid_best, tau_best])
-        end
-    end
-
-    return V_list, err_list, mps, lc_list, mps_trunc, results_second_part
-end
-
-
-function _fgGlobal(U_array::Vector{<:Matrix}, lightcone, mpo, mpo_low)
-    mpo = deepcopy(mpo)
-    mpo_low = deepcopy(mpo_low)
-    mt.updateLightcone!(lightcone, U_array)
-    len = length(lightcone.coords)
-    # compute gradient by removing one unitary at a time and applying
-    # all unitaries that come before to the virtual mpo_low
-    # all unitaries that come after to the original mpo
-    # the shift to the next unitary is made by applying U_k Udag_k+1
-    grad::Vector{Matrix} = []
-    for k in len:-1:2   # contract up to first unitary
-        mt.contract!(mpo, lightcone, k)
-    end
-
-    # evaluate gradient by sweeping over snake of unitaries
-    d = lightcone.d
-    for k in 1:len
-        _, inds_k = lightcone.coords[k]
-        ddUk = mt.contract(mpo, mpo_low)
-        ddUk = Array(ddUk, inds_k)
-        ddUk = conj(reshape(ddUk, (d^2, d^2)))
-        push!(grad, ddUk)
-        if k < len
-            mt.contract!(mpo_low, lightcone, k)
-            mt.contract!(mpo, lightcone, k+1; dagger=true)
-        end
-    end
-    # compute total overlap (which is a complex number)
-    mt.contract!(mpo_low, lightcone, len)
-    overlap = Array(mt.contract(mpo, mpo_low))[1]
-    abs_ov = abs(overlap)
-
-    # correct gradient to account for a smooth cost function (the overlap squared)
-    grad *= overlap/abs_ov
-    riem_grad = mt.project(U_array, grad)
-
-    # put a - sign so that it minimizes
-    cost = -abs_ov
-    riem_grad = -riem_grad
-
-    return cost, riem_grad
-end
-
-# NEW VERSION USING OPT TECH
-"Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
-If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertGlobal(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; d = 2, conv_err = 1E-6, n_sweeps = 1E6)
-    mpo = deepcopy(mpo)
-    N = length(mpo)
-    siteinds = input_inds
-
-    # create random brickwork circuit
-    # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    lightcone = mt.newLightcone(siteinds, tau; lightbounds = (false, false))
-
-    if N == 2   #solution is immediate via SVD
-        env = conj(mpo[1]*mpo[2])
-
-        inds = siteinds
-        U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
-        u, v = it.commonind(U, S), it.commonind(Vdag, S)
-
-        # evaluate fidelity
-        newfid = real(tr(Array(S, (u, v))))
-        gate_ji_opt = U * it.replaceind(Vdag, v, u)
-        lightcone.circuit[1][1] = gate_ji_opt
-
-        if mpo_mode
-            newfid /= 2^N # normalize if mpo mode
         end
 
-        println("Matrix is 2-local, converged to fidelity $newfid immediately")
-        return lightcone, newfid
-    end
-
-    # we create a virtual lower mpo to temporarily contract left snakes with
-    # it will just be an array of deltas that will be contracted at the end with the 
-    # upper mpo (which is the original mpo) and the left snakes
-    dim = output_inds[1].space
-    new_outinds = it.siteinds(dim, N)
-    mpo_low::Vector{it.ITensor} = []
-    for i in 1:N
-        it.replaceind!(mpo[i], output_inds[i], new_outinds[i])
-        push!(mpo_low, it.delta(new_outinds[i], it.prime(siteinds[i], tau)))
-    end
-
-
-    # setup optimization stuff
-    arrU0 = Array(lightcone)
-    fg = arrU -> _fgGlobal(arrU, lightcone, mpo, mpo_low)
-
-
-    # testing riemannian gradient
-    n_unitaries = length(lightcone.coords)
-    # generate random point on M
-    arrU0 = [mt.random_unitary(4) for _ in 1:n_unitaries]
-    arrU0dag = [U' for U in arrU0]
-    # 
-    # # generate random tangent Vector
-    arrV = [mt.random_unitary(4) for _ in 1:n_unitaries]
-    arrV = mt.skew.(arrV)
-    arrV = arrU0 .* arrV
-    arrV /= sqrt(mt.inner(arrV, arrV))
-    
-    func, grad = fg(arrU0)
-    prod = mt.inner(grad, arrV)
-    
-    # compute E(t) for several values of t
-    E = t -> abs(fg(mt.retract(arrU0, arrV, t)[1])[1] - func - t*prod)
-    
-    tvals = exp10.(-8:0.1:0)
-    
-    Plots.plot(tvals, E.(tvals), yscale=:log10, xscale=:log10, legend=:bottomright)
-    Plots.plot!(tvals, tvals .^2, yscale=:log10, xscale=:log10, label=L"O(t^2)")
-    Plots.plot!(tvals, tvals, yscale=:log10, xscale=:log10, label=L"O(t)")
-    Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\gradtest2.png");
-
-    # Quasi-Newton method
-    m = 5
-    iter = 1000
-    algorithm = LBFGS(m;maxiter = iter, gradtol = 1E-8, verbosity = 2)
-
-    # optimize and store results
-    # note that arrUmin is already stored in current lightcone, ready to be applied to mps
-    arrUmin, cost, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = mt.retract, transport! = mt.transport!, isometrictransport =true , inner = mt.inner);
-
-    return lightcone, 1+cost, gradmin, numfg, normgradhistory
-
-end
-
-"Calls invertBW for Vector{ITensor} mpo input with increasing inversion depth tau until it converges with fidelity F = 1-err_to_one"
-function invertGlobal(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; err_to_one = 1E-6, start_tau = 1, n_runs = 10, kargs...)
-    println("Tolerance $err_to_one, starting from depth $start_tau")
-    tau = start_tau
-    found = false
-
-    while !found
-        println("Attempting depth $tau...")
-        bw, err, sweep = invertGlobal(mpo, tau, input_inds, output_inds; kargs...)
-
-        if abs(err) < err_to_one
-            found = true
-            println("Convergence within desired error achieved with depth $tau\n")
-            return bw, err, sweep
-        end
+        reduced_mps = itmps.MPS(reduced_mps)
         
-        #if tau > 9
-        #    println("Attempt stopped at tau = $tau, ITensor cannot go above")
-        #    break
-        #end
-
-        tau += 1
+        tau_inv, _, err_inv, _ = mt.invertGlobal(reduced_mps; start_tau = (range in rangesA ? 1 : 2))
+        push!(results_second_part, [tau_inv, err_inv])
     end
-    return bw_best, err_best, sweep_best, tau
-end
-
-"Wrapper for ITensorsMPS.MPS input. Calls invertBW by first conjugating mps (mps to invert must be above)
-and then preparing a layer of zero bras to construct the mpo |0><psi|"
-function invertGlobal(mps::itmps.MPS; tau = 0, kargs...)
-    N = length(mps)
-    obj = typeof(mps)
-    println("Attempting inversion of $obj")
-    mps = conj(mps)
-    siteinds = it.siteinds(mps)
-    outinds = siteinds'
-
-    for i in 1:N
-        ind = siteinds[i]
-        vec = [1; [0 for _ in 1:ind.space-1]]
-        mps[i] *= it.ITensor(vec, ind')
-    end
+    
+    return V_list, err_list, mps, lc_list, mps_trunc, results_second_part
 
 
-    if iszero(tau)
-        results = invertGlobal(mps[1:end], siteinds, outinds; kargs...)
-    else
-        results = invertGlobal(mps[1:end], tau, siteinds, outinds; kargs...)
-    end
-    return results
 end
 
 
-N = 15
 
-mps = mt.randMPS(N, 2)
-#mps = mt.initialize_fdqc(N, 3)
+N = 12
+
+#mps = mt.randMPS(N, 2)
+mps = mt.initialize_fdqc(N, 6)
 siteinds = it.siteinds(mps)
 
-#results = invertMPSLiu(mps, 3, 8, 0)
+#results = invertMPSLiu(mps, 3, 8, 2)
 #mpsfinal, lclist, mps_trunc, second_part = results[3:6]
 
-results = invertGlobal(mps, tau=2)
+results = invertGlobal(mps, tau=8)
 #results2 = mt.invertMPSMalz(mps)
 
 Plots.plot(results[5][:,2],label ="L-BFGS",yscale =:log10)

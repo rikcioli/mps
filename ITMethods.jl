@@ -131,14 +131,14 @@ end
 "Truncate mps at position b until bond dimension of link (b, b+1) becomes 1"
 function cut!(psi::itmps.MPS, b::Integer)
     it.orthogonalize!(psi, b)
-    linkind = it.commonind(psi[b], psi[b+1])
     indsb = it.uniqueinds(psi[b], psi[b+1])
     U, S, V = it.svd(psi[b], indsb, cutoff = 1E-15)
-    if length(Array(S, it.inds(S)))>1
-        U, S, V = it.svd(psi[b], indsb, cutoff = S[2]+eps())
-        psi[b] = U*S*V
-        it.normalize!(psi)
-    end
+
+    u, v = it.inds(S)
+    w = it.Index(1)
+    projU = it.ITensor([1; [0 for _ in 1:u.space-1]], (u,w))
+    projV = it.ITensor([1; [0 for _ in 1:v.space-1]], (w,v))
+    psi[b] = U*projU*projV*V
 end
 
 
@@ -148,7 +148,6 @@ function brickwork(psi::itmps.MPS, brick_odd::Matrix, brick_even::Matrix, t::Int
     layerOdd = [it.op(brick_odd, sites[b+1], sites[b]) for b in 1:2:(N-1)]
     layerEven = [it.op(brick_even, sites[b+1], sites[b]) for b in 2:2:(N-1)]
     for i in 1:t
-        println("Evolving step $i")
         layer = isodd(i) ? layerOdd : layerEven
         psi = it.apply(layer, psi, cutoff = cutoff)
     end
@@ -188,6 +187,12 @@ end
 function initialize_fdqc(N::Int, tau::Int)
     fdqc = initialize_vac(N)
     fdqc = brickwork(fdqc, tau)
+    return fdqc
+end
+
+function initialize_fdqc(N::Int, tau::Int, brick_odd::Matrix, brick_even::Matrix)
+    fdqc = initialize_vac(N)
+    fdqc = brickwork(fdqc, brick_odd, brick_even, tau)
     return fdqc
 end
 

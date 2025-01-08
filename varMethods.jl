@@ -167,16 +167,6 @@ function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index
             break
         end
 
-        # compare the relative increase in frobenius norm
-        ratio = 1 - sqrt((1-newfid)/(1-fid))
-        if -conv_err < ratio < conv_err && first_sweep == false
-            break
-        end
-
-        if ratio >= 0   # only register if the ratio has increased, otherwise it's useless
-            fid = newfid
-        end
-
         if j == 2 && first_sweep == false
             rev = false
             sweep += 1
@@ -187,6 +177,20 @@ function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index
             rev = true
             sweep += 1
         end
+
+        # if we arrived at the end of the sweep
+        if (j==2 && first_sweep==false) || j==N-1
+            # compare the relative increase in frobenius norm
+            ratio = 1 - sqrt((1-newfid)/(1-fid))
+            #convergence occurs when fidelity after new sweep doesn't change considerably
+            if -conv_err < ratio < conv_err && first_sweep == false
+                break   
+            end
+            if ratio >= 0   # only register if the ratio has increased, otherwise it's useless
+                fid = newfid
+            end
+        end
+
         
         if N > 3
             # update L_blocks or R_blocks depending on sweep direction
@@ -382,14 +386,14 @@ end
 # NEW VERSION USING OPT TECH
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertGlobal(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; maxiter = 1000, gradtol = 1E-8)
+function invertGlobal(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 1000, gradtol = 1E-8)
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
     siteinds = input_inds
 
     # create random brickwork circuit
     # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    lightcone = newLightcone(siteinds, tau; lightbounds = (false, false))
+    lightcone = newLightcone(siteinds, tau; lightbounds = lightbounds)
 
     if N == 2   #solution is immediate via SVD
         env = conj(mpo[1]*mpo[2])
@@ -438,7 +442,7 @@ end
 "Calls invertBW for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
 function invertGlobal(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; overlap = 1, eps = 1E-6, start_tau = 2, kargs...)
     obj = typeof(mpo)
-    println("Attempting inversion of $obj to overlap $overlap up to error $eps, starting from depth $start_tau")
+    println("Attempting inversion of $obj to overlap value = $overlap up to error $eps, starting from depth $start_tau")
     tau = start_tau
     found = false
 
