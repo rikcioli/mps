@@ -186,17 +186,20 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
 end
 
 
+it.set_warn_order(21)
 
 N = 12
 
+
 #mps = mt.randMPS(N, 2)
-mps = mt.initialize_fdqc(N, 6)
+mps = mt.initialize_fdqc(N, 4)
 siteinds = it.siteinds(mps)
+
 
 #results = invertMPSLiu(mps, 3, 8, 2)
 #mpsfinal, lclist, mps_trunc, second_part = results[3:6]
 
-results = invertGlobal(mps, tau=8)
+@time results = mt.invertGlobalSweep(mps)
 #results2 = mt.invertMPSMalz(mps)
 
 Plots.plot(results[5][:,2],label ="L-BFGS",yscale =:log10)

@@ -17,7 +17,7 @@ function execute(Nrange, eps_list, gate)
         for eps in eps_list
             psi = mt.initialize_fdqc(N, div(N,2), gate, gate)
             mt.project_tozero!(psi, proj)
-            tau, lc, err, rest... = mt.invertSweep(psi, err_to_one = eps)
+            tau, lc, err, rest... = mt.invertGlobalSweep(psi, eps = eps, maxiter = 20000, start_tau=1)
             push!(tau_eps, tau)
         end
     
@@ -26,15 +26,22 @@ function execute(Nrange, eps_list, gate)
     return tau_depth_eps
 end
 
-eps_list = [0.05]
-Nrange = 2:2:12
+eps_list = [0.1*2.0^(-j) for j in 1:5]
+Nrange = 2:2:10
 gate = mt.random_unitary(4)
-tau_eps_depth = execute(Nrange, eps_list, gate)
+tau_depth_eps = execute(Nrange, eps_list, gate)
 
+depths = div.(Vector(Nrange), 2)
 tau_eps_depth = [getindex.(tau_depth_eps,i) for i=1:length(tau_depth_eps[1])]
 Plots.plot(ylabel = L"\tau", xlabel = L"\mathrm{true \ depth}")
-Plots.plot!(Nrange, tau_eps_depth[1], lc=:green, primary=false)
-Plots.plot!(Nrange, tau_eps_depth[1], seriestype=:scatter, mc=:green, markersize=:3, primary=true, label=L"\epsilon=0.1")
+Plots.plot!(depths, tau_eps_depth[1], lc=:green, primary=false)
+Plots.plot!(depths, tau_eps_depth[1], seriestype=:scatter, mc=:green, markersize=:3, primary=true, label=L"\epsilon=0.1")
+Plots.plot!(depths, tau_eps_depth[2], lc=:blue, primary=false)
+Plots.plot!(depths, tau_eps_depth[2], seriestype=:scatter, mc=:blue, markersize=:3, primary=true, label=L"\epsilon=0.05")
+Plots.plot!(depths, tau_eps_depth[3], lc=:red, primary=false)
+Plots.plot!(depths, tau_eps_depth[3], seriestype=:scatter, mc=:red, markersize=:3, primary=true, label=L"\epsilon=0.025")
+Plots.plot!(depths, tau_eps_depth[4], lc=:yellow, primary=false)
+Plots.plot!(depths, tau_eps_depth[4], seriestype=:scatter, mc=:yellow, markersize=:3, primary=true, label=L"\epsilon=0.0125")
 #Plots.plot!(1:5, taus_pereps[2], lc=:blue, primary=false)
 #Plots.plot!(1:5, taus_pereps[2], seriestype=:scatter, mc=:blue, markersize=:3, primary=true, label=L"\epsilon=0.05")
 #Plots.plot!(1:5, taus_pereps[3], lc=:red, primary=false)

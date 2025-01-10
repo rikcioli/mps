@@ -1,7 +1,7 @@
 
 ### LIGHTCONE METHODS ###
 
-mutable struct Lightcone
+struct Lightcone
     circuit::Vector{Vector{it.ITensor}}     # circuit[i] is the i-th layer, circuit[odd][1] acts on sites (1, 2), circuit[even][1] acts on sites (2, 3)
     d::Int64                                # dimension of the physical space
     size::Int64                             # number of qubits the whole circuit acts on
@@ -12,6 +12,7 @@ mutable struct Lightcone
     id_coords                               # coordinates of all identities
     layers                                  # coordinates of all gates ordered by layer
     range::Vector{Tuple{Int64, Int64}}      # leftmost and rightmost sites on which each layer acts non-trivially
+    gates_by_site                           # coordinates of all the gates to the left of each qubit
 end
 
 
@@ -23,7 +24,7 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
         lightbounds[2] == true && 
             throw(DomainError(sizeAB, "Right lightbound can't be true for sizeAB odd"))
         depth == 1 &&
-            throw(DomainError(depth, "Depth 1 lightcone for an odd number of sites leaves the last site empty"))
+            throw(DomainError(depth, "Depth 1 lightcone for an odd number of sites leaves the last site empty and causes problems"))
     end
 
     # count the minimum sizeAB has to be to construct a circuit of depth 'depth'
@@ -58,6 +59,7 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
     id_coords = []
     layers_coords = []
     range = []
+    gates_by_site = [[] for _ in 1:sizeAB]
 
     k = 1
     for i in 1:depth
@@ -84,7 +86,8 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
         # this will be helpful with the og center
         for j in (isodd(i) ? (llim:rlim) : (rlim:-1:llim))
             # prepare inds for current unitary
-            inds = it.prime((siteinds[2*j-mod(i,2)], siteinds[2*j-mod(i,2)+1]), depth-i)
+            sites_involved = (2*j-mod(i,2), 2*j-mod(i,2)+1)
+            inds = it.prime((siteinds[sites_involved[1]], siteinds[sites_involved[2]]), depth-i)
             fullinds = [inds[1], inds[2], inds[1]', inds[2]']
 
             # add a clause for boundary terms: if sizeAB is even, for even layers, a delta should be placed at the extremities
@@ -124,6 +127,10 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
             end
             push!(layer_i, brick)
             push!(layer_i_coords, ((i,j), fullinds))
+
+            push!(gates_by_site[sites_involved[1]], Dict([("coords", (i,j)), ("inds", fullinds), ("number", k-1), ("orientation", "R")]))
+            push!(gates_by_site[sites_involved[2]], Dict([("coords", (i,j)), ("inds", fullinds), ("number", k-1), ("orientation", "L")]))
+
         end
         if iseven(i)
             reverse!(layer_i)
@@ -132,7 +139,8 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
         push!(layers_coords, layer_i_coords)
     end
 
-    return Lightcone(circuit, d, sizeAB, depth, lightbounds, siteinds, coords, id_coords, layers_coords, range)
+
+    return Lightcone(circuit, d, sizeAB, depth, lightbounds, siteinds, coords, id_coords, layers_coords, range, gates_by_site)
 
 end
 
