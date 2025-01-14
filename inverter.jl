@@ -11,14 +11,14 @@ using DelimitedFiles
 # Prepare initial state
 
 N = 15
-tau = 4
+tau = 2
 inverter_tau = 4 # 10 IS MAX TO CONTRACT ENVIRONMENT
 
 "Select case:
 1: FDQC of depth tau
 2: Random MPS of bond dim tau
 3: GHZ"
-case = 1
+case = 2
 proj = []
 
 # unitary = mt.CX * kron(mt.H, mt.Id)
@@ -35,34 +35,31 @@ proj = []
 # Random bond D mps
 # testMPS = rand_MPS(it.siteinds("Qubit", N), linkdims = 4)
 
-let mps
-    if case == 1
-        # Random FDQC of depth tau
-        mps = mt.initialize_fdqc(N, tau)
 
-        if length(proj) > 0
-            mps = mt.project_tozero(mps, proj)
-        end
-
-    elseif case == 2
-        mps = mt.randMPS(it.siteinds("Qubit", N), tau)
-    
-    elseif case == 3
-        mps = mt.initialize_ghz(N)
+if case == 1
+    # Random FDQC of depth tau
+    mps = mt.initialize_fdqc(N, tau)
+    if length(proj) > 0
+        mps = mt.project_tozero(mps, proj)
     end
-        
-    # NOTE: if malz is used, inverter_tau sets the value of blocking size q
-    
-    global W_list, U_list, err, W_tau_list, U_tau_list = mt.invertMPSMalzGlobal(mps; eps_malz = 0.1, eps_bell = 0.1, eps_V = 0.3)
-    #U = U_list[1][3]
-    #inputind = it.inds(U_list[1][3])[end]
-    #results = mt.invertBW(U, inputind, n_sweeps = 100)
+elseif case == 2
+    mps = mt.randMPS(it.siteinds("Qubit", N), tau)
 
-    #W = reshape(Array(W_list[1], it.inds(W_list[1])), tau^2)
-    #sites = it.siteinds(2, 4)
-    #W = itmps.MPS(W, sites)
-
+elseif case == 3
+    mps = mt.initialize_ghz(N)
 end
+    
+# NOTE: if malz is used, inverter_tau sets the value of blocking size q
+
+W_list, U_list, err, W_tau_list, U_tau_list = mt.invertMPSMalzGlobal(mps; eps_malz = 0.1, eps_bell = 0.1, eps_V = 0.3)
+#U = U_list[1][3]
+#inputind = it.inds(U_list[1][3])[end]
+#results = mt.invertBW(U, inputind, n_sweeps = 100)
+#W = reshape(Array(W_list[1], it.inds(W_list[1])), tau^2)
+#sites = it.siteinds(2, 4)
+#W = itmps.MPS(W, sites)
+
+
 
 
 # U = mt.random_unitary(8)

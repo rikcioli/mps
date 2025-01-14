@@ -49,7 +49,7 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
 
     q_list = iszero(q) ? [i for i in 2:N if (mod(N,i) == 0 && i-2*bitlength >= 0)] : [q]
 
-    local q_found, circuit, fid, sweepB
+    local q_found, circuit, overlap, sweepB
     for q in q_list
         println("Attempting blocking with q = $q...")
         q_found = q
@@ -99,9 +99,9 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
         push!(sep_mps, blockMPS[end])
 
         ## Start variational optimization to approximate P blocks
-        circuit, fid, sweepB = invertSweep(conj(sep_mps), 1, new_siteinds; d = D, kargs...)
+        circuit, overlap, sweepB = invertSweep(conj(sep_mps), 1, new_siteinds; d = D, kargs...)
         
-        if abs(1 - fid) < eps_malz
+        if abs(1 - overlap) < eps_malz
             break
         end
     end
@@ -271,11 +271,11 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
 
     W_tau_list = [res[4] for res in results]
 
-    return Wlayer, V_list, fid, sweepB, W_tau_list, V_tau_list
+    return Wlayer, V_list, overlap, sweepB, W_tau_list, V_tau_list
 end
 
 
-
+# only works for d=2
 function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, eps_V = 1E-2, kargs...)
     N = length(mps)
     siteinds = it.siteinds(mps)
@@ -289,7 +289,7 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
 
     q_list = iszero(q) ? [i for i in 2:N-1 if (mod(N,i) == 0 && i-2*bitlength >= 0)] : [q]
 
-    local q_found, lightcone, err
+    local q_found, circuit, err
     for q in q_list
         println("Attempting blocking with q = $q...")
         q_found = q
@@ -339,8 +339,8 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
         push!(sep_mps, blockMPS[end])
 
         ## Start variational optimization to approximate P blocks
-        sep_mps_MPS = itmps.MPS(sep_mps)
-        lightcone, err, _ = invertGlobal(sep_mps_MPS; tau = 1, kargs...)
+        circuit, overlap, sweepB = invertSweep(conj(sep_mps), 1, new_siteinds; d = D, kargs...)
+        err = 1-overlap
 
         if err < eps_malz
             break
@@ -348,7 +348,7 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
     end
     
     q = q_found
-    W_list = lightcone.circuit[1]
+    W_list = circuit[1]
     # up until here all good
 
     ## Extract unitary matrices that must be applied on bell pairs
@@ -447,7 +447,8 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
 
         it.replaceprime!(V_mpo, q-2*bitlength+1 => 1)
         # invert final V
-        tau, rest... = invertGlobal(V_mpo; eps = eps_V/((newN^2)), kargs...)
+        tau, _ = invertGlobalSweep(V_mpo; eps = eps_V/(newN^2), overlap = d^q)
+        # NOTE: FOR NOW INVERTGLOBALSWEEP ONLY WORKS WITH QUBITS, AS IT OPTIMIZES OVER U(4) UNITARIES
         
         # account for the swap gates 
         if i > 1
@@ -480,7 +481,7 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
     end
 
     # invert each mps in the list
-    results = [invertGlobal(Wmps; eps = eps_bell/npairs) for Wmps in Wmps_list]
+    results = [invertGlobalSweep(Wmps; eps = eps_bell/npairs) for Wmps in Wmps_list]
 
     W_tau_list = [res[1] for res in results]
 
