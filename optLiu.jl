@@ -57,7 +57,8 @@ function fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITen
     # non_skewness = norm(grad_id - skew.(grad_id))
 
     mt.contract!(reduced_mps, lightcone)
-    fid = real(Array(mt.contract(reduced_mps, conj_mps))[1])
+    # cost function is the fidelity, i.e. the square of the overlap
+    fid = abs(Array(mt.contract(reduced_mps, conj_mps))[1])
     cost = -fid
     riem_grad = - riem_grad
 
@@ -65,7 +66,7 @@ function fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITen
 end
 
 
-function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
+function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2, eps_trunc = 0.01)
 
     @assert tau > 0
     
@@ -97,11 +98,10 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
         # extract reduced mps on k_sites and construct lightcone structure of depth tau
         reduced_mps = mps[i:last_site]
         # FOR NOW CAN ONLY DEAL WITH (TRUE, TRUE)
-        lightbounds = (i==1 ? false : true, last_site==N ? false : true)
-        lightbounds != (true, true) && 
-            throw(DomainError(lightbounds, "Try to choose spacing so that regions to invert are away from boundaries"))
+        #lightbounds != (true, true) && 
+        #    throw(DomainError(lightbounds, "Try to choose spacing so that regions to invert are away from boundaries"))
 
-        lightcone = mt.newLightcone(k_sites, tau; lightbounds = lightbounds)
+        lightcone = mt.newLightcone(k_sites, tau; lightbounds = (true, true))
         rangeA = lightcone.range[end]
         push!(rangesA, (rangeA[1]+i-1, rangeA[2]+i-1))
 
@@ -182,24 +182,189 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2)
     
     return V_list, err_list, mps, lc_list, mps_trunc, results_second_part
 
+end
+
+
+function invertMPSLiu(mps::itmps.MPS; d = 2, eps_trunc = 0.01, eps_inv = 0.01)
+
+    N = length(mps)
+    isodd(N) && throw(DomainError(N, "Choose an even number for N"))
+    mps = deepcopy(mps)
+    siteinds = it.siteinds(mps)
+    eps_liu = eps_trunc/N
+
+    local mps_trunc, boundaries, rangesA
+    while true
+        # first determine depth of input state, i.e. find lightcone that inverts to 0 up to error eps_liu
+        # we do this by inverting an increasingly wider lightcone on sites 1:2j for j=1,2,3,...
+        it.orthogonalize!(mps, 2)
+        found = false
+        right_endsite = 2
+        tau = 1
+
+        println("Finding depth of initial state up to error $eps_liu")
+        while !found
+            reduced_mps = mps[1:right_endsite]
+            local_sites = siteinds[1:right_endsite]
+            lightcone = mt.newLightcone(local_sites, tau; lightbounds = (true, true))
+            # setup optimization stuff
+            arrU0 = Array(lightcone)
+            fg = arrU -> fgLiu(arrU, lightcone, reduced_mps)
+            # Quasi-Newton method
+            m = 5
+            algorithm = LBFGS(m;maxiter = 10000, gradtol = 1E-8, verbosity = 1)
+            # optimize and store results
+            # note that arrUmin is already stored in current lightcone, ready to be applied to mps
+            arrUmin, negfid, _ = optimize(fg, arrU0, algorithm; retract = mt.retract, transport! = mt.transport!, isometrictransport =true , inner = mt.inner);
+
+            err = 1+negfid
+            if err < eps_inv
+                found = true
+            else
+                tau += 1
+                right_endsite *= 2
+            end
+        end
+
+        # at this point we have tau, we already know that both the sizeAB and the spacing have to be chosen
+        # so that the final state is a tensor product of pure states
+        sizeAB = 6*(tau-1)
+        spacing = 2*(tau-1)
+        println("Found depth tau = $tau, imposing sizeAB = $sizeAB and spacing = $spacing for factorization")
+
+        @assert tau > 0
+        isodd(sizeAB) && throw(DomainError(sizeAB, "Choose an even number for sizeAB"))
+        isodd(spacing) && throw(DomainError(spacing, "Choose an even number for the spacing between regions"))
+        
+        i = spacing+1
+        initial_pos::Vector{Int64} = []
+        while i+sizeAB-1 < N+1
+            push!(initial_pos, i)
+            i += sizeAB+spacing
+        end
+        rangesAB = [(i, min(i+sizeAB-1, N)) for i in initial_pos]
+        @show rangesAB
+        rangesA = []
+
+        V_list = []
+        lc_list::Vector{mt.Lightcone} = []
+        err_list = []
+        println("Inverting reduced density matrices...")
+        for i in initial_pos
+            last_site = min(i+sizeAB-1, N)
+            k_sites = siteinds[i:last_site]
+            it.orthogonalize!(mps, div(i+last_site, 2))
+
+            # extract reduced mps on k_sites and construct lightcone structure of depth tau
+            reduced_mps = mps[i:last_site]
+            # FOR NOW CAN ONLY DEAL WITH (TRUE, TRUE)
+            #lightbounds != (true, true) && 
+            #    throw(DomainError(lightbounds, "Try to choose spacing so that regions to invert are away from boundaries"))
+
+            lightcone = mt.newLightcone(k_sites, tau; lightbounds = (true, true))
+            rangeA = lightcone.range[end]
+            push!(rangesA, (rangeA[1]+i-1, rangeA[2]+i-1))
+
+            # setup optimization stuff
+            arrU0 = Array(lightcone)
+            fg = arrU -> fgLiu(arrU, lightcone, reduced_mps)
+            # Quasi-Newton method
+            m = 5
+            algorithm = LBFGS(m;maxiter = 10000, gradtol = 1E-8, verbosity = 1)
+            # optimize and store results
+            # note that arrUmin is already stored in current lightcone, ready to be applied to mps
+            arrUmin, err, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = mt.retract, transport! = mt.transport!, isometrictransport =true , inner = mt.inner);
+            
+            # reduced_mps = [it.prime(tensor, tau) for tensor in reduced_mps]
+            # mt.contract!(reduced_mps, lightcone)
+            # for l in i:last_site
+            #     mps[l] = it.noprime(reduced_mps[l-i+1])
+            # end
+
+            push!(lc_list, lightcone)
+            push!(V_list, arrUmin)
+            push!(err_list, 1+err)
+        end
+
+        it.prime!(mps, tau)
+        mt.contract!(mps, lc_list, initial_pos)
+        mps = it.noprime(mps)
+        
+        results_second_part = []
+        mps_trunc = deepcopy(mps)
+
+        @show rangesA
+        boundaries = [0]
+        for rangeA in rangesA
+            if rangeA[1]>1
+                mt.cut!(mps_trunc, rangeA[1]-1)
+                push!(boundaries, rangeA[1]-1)
+            end
+            if rangeA[end]<N
+                mt.cut!(mps_trunc, rangeA[end])
+                push!(boundaries, rangeA[end])
+            end
+        end
+        err_trunc = norm(mps - mps_trunc)
+        @show err_trunc
+
+        if err_trunc <= eps_trunc
+            break
+        else
+            println("Convergence not found with initial depth tau = $tau, reducing error on initial inversion")
+            eps_liu /= 2
+        end
+    end
+
+    println("Truncation reached within requested eps_trunc, inverting local states...")
+    trunc_siteinds = it.siteinds(mps_trunc)
+    trunc_linkinds = it.linkinds(mps_trunc)
+
+    ranges = []
+    for l in 1:length(boundaries)-1
+        push!(ranges, (boundaries[l]+1, boundaries[l+1]))
+    end
+    push!(ranges, (boundaries[end], N))
+    @show ranges
+
+    for range in ranges
+        # extract reduced mps and remove external linkind (which will be 1-dim)
+        reduced_mps = mps_trunc[range[1]:range[2]]
+        
+        if range[1]>1
+            comb1 = it.combiner(trunc_linkinds[range[1]-1], trunc_siteinds[range[1]])
+            reduced_mps[1] *= comb1
+        end
+        if range[end]<N
+            comb2 = it.combiner(trunc_linkinds[range[2]], trunc_siteinds[range[2]])
+            reduced_mps[end] *= comb2
+        end
+
+        reduced_mps = itmps.MPS(reduced_mps)
+        
+        tau_2, _, err_2, _ = mt.invertGlobalSweep(reduced_mps; start_tau = (range in rangesA ? 1 : 2), eps = eps_inv)
+        push!(results_second_part, [tau_2, err_2])
+    end
+    
+    return V_list, err_list, mps, lc_list, mps_trunc, results_second_part
 
 end
 
 
 it.set_warn_order(21)
 
-N = 12
+N = 24
 
 
 #mps = mt.randMPS(N, 2)
-mps = mt.initialize_fdqc(N, 4)
+mps = mt.initialize_fdqc(N, 2)
 siteinds = it.siteinds(mps)
 
 
-#results = invertMPSLiu(mps, 3, 8, 2)
+results = invertMPSLiu(mps)
 #mpsfinal, lclist, mps_trunc, second_part = results[3:6]
 
-@time results = mt.invertGlobalSweep(mps)
+#@time results = mt.invertGlobalSweep(mps)
 #results2 = mt.invertMPSMalz(mps)
 
 Plots.plot(results[5][:,2],label ="L-BFGS",yscale =:log10)

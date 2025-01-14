@@ -26,8 +26,8 @@ function execute(Nrange, eps_list, gate)
     return tau_depth_eps
 end
 
-eps_list = [0.1*2.0^(-j) for j in 1:5]
-Nrange = 2:2:10
+eps_list = [0.5*2.0^(-j) for j in 1:3]
+Nrange = 2:2:18
 gate = mt.random_unitary(4)
 tau_depth_eps = execute(Nrange, eps_list, gate)
 

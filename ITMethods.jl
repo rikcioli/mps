@@ -196,6 +196,15 @@ function initialize_fdqc(N::Int, tau::Int, brick_odd::Matrix, brick_even::Matrix
     return fdqc
 end
 
+# function initialize_fdqc(N::Int, tau::Int, lightbounds, gate = nothing, d = 2)
+#     mps = initialize_vac(N)
+#     siteinds = it.siteinds(mps)
+#     lc = newLightcone(siteinds, tau, U_array = U_array, lightbounds = lightbounds)
+#     it.prime!(mps, tau)
+#     contract!(mps, lc)
+#     mps = it.noprime(mps)
+#     return mps
+# end
 
 "Returns mps of Haar random isometries with bond dimension D"
 function randMPS(sites::Vector{<:it.Index}, D::Int)
