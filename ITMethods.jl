@@ -81,6 +81,7 @@ end
 
 "Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
 function apply(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
+    psi = deepcopy(psi)
     psi = it.orthogonalize(psi, b)
     s = it.siteinds(psi)
     op = it.op(U, s[b+1], s[b])
@@ -91,6 +92,19 @@ function apply(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
     psi[b] = U
     psi[b+1] = S*V
     return psi
+end
+
+"Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
+function apply!(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
+    it.orthogonalize!(psi, b)
+    s = it.siteinds(psi)
+    op = it.op(U, s[b+1], s[b])
+
+    wf = it.noprime((psi[b]*psi[b+1])*op)
+    indsb = it.uniqueinds(psi[b], psi[b+1])
+    U, S, V = it.svd(wf, indsb, cutoff = cutoff)
+    psi[b] = U
+    psi[b+1] = S*V
 end
 
 "Apply 2-qubit ITensors.ITensor U to sites b and b+1 of Vector{ITensors.ITensor} psi"
@@ -167,10 +181,12 @@ function brickwork(psi::itmps.MPS, t::Int; cutoff = 1E-14)
     return psi
 end
 
-function initialize_vac(N::Int)
-    sites = it.siteinds("Qubit", N)
+function initialize_vac(N::Int, siteinds = nothing)
+    if isnothing(siteinds)
+        siteinds = it.siteinds("Qubit", N)
+    end
     states = ["0" for _ in 1:N]
-    vac = itmps.MPS(sites, states)
+    vac = itmps.MPS(siteinds, states)
     return vac
 end
 

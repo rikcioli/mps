@@ -94,16 +94,16 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
             # we simulate this by decreasing the prime level of the upper index of the first and last gate of the odd layers
             # so that they are connected directly to the odd layer above
             if i < depth
-                if j == llim 
+                if j == lslope 
                     if lightbounds[1]
                         fullinds[1] = it.noprime(inds[1])
                     elseif isodd(i)
                         fullinds[1] = it.prime(inds[1],-1)
                     end
-                elseif j == rlim
+                elseif j == rslope
                     if lightbounds[2]
                         fullinds[2] = it.noprime(inds[2])
-                    # if size even increase the right index of the odd layers, if size odd increase right index of even layers
+                    # else: if size even decrease the right index of the odd layers, if size odd decrease right index of even layers
                     elseif (iseven(sizeAB) && isodd(i)) || (isodd(sizeAB) && iseven(i))
                         fullinds[2] = it.prime(inds[2],-1)
                     end
@@ -114,22 +114,26 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
                 fullinds[4] = inds[2]''
             end
 
-            fullinds = (fullinds[1], fullinds[2], fullinds[3], fullinds[4])
+            fullinds = Tuple(ind for ind in fullinds)
+            #fullinds = (fullinds[1], fullinds[2], fullinds[3], fullinds[4])
 
-            # insert unitaries according to lightbounds, inserting identities if we are outside the lightcone
-            if j < lslope || j > rslope
-                brick = it.delta(inds[1], inds[1]') * it.delta(inds[2], inds[2]')
-                push!(id_coords, ((i,j), fullinds))
+            # insert unitary 
+            if j < lslope || j > rslope     # this is needed for lightbounds, since we stored unitaries in an array of arrays
+                # one should refactor stuff so that the positions are accessed by appropriate dictionaries, but the arrays are
+                # all in a line
+                brick = it.ITensor(1)
+                push!(id_coords, ((i,j),))
             else
                 brick = it.ITensor(U_array[k], fullinds)
                 push!(coords, ((i,j), fullinds))
                 k += 1
+
+                push!(gates_by_site[sites_involved[1]], Dict([("coords", (i,j)), ("inds", fullinds), ("number", k-1), ("orientation", "R")]))
+                push!(gates_by_site[sites_involved[2]], Dict([("coords", (i,j)), ("inds", fullinds), ("number", k-1), ("orientation", "L")]))
             end
+
             push!(layer_i, brick)
             push!(layer_i_coords, ((i,j), fullinds))
-
-            push!(gates_by_site[sites_involved[1]], Dict([("coords", (i,j)), ("inds", fullinds), ("number", k-1), ("orientation", "R")]))
-            push!(gates_by_site[sites_involved[2]], Dict([("coords", (i,j)), ("inds", fullinds), ("number", k-1), ("orientation", "L")]))
 
         end
         if iseven(i)
@@ -206,6 +210,75 @@ function contract!(psi::Union{itmps.MPS, Vector{it.ITensor}}, lightcone::Lightco
     end
 end
 
+"Apply lightcone to mps psi, from base to top. Lightcones' sitesAB must match mps siteinds only in id, not in primelevel.
+If dagger is true, all the unitaries are conjugated and the order of application is inverted"
+function apply!(mps::itmps.MPS, lightcones::Vector{Lightcone}; dagger = false)
+    N = length(mps)
+    it.noprime!(mps)
+    siteinds = it.siteinds(mps)
+    l = 1
+    for lc in lightcones
+        firstind = it.noprime(lc.sitesAB[1])
+        while l < N
+            if firstind == it.noprime(siteinds[l])   #then apply lightcone here
+                depth = lc.depth
+                size = lc.size
+                # increase plev of siteinds to match lightcone if dagger is false
+                # remember that the plev decreases with the layer, so if we start with the gates on top we are already good
+                if !dagger
+                    for k in l:l+size-1
+                        mps[k] = it.replaceind(mps[k], siteinds[k], it.prime(siteinds[k], depth))
+                    end
+                end
+                # apply lc
+                n_unitaries = length(lc.coords)
+                for k in 1:n_unitaries
+                    (i,j), inds = (dagger ? lc.coords[n_unitaries-k+1] : lc.coords[k])  #apply in reverse if dagger is required
+                    U = lc.circuit[i][j]
+                    if dagger
+                        U = conj(U)
+                    end
+
+                    # Umat = reshape(Array(U, inds), (inds[1].space^2, inds[1].space^2))
+                    # non_unitarity = norm(Umat'Umat - I)
+                    # if non_unitarity > 1E-14
+                    #     coords = (i,j)
+                    #     throw(DomainError(non_unitarity, "Non-unitary matrix found in lightcone number $l at coords $coords"))
+                    # end
+                    b = l-1 + 2*j-mod(i,2)
+                    it.orthogonalize!(mps, b+1)
+                    #norm0 = norm(mps)
+        
+                    W = mps[b]*mps[b+1]
+                    suminds = it.commoninds(inds, W)
+                    outinds = it.uniqueinds(U, suminds)
+                    W *= U
+                    
+                    it.replaceinds!(W, outinds, suminds)
+                    indsb = it.uniqueinds(mps[b], mps[b+1])
+                    U, S, V = it.svd(W, indsb, cutoff = 1E-15)
+                    mps[b] = it.replaceinds(U, suminds, outinds)
+                    mps[b+1] = it.replaceinds(S*V, suminds, outinds) 
+        
+                    # norm1 = norm(mps)
+                    # if abs(norm0-norm1)>1E-14
+                    #     throw(DomainError(norm1, "MPS norm has changed during the application of lightcone of initpos $initpos"))
+                    # end
+                end
+                l += size
+                break
+            else
+                l += 1
+            end
+        end
+    end
+    if dagger
+        it.noprime!(mps)
+    end
+end
+
+
+
 "Apply vector of Lightcones to MPS, from base to top. The lightcones positions are specified by the ints contained in initial_pos. Prime level of mps siteinds must be the same as lightcones'."
 function contract!(mps::itmps.MPS, lightcones::Vector{Lightcone}, initial_pos::Vector{<:Int}; cutoff = 1E-15)
     
@@ -250,6 +323,7 @@ function contract!(mps::itmps.MPS, lightcones::Vector{Lightcone}, initial_pos::V
 end
 
 "Convert lightcone to MPO"
+# must be updated to account for the removal of identities
 function MPO(lightcone::Lightcone)
     # convert lightcone to mpo by using the ij_dict and the itmps.MPO(it.ITensor) function, keeping track of the deltas for even depths
 

@@ -694,7 +694,7 @@ end
 and prepares a layer of zero bras to construct the mpo |0><psi|. Then calls invertGlobal with overlap 1 and error eps"
 function invertGlobalSweep(mps::itmps.MPS; tau = 0, kargs...)
     N = length(mps)
-    mps = conj(mps)
+    mps = conj(deepcopy(mps))
     siteinds = it.siteinds(mps)
     outinds = siteinds'
 
