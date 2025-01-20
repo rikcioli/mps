@@ -275,14 +275,15 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
 end
 
 
-# only works for d=2
+# ONLY WORKS FOR d=2
 function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, eps_V = 1E-2, kargs...)
     N = length(mps)
     siteinds = it.siteinds(mps)
     linkinds = it.linkinds(mps)
     linkdims = [ind.space for ind in linkinds]
-    D = linkdims[div(N,2)]
+    D = maximum(linkdims)
     d = siteinds[div(N,2)].space
+    @assert d == 2
     bitlength = length(digits(D-1, base=d))     # how many qudits of dim d to represent bond dim D
 
     local blockMPS, new_siteinds, newN, npairs, block_linkinds, block_linkinds_dims
@@ -355,6 +356,7 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
     # here we follow the sequential rg procedure
     V_list::Vector{Vector{it.ITensor}} = []
     V_tau_list = []
+    V_lc_list = []
     
     for i in 1:newN
 
@@ -447,7 +449,7 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
 
         it.replaceprime!(V_mpo, q-2*bitlength+1 => 1)
         # invert final V
-        tau, _ = invertGlobalSweep(V_mpo; eps = eps_V/(newN^2), overlap = d^q)
+        tau, lc, _ = invertGlobalSweep(V_mpo; eps = eps_V/(newN^2), overlap = d^q)
         # NOTE: FOR NOW INVERTGLOBALSWEEP ONLY WORKS WITH QUBITS, AS IT OPTIMIZES OVER U(4) UNITARIES
         
         # account for the swap gates 
@@ -455,6 +457,7 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
             tau += q - bitlength - 1
         end
         push!(V_tau_list, tau)
+        push!(V_lc_list, lc)
 
     end
 
@@ -475,17 +478,27 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
         W = reshape(Array(W, it.inds(W)), (D, D))
         W_ext[1:D, 1:D] = W
         W_ext = reshape(W_ext, 2^(2*bitlength))
-        sites = it.siteinds(d, 2*bitlength)
+        #sites = it.siteinds(d, 2*bitlength)
+        sites = siteinds[q*i-bitlength+1 : q*i+bitlength]
         W_mps = itmps.MPS(W_ext, sites)
         push!(Wmps_list, W_mps)
     end
 
     # invert each mps in the list
+    # NOTE: INVERTGLOBAL ONLY WORKS ON QUBITS
     results = [invertGlobalSweep(Wmps; eps = eps_bell/npairs) for Wmps in Wmps_list]
-
     W_tau_list = [res[1] for res in results]
+    W_lc_list = [res[2] for res in results]
 
-    return Wlayer, V_list, err, W_tau_list, V_tau_list
+    # compute numerically total error by creating a 0 state and applying everything in sequence
+    mps_final = initialize_vac(N, siteinds=siteinds)
+    apply!(mps_final, W_lc_list)
+    apply!(mps_final, V_lc_list)
+    err_total = 1-abs(Array(contract(conj(mps), mps_final))[1])
+    @show err_total
+
+
+    return Dict([("V_lc", V_lc_list), ("V_tau", V_tau_list), ("W_lc", W_lc_list), ("W_tau", W_tau_list), ("err_total", err_total)])
 end
 
 end

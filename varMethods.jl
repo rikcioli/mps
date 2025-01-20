@@ -369,11 +369,12 @@ function _fgGlobal(U_array::Vector{<:Matrix}, lightcone, mpo, mpo_low)
     # compute total overlap (which is a complex number)
     contract!(mpo_low, lightcone, len)
     overlap = Array(contract(mpo, mpo_low))[1]
-    # we use the absolute value as a cost function
-    abs_ov = abs(overlap)
+    # we use the real part of the overlap as a cost function (gradient can be computed analytically)
+    abs_ov = real(overlap)
 
     # correct gradient to account for a smooth cost function (the overlap squared)
-    grad *= overlap/abs_ov
+    # WE DON'T: SIMPLY USE THE REAL PART AND IT WON'T BE NEEDED
+    #grad *= overlap/abs_ov
     riem_grad = project(U_array, grad)
 
     # put a - sign so that it minimizes
@@ -433,6 +434,7 @@ function invertGlobal(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau,
     # optimize and store results
     # note that arrUmin is already stored in current lightcone, ready to be applied to mps
     arrUmin, neg_overlap, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport =true , inner = inner);
+    updateLightcone!(lightcone, arrUmin)
 
     return lightcone, neg_overlap, gradmin, numfg, normgradhistory
 
@@ -600,10 +602,11 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo)
     overlap = Array(L_blocks[end])[1]
 
     # we use the absolute value as a cost function
-    abs_ov = abs(overlap)
+    #abs_ov = abs(overlap)
+    abs_ov = real(overlap)
 
     # correct gradient to account for the cost function being the absolute value of the overlap, not the abs squared
-    grad *= overlap/abs_ov
+    #grad *= overlap/abs_ov
     riem_grad = project(U_array, grad)
 
     # put a - sign so that it minimizes
@@ -618,7 +621,14 @@ end
 function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 10000, gradtol = 1E-8)
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
-    siteinds = input_inds
+
+    # noprime the input inds
+    # change the output inds to a prime of the input inds to match the inds of the first layer of gates
+    siteinds = it.noprime(input_inds)
+    for i in 1:N
+        it.replaceind!(mpo[i], input_inds[i], siteinds[i])
+        it.replaceind!(mpo[i], output_inds[i], it.prime(siteinds[i], tau))
+    end
 
     # create random brickwork circuit
     # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
@@ -634,16 +644,14 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
         # evaluate fidelity
         newfid = real(tr(Array(S, (u, v))))
         gate_ji_opt = U * it.replaceind(Vdag, v, u)
+        lightcone = newLightcone(siteinds, tau; lightbounds = (false, false))
         lightcone.circuit[1][1] = gate_ji_opt
 
         println("Matrix is 2-local, converged to fidelity $newfid immediately")
         return lightcone, -newfid, nothing
     end
 
-    # change the output inds to a prime of the input inds to match the inds of the first layer of gates
-    for i in 1:N
-        it.replaceind!(mpo[i], output_inds[i], it.prime(siteinds[i], tau))
-    end
+    
 
     # setup optimization stuff
     arrU0 = Array(lightcone)
@@ -656,6 +664,7 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
     # optimize and store results
     # note that arrUmin is already stored in current lightcone, ready to be applied to mps
     arrUmin, neg_overlap, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport =true , inner = inner);
+    updateLightcone!(lightcone, arrUmin)
 
     return lightcone, neg_overlap, gradmin, numfg, normgradhistory
 
@@ -715,7 +724,7 @@ function invertGlobalSweep(mps::itmps.MPS; tau = 0, kargs...)
 end
 
 
-"Wrapper for ITensorsMPS.MPO input. Calls invertGlobal by first conjugating and extracting upper and lower indices"
+"Wrapper for ITensorsMPS.MPO input. Calls invertGlobal by first taking the dagger and extracting upper and lower indices"
 function invertGlobalSweep(mpo::itmps.MPO; tau = 0, kargs...)
     N = length(mpo)
     mpo = conj(mpo)
@@ -734,10 +743,10 @@ function invertGlobalSweep(mpo::itmps.MPO; tau = 0, kargs...)
     outinds = it.uniqueinds(allinds, siteinds)
 
     if iszero(tau)
-        tau, lc, err, rest... = invertGlobalSweep(mpo, siteinds, outinds; overlap = 2^N, kargs...)
+        tau, lc, err, rest... = invertGlobalSweep(mpo, outinds, siteinds; overlap = 2^N, kargs...)
         return tau, lc, err, rest...
     else
-        lc, neg_overlap, rest... = invertGlobalSweep(mpo, tau, siteinds, outinds; kargs...)
+        lc, neg_overlap, rest... = invertGlobalSweep(mpo, tau, outinds, siteinds; kargs...)
         return lc, abs(2^N+neg_overlap), rest...
     end
 

@@ -252,7 +252,7 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2, eps_trunc = 0
         # for l in i:last_site
         #     mps[l] = it.noprime(reduced_mps[l-i+1])
         # end
-
+        mt.updateLightcone(lightcone, arrUmin)
         push!(lc_list, lightcone)
         push!(V_list, arrUmin)
         push!(err_list, 1+err)
@@ -325,7 +325,7 @@ function invertMPSLiu(mps::itmps.MPS; d = 2, eps_trunc = 0.01, eps_inv = 0.01)
     siteinds = it.siteinds(mps)
     #eps_liu = eps_trunc/N
 
-    local mps_trunc, boundaries, rangesA, V_list, err_list, lc_list
+    local mps_trunc, boundaries, rangesA, V_list, err_list, lc_list, err_trunc
     tau = 1
     while true
         mps_copy = deepcopy(mps)
@@ -488,43 +488,35 @@ function invertMPSLiu(mps::itmps.MPS; d = 2, eps_trunc = 0.01, eps_inv = 0.01)
 
     # finally create a 0 state and apply all the V to recreate the original state for final total error
     mps_final = mt.initialize_vac(N, trunc_siteinds)
-    mt.contract!(mps_final, lc_list2)
-    @show norm(mps_final - mps_trunc)
+    mt.apply!(mps_final, lc_list2)
+    err2tot = 1-abs(Array(mt.contract(mps_final, conj(mps_trunc)))[1])
+    @show err2tot
     it.replace_siteinds!(mps_final, siteinds)
-    mt.contract!(mps_final, lc_list, dagger=true)
-    err_final = norm(mps_final - mps)
-    @show err_final
+    mt.apply!(mps_final, lc_list, dagger=true)
+    err_total = 1-abs(Array(mt.contract(mps_final, conj(mps)))[1])
+    @show err_total
     
-    return Dict([("lc1", lc_list), ("tau1", tau), ("err1", err_list), ("lc2", lc_list2), ("tau2", tau_list2), ("err2", err_list2), ("mps_final", mps_final), ("err_final", err_final)])
+    return Dict([("lc1", lc_list), ("tau1", tau), ("err1", err_list), ("lc2", lc_list2), ("tau2", tau_list2), ("err2", err_list2), ("mps_final", mps_final), ("err_trunc", err_trunc), ("err_inv", err2tot), ("err_total", err_total)])
 
 end
 
 
 it.set_warn_order(28)
 
-N = 24
+N = 15
 
-#mps = mt.randMPS(N, 2)
-gate = mt.random_unitary(4)
-mps = mt.initialize_fdqc(N, 3, gate, gate)
+mps = mt.randMPS(N, 2)
+#mps = mt.initialize_fdqc(N, 2)
 siteinds = it.siteinds(mps)
 
-zero = mt.initialize_vac(N, siteinds)
-lc = mt.newLightcone(siteinds, 3; U_array = [gate for _ in 1:35], lightbounds = (false, false))
-mt.contract!(zero, [lc])
-@show norm(zero-mps)
 
 #results = invertMPSLiu(mps)
 #mpsfinal, lclist, mps_trunc, second_part = results[3:6]
 
 #@time results = mt.invertGlobalSweep(mps)
-#results2 = mt.invertMPSMalz(mps)
-#
-#lc = results[2]
-#
-#zero = it.prime(mt.initialize_vac(N, siteinds), 3)
-#mt.contract!(zero, lc)
-#@show norm(mps - zero)
+results2 = mt.invertMPSMalzGlobal(mps, eps_malz = 0.1)
+
+
 
 # Plots.plot(results[5][:,2],label ="L-BFGS",yscale =:log10)
 # Plots.plot!(xlabel = "iterations",ylabel = L"||\nabla{f}||")

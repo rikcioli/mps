@@ -100,7 +100,8 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
                     elseif isodd(i)
                         fullinds[1] = it.prime(inds[1],-1)
                     end
-                elseif j == rslope
+                end
+                if j == rslope
                     if lightbounds[2]
                         fullinds[2] = it.noprime(inds[2])
                     # else: if size even decrease the right index of the odd layers, if size odd decrease right index of even layers
@@ -329,7 +330,7 @@ function MPO(lightcone::Lightcone)
 
     circ = lightcone.circuit
     depth = lightcone.depth
-    siteinds = lightcone.siteinds
+    siteinds = lightcone.sitesAB
 
     mpo_list = []
     for layer in lightcone.layers
