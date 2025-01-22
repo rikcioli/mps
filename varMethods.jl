@@ -625,14 +625,13 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
     # noprime the input inds
     # change the output inds to a prime of the input inds to match the inds of the first layer of gates
     siteinds = it.noprime(input_inds)
+    d = siteinds[1].space
+    tempinds = it.siteinds(d, N)
     for i in 1:N
-        it.replaceind!(mpo[i], input_inds[i], siteinds[i])
+        it.replaceind!(mpo[i], input_inds[i], tempinds[i])
         it.replaceind!(mpo[i], output_inds[i], it.prime(siteinds[i], tau))
+        it.replaceind!(mpo[i], tempinds[i], siteinds[i])
     end
-
-    # create random brickwork circuit
-    # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    lightcone = newLightcone(siteinds, tau; lightbounds = lightbounds)
 
     if N == 2   #solution is immediate via SVD
         env = conj(mpo[1]*mpo[2])
@@ -644,14 +643,17 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
         # evaluate fidelity
         newfid = real(tr(Array(S, (u, v))))
         gate_ji_opt = U * it.replaceind(Vdag, v, u)
-        lightcone = newLightcone(siteinds, tau; lightbounds = (false, false))
-        lightcone.circuit[1][1] = gate_ji_opt
+        lightcone = newLightcone(siteinds, 1; lightbounds = (false, false))
+        lightcone.circuit[1][1] = it.replaceprime(gate_ji_opt, tau => 1)
 
         println("Matrix is 2-local, converged to fidelity $newfid immediately")
         return lightcone, -newfid, nothing
     end
 
-    
+    # create random brickwork circuit
+    # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
+    lightcone = newLightcone(siteinds, tau; lightbounds = lightbounds)
+
 
     # setup optimization stuff
     arrU0 = Array(lightcone)
@@ -685,6 +687,7 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
         err = abs(overlap + neg_overlap)
         if err < eps
             found = true
+            tau = lc.depth
             println("Convergence within desired error achieved with depth $tau\n")
             return tau, lc, err, rest...
         end

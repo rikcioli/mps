@@ -10,7 +10,7 @@ function tensor_to_matrix(T::it.ITensor, order = [1,2,3,4])
 end
 
 "Extends m x n isometry to M x M unitary, where M is the power of 2 which bounds max(m, n) from above"
-function iso_to_unitary(V::Union{Matrix, Vector{Float64}})
+function iso_to_unitary(V)
     nrows, ncols = size(V, 1), size(V, 2)
     dagger = false
     if ncols > nrows
@@ -82,7 +82,7 @@ end
 "Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
 function apply(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
     psi = deepcopy(psi)
-    psi = it.orthogonalize(psi, b)
+    it.orthogonalize!(psi, b)
     s = it.siteinds(psi)
     op = it.op(U, s[b+1], s[b])
 
@@ -95,7 +95,7 @@ function apply(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
 end
 
 "Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
-function apply!(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
+function apply!(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-15)
     it.orthogonalize!(psi, b)
     s = it.siteinds(psi)
     op = it.op(U, s[b+1], s[b])
@@ -120,7 +120,7 @@ function contract!(psi::Vector{it.ITensor}, U::it.ITensor, b; cutoff = 1E-15)
 end
 
 "Multiply two mps/mpo respecting their indices"
-function contract(psi1::Union{itmps.MPS, Vector{it.ITensor}}, psi2::Union{itmps.MPS, Vector{it.ITensor}})
+function contract(psi1::Union{itmps.MPS, itmps.MPO, Vector{it.ITensor}}, psi2::Union{itmps.MPS, itmps.MPO, Vector{it.ITensor}})
     left_tensor = psi1[1] * psi2[1]
     for i in 2:length(psi1)
         left_tensor *= psi1[i]
@@ -294,7 +294,6 @@ end
 
 
 ### CUSTOM MPO METHODS ###
-
 "Convert unitary to MPO via repeated SVD"
 function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}; d = 2, siteinds = nothing, skip_qudits = 0, orthogonalize = true)
     D = size(U, 1)
@@ -312,44 +311,17 @@ function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}; d = 2, siteinds = not
     sites = siteinds[1+skip_qudits:N+skip_qudits]
     mpo::Vector{it.ITensor} = []
 
-    block = U
-    dR = div(D,d)
-    
-    # reshape into d x d^N-1 x d x d^N-1 matrix
-    Uresh = reshape(block, (d, dR, d, dR))
-    # permute so that the first two indices are those related to site 1
-    Uresh = permutedims(Uresh, (1, 3, 2, 4))
-    # reshape for svd
-    Uresh = reshape(Uresh, (d^2, dR^2))
-    F = svd(Uresh)
-    Us, Ss, Vs = F.U, F.S, F.Vt
-    # save link dimension and create link index
-    dlink = size(Ss,1)
-    link = it.Index(dlink; tags = "l=1")
-    # store Us as an ITensor
-    U_tensor = it.ITensor(Us, sites[1]', sites[1], link)
-    push!(mpo, U_tensor)
-    # update block and right dimension dR for next iteration
-    block = diagm(Ss) * Vs
-    dR = div(dR,d)
-    
-    for i in 2:N-1
-        Uresh = reshape(block, (dlink, d, dR, d, dR))
-        Uresh = permutedims(Uresh, (1, 2, 4, 3, 5))
-        Uresh = reshape(Uresh, (dlink*d^2, dR^2))
-        F = svd(Uresh)
-        Us, Ss, Vs = F.U, F.S, F.Vt
-        oldlink = link
-        dlink = size(Ss,1)
-        link = it.Index(dlink; tags = "l=$i")
-        U_tensor = it.ITensor(Us, oldlink, sites[i]', sites[i], link)
-        push!(mpo, U_tensor)
-        block = diagm(Ss) * Vs
-        dR = div(dR,d)
+    block = it.ITensor(U, sites', sites)
+    local link
+    for i in 1:N-1
+        Uinds = (i==1 ? (sites[i]', sites[i]) : (link, sites[i]', sites[i]))
+        Us, Ss, Vsdag = it.svd(block, Uinds, cutoff = 1e-16)
+        push!(mpo, Us)
+        link = it.commonind(Us, Ss)
+        block = Ss*Vsdag
     end
-
-    end_tensor = it.ITensor(block, link, sites[end]', sites[end])
-    push!(mpo, end_tensor)
+    push!(mpo, block)
+    
 
     # add identities left and right for every siteind that is not in sites
     left_deltas::Vector{it.ITensor} = []
@@ -369,6 +341,9 @@ function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}; d = 2, siteinds = not
 
     return mpo_final
 end
+
+
+
 
 "multiply Vector{ITensors.ITensor} object together. Indices have to match in advance." 
 function Base.:*(mpo1::Vector{it.ITensor}, mpo2::Vector{it.ITensor})

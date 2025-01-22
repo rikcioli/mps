@@ -18,6 +18,11 @@ const CX = [1 0 0 0
             0 0 0 1
             0 0 1 0]
 
+const SWAP = [1 0 0 0
+              0 0 1 0
+              0 1 0 0
+              0 0 0 1]
+
 "Returns random N x N unitary matrix sampled with Haar measure"
 function random_unitary(N::Int)
     x = (randn(N,N) + randn(N,N)*im) / sqrt(2)
@@ -356,28 +361,25 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
     # here we follow the sequential rg procedure
     V_list::Vector{Vector{it.ITensor}} = []
     V_tau_list = []
-    V_lc_list = []
-    
+    V_lc_list::Vector{Lightcone} = []
+    V_mpo_list = []
+
     for i in 1:newN
 
         block_i = i < newN ? mps[q*(i-1)+1 : q*i] : mps[q*(i-1)+1 : end]
+        block_i_Ulist::Vector{it.ITensor} = []
 
         # if i=1 no svd must be done, entire block 1 is already a series of isometries
         if i == 1
-
             iR = block_linkinds[1]
             block_i[end] = it.replaceind(block_i[end], iR, new_siteinds[1])
             block_i_Ulist = block_i
             push!(V_list, block_i_Ulist)
 
         else
-
             # prepare left index of block i
-            block_i_Ulist = []
             iL = block_linkinds[i-1]
             local prev_SV
-
-
             for j in 1:q-1
                 A = block_i[j]                              # j-th tensor in block_i
                 iR = it.commoninds(A, linkinds)[2]    # right link index
@@ -395,13 +397,15 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
                 PiL, PiR = block_linkinds[i-1:i]
                 PnL, PnR = new_siteinds[2*i-2:2*i-1]
                 dim = reduce(*, block_linkinds_dims[i-1:i])
-                P_matrix = reshape(Array(P, [PnL, PnR, PiL, PiR]), (dim, dim))
+                cup, clow = it.combiner(PnL, PnR), it.combiner(PiL, PiR)
+                P = (P*cup)*clow
+                P_matrix = Array(P, (it.combinedind(cup), it.combinedind(clow)))
                 Pinv = inv(P_matrix)
             
                 # convert back to tensor with inds ready to contract with Ctilde = prev_SV * C   
                 # and with blockMPS[i] siteinds       
                 CindR = it.commoninds(C, linkinds)[2]
-                Pinv = it.ITensor(Pinv, [iL, CindR, PnL, PnR])
+                Pinv = it.ITensor(Pinv, (iL, CindR, PnL, PnR))
             else    #same here, only different indices
                 PiL = block_linkinds[i-1]
                 PnL = new_siteinds[2*i-2]
@@ -426,10 +430,27 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
         V_downinds = it.uniqueinds(V, V_upinds)
         down_d = reduce(*, [ind.space for ind in V_downinds])  # will be D for i=1, D^2 elsewhere
         V_matrix = reshape(Array(V, V_upinds, V_downinds), (d^(2*bitlength), down_d))      # MUST BE MODIFIED WHEN i=1 or newN THE OUTPUT LEG IS ONLY D
-        # @show typeof(V_matrix)
-        # @show typeof(iso_to_unitary(V_matrix))
-        V_mpo = unitary_to_mpo(iso_to_unitary(V_matrix), siteinds = upinds)
-        it.prime!(V_mpo, q - 2*bitlength)
+        sizeV = size(V_matrix)
+        @show sizeV
+
+        if sizeV[1] != sizeV[2]
+            # we promote the isometry to a unitary by appending orthonormal columns
+            # note that the appended columns will end up on the lower right index, while we
+            # want them to be associated with the lower left index since that is the index
+            # that gets contracted with |0> ad the end;
+            # the only exception is when i == newN and q == bitlength, where the contraction
+            # with |0> will be on the lower right indices
+            V_matrix = iso_to_unitary(V_matrix)
+            if i < newN || 2*bitlength < q
+                remainder = div(d^(2*bitlength), down_d)
+                V_matrix = reshape(V_matrix, (d^(2*bitlength), down_d, remainder))
+                V_matrix = permutedims(V_matrix, [1,3,2])
+                V_matrix = reshape(V_matrix, (d^(2*bitlength), d^(2*bitlength)))
+            end
+        end
+        
+        V_mpo = unitary_to_mpo(V_matrix, siteinds = upinds)
+        it.prime!(V_mpo, q - 2*bitlength)   # we prime to contract with the next MPOs
         
         # transform next isometries to mpo and contract with previous ones
         for k in 2*bitlength+1:q
@@ -440,14 +461,30 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
             up_d = reduce(*, [ind.space for ind in uk_upinds])
             down_d = reduce(*, [ind.space for ind in uk_downinds])
             uk_matrix = reshape(Array(uk, uk_upinds, uk_downinds), (up_d, down_d))
+            size_uk = size(uk_matrix)
+
+            # # complete and permute uk_matrix if needed
+            if size_uk[1] != size_uk[2]
+                # same reasoning applied here, with the sole exception of the last gate of i == newN
+                # where the contraction with |0> will be on the lower right indices
+                uk_matrix = iso_to_unitary(uk_matrix)
+                if i < newN || (i == newN && k==q)
+                    remainder = div(up_d, down_d)
+                    uk_matrix = reshape(uk_matrix, (up_d, down_d, remainder))
+                    uk_matrix = permutedims(uk_matrix, [1,3,2])
+                    uk_matrix = reshape(uk_matrix, (up_d, up_d))
+                end
+            end
+
             # need to decide how many identities to put to the left of uk unitaries based on up_d
             nskips = k - length(digits(up_d-1, base=d))
-            uk_mpo = unitary_to_mpo(iso_to_unitary(uk_matrix), siteinds = upinds, skip_qudits = nskips)
+            uk_mpo = unitary_to_mpo(uk_matrix, siteinds = upinds, skip_qudits = nskips)
             it.prime!(uk_mpo, q-k)
             V_mpo = V_mpo*uk_mpo
         end
 
         it.replaceprime!(V_mpo, q-2*bitlength+1 => 1)
+        push!(V_mpo_list, V_mpo)
         # invert final V
         tau, lc, _ = invertGlobalSweep(V_mpo; eps = eps_V/(newN^2), overlap = d^q)
         # NOTE: FOR NOW INVERTGLOBALSWEEP ONLY WORKS WITH QUBITS, AS IT OPTIMIZES OVER U(4) UNITARIES
@@ -461,6 +498,7 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
 
     end
 
+
     zero_projs::Vector{it.ITensor} = []
     for ind in new_siteinds
         vec = [1; [0 for _ in 1:ind.space-1]]
@@ -473,14 +511,15 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
     # prepare W|0> states to turn into mps
     Wmps_list = []
     for i in 1:npairs
-        W_ext = zeros(ComplexF64, (2^bitlength, 2^bitlength))   # embed W in n = bitlength qudits
-        W = Wlayer[i]
-        W = reshape(Array(W, it.inds(W)), (D, D))
-        W_ext[1:D, 1:D] = W
-        W_ext = reshape(W_ext, 2^(2*bitlength))
-        #sites = it.siteinds(d, 2*bitlength)
-        sites = siteinds[q*i-bitlength+1 : q*i+bitlength]
-        W_mps = itmps.MPS(W_ext, sites)
+        sitesL = siteinds[q*i-bitlength+1 : q*i]
+        sitesR = siteinds[q*i+1 : q*i+bitlength]
+        cL = it.combiner(sitesL)
+        it.replaceind!(cL, it.combinedind(cL), new_siteinds[2*i-1])
+        cR = it.combiner(sitesR)
+        it.replaceind!(cR, it.combinedind(cR), new_siteinds[2*i])
+
+        Wi = (Wlayer[i]*cL)*cR
+        W_mps = itmps.MPS(Wi, [sitesL; sitesR])
         push!(Wmps_list, W_mps)
     end
 
@@ -488,11 +527,41 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
     # NOTE: INVERTGLOBAL ONLY WORKS ON QUBITS
     results = [invertGlobalSweep(Wmps; eps = eps_bell/npairs) for Wmps in Wmps_list]
     W_tau_list = [res[1] for res in results]
-    W_lc_list = [res[2] for res in results]
+    W_lc_list::Vector{Lightcone} = [res[2] for res in results]
+
 
     # compute numerically total error by creating a 0 state and applying everything in sequence
-    mps_final = initialize_vac(N, siteinds=siteinds)
+    mps_final = initialize_vac(N, siteinds)
     apply!(mps_final, W_lc_list)
+
+    zero = [it.ITensor([1; 0], siteinds[i]) for i in 1:N]
+    for i in 1:npairs
+        for j in q*i-bitlength+1 : q*i+bitlength
+            jshift = j-(q*i-bitlength)
+            zero[j] = Wmps_list[i][jshift]
+        end
+    end
+    Wstep_mps = itmps.MPS(zero)
+    err_W = 1-abs(Array(contract(conj(Wstep_mps), mps_final))[1])
+    @show err_W 
+
+    spacing = q-2*bitlength
+    for i in 1:npairs
+        for j in i*q+bitlength : -1 : i*q+1
+            for t in 1:spacing
+                apply!(SWAP, Wstep_mps, j+t-1)
+            end
+        end
+    end
+    V_mpo_final = itmps.MPO(reduce(vcat, [mpo[1:end] for mpo in V_mpo_list]))
+    it.orthogonalize!(V_mpo_final, 1)
+    it.orthogonalize!(Wstep_mps, 1)
+
+    res = it.apply(V_mpo_final, Wstep_mps)
+
+    fidelity = abs(Array(contract(conj(mps), res))[1])
+    @show fidelity
+            
     apply!(mps_final, V_lc_list)
     err_total = 1-abs(Array(contract(conj(mps), mps_final))[1])
     @show err_total

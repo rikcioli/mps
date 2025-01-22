@@ -503,10 +503,10 @@ end
 
 it.set_warn_order(28)
 
-N = 15
+N = 16
 
 mps = mt.randMPS(N, 2)
-#mps = mt.initialize_fdqc(N, 2)
+#mps = mt.initialize_fdqc(N, 3)
 siteinds = it.siteinds(mps)
 
 
@@ -514,7 +514,7 @@ siteinds = it.siteinds(mps)
 #mpsfinal, lclist, mps_trunc, second_part = results[3:6]
 
 #@time results = mt.invertGlobalSweep(mps)
-results2 = mt.invertMPSMalzGlobal(mps, eps_malz = 0.1)
+results2 = mt.invertMPSMalzGlobal(mps, eps_malz = 0.4)
 
 
 
