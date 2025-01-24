@@ -116,7 +116,7 @@ function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau
 
             env = conj(env_left*env_right)
 
-            inds = gate_ji["inds"]
+            inds = gate_ji["inds"][1:2]
             U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
             u, v = it.commonind(U, S), it.commonind(Vdag, S)
 
