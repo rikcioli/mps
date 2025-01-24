@@ -46,9 +46,28 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
     siteinds = it.siteinds(mps)
     linkinds = it.linkinds(mps)
     linkdims = [ind.space for ind in linkinds]
-    D = linkdims[div(N,2)]
+    D = maximum(linkdims)
     d = siteinds[div(N,2)].space
     bitlength = length(digits(D-1, base=d))     # how many qudits of dim d to represent bond dim D
+
+    # adjust bond dimension so that it's the same everywhere (except boundaries)
+    for j in bitlength : N-bitlength
+        link = linkinds[j]
+        if link.space < D
+            it.orthogonalize!(mps, j+1)
+            block = mps[j]*mps[j+1]
+            U, S, Vdag = it.svd(block, (siteinds[j], linkinds[j-1]), cutoff=1e-15)
+            Sinds = (it.commonind(S, U), it.commonind(S, Vdag))
+            Svec = diag(Array(S, Sinds))
+            Svec_ext = [Svec; [0 for _ in 1:(D-link.space)]]
+            S = it.ITensor(diagm(Svec_ext), Sinds)
+            mps[j] = U
+            mps[j+1] = S*Vdag
+        end
+    end
+
+    @show mps
+
 
     local blockMPS, new_siteinds, newN, npairs, block_linkinds, block_linkinds_dims
 
@@ -69,7 +88,7 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
 
        
         if q - 2*bitlength < 0
-            throw(DomainError(D, "Malz inversion only works if q - 2n >= 0, with n: D = d^n\nMax bond dimension D = $D, blocking size q = $q."))
+            throw(DomainError(D, "Malz inversion only works if q - 2n >= 0, with n = logd(D) \nMax bond dimension D = $D, blocking size q = $q."))
         end
 
         newN = div(N,q)
@@ -291,9 +310,10 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
     @assert d == 2
     bitlength = length(digits(D-1, base=d))     # how many qudits of dim d to represent bond dim D
 
+
     local blockMPS, new_siteinds, newN, npairs, block_linkinds, block_linkinds_dims
 
-    q_list = iszero(q) ? [i for i in 2:N-1 if (mod(N,i) == 0 && i-2*bitlength >= 0)] : [q]
+    q_list = iszero(q) ? [i for i in 2:N-1 if (mod(N,i) == 0 && i-2*bitlength >= 0 && (iseven(i) && Dmin<D))] : [q]
 
     local q_found, circuit, err
     for q in q_list
@@ -462,13 +482,14 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
             down_d = reduce(*, [ind.space for ind in uk_downinds])
             uk_matrix = reshape(Array(uk, uk_upinds, uk_downinds), (up_d, down_d))
             size_uk = size(uk_matrix)
+            @show size_uk
 
             # # complete and permute uk_matrix if needed
             if size_uk[1] != size_uk[2]
                 # same reasoning applied here, with the sole exception of the last gate of i == newN
                 # where the contraction with |0> will be on the lower right indices
                 uk_matrix = iso_to_unitary(uk_matrix)
-                if i < newN || (i == newN && k==q)
+                if i < newN || (i == newN && k < q)
                     remainder = div(up_d, down_d)
                     uk_matrix = reshape(uk_matrix, (up_d, down_d, remainder))
                     uk_matrix = permutedims(uk_matrix, [1,3,2])
@@ -486,8 +507,10 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
         it.replaceprime!(V_mpo, q-2*bitlength+1 => 1)
         push!(V_mpo_list, V_mpo)
         # invert final V
-        tau, lc, _ = invertGlobalSweep(V_mpo; eps = eps_V/(newN^2), overlap = d^q)
-        # NOTE: FOR NOW INVERTGLOBALSWEEP ONLY WORKS WITH QUBITS, AS IT OPTIMIZES OVER U(4) UNITARIES
+        res = invertGlobalSweep(V_mpo; eps = eps_V/(newN^2), overlap = d^q)
+        tau = res["tau"]
+        lc = res["lightcone"]
+        # NOTE: FOR NOW invertGlobalSweep ONLY WORKS WITH QUBITS, AS IT OPTIMIZES OVER U(4) UNITARIES
         
         # account for the swap gates 
         if i > 1
@@ -526,8 +549,8 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
     # invert each mps in the list
     # NOTE: INVERTGLOBAL ONLY WORKS ON QUBITS
     results = [invertGlobalSweep(Wmps; eps = eps_bell/npairs) for Wmps in Wmps_list]
-    W_tau_list = [res[1] for res in results]
-    W_lc_list::Vector{Lightcone} = [res[2] for res in results]
+    W_tau_list = [res["tau"] for res in results]
+    W_lc_list::Vector{Lightcone} = [res["lightcone"] for res in results]
 
 
     # compute numerically total error by creating a 0 state and applying everything in sequence
@@ -548,7 +571,7 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
     spacing = q-2*bitlength
     for i in 1:npairs
         for j in i*q+bitlength : -1 : i*q+1
-            for t in 1:spacing
+            for t in 1:(i < npairs ? spacing : spacing-1)   #one less swap for the last W gate, since we are putting the |0> contraction on the right instead of the left
                 apply!(SWAP, Wstep_mps, j+t-1)
             end
         end

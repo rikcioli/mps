@@ -213,10 +213,35 @@ end
 
 "Apply lightcone to mps psi, from base to top. Lightcones' sitesAB must match mps siteinds only in id, not in primelevel.
 If dagger is true, all the unitaries are conjugated and the order of application is inverted"
-function apply!(mps::itmps.MPS, lightcones::Vector{Lightcone}; dagger = false)
+function apply!(mps::Union{itmps.MPS, itmps.MPO}, lightcones::Vector{Lightcone}; dagger = false)
     N = length(mps)
-    it.noprime!(mps)
-    siteinds = it.siteinds(mps)
+
+    if typeof(mps) == itmps.MPO
+        allinds = reduce(vcat, it.siteinds(mps))
+        # determine primelevel of inputinds, which will be the lowest found in allinds
+        first2inds = allinds[1:2]   
+        plev_in = 0
+        while true
+            ind = it.inds(first2inds, plev = plev_in)
+            if length(ind) > 0
+                break
+            end
+            plev_in += 1
+        end
+        ininds = it.inds(allinds, plev = plev_in)
+        outinds = it.uniqueinds(allinds, ininds)
+
+        new_ininds = it.siteinds(first2inds[1].space, N)
+        for i in 1:N
+            it.replaceind!(mps[i], ininds[i], new_ininds[i])
+        end
+        it.noprime!(mps)
+        siteinds = it.noprime(outinds)
+    else
+        it.noprime!(mps)
+        siteinds = it.siteinds(mps)
+    end
+
     l = 1
     for lc in lightcones
         firstind = it.noprime(lc.sitesAB[1])
@@ -276,6 +301,13 @@ function apply!(mps::itmps.MPS, lightcones::Vector{Lightcone}; dagger = false)
     if dagger
         it.noprime!(mps)
     end
+    if typeof(mps) == itmps.MPO
+        for i in 1:N
+            it.replaceind!(mps[i], siteinds[i], ininds'[i])
+            it.replaceind!(mps[i], new_ininds[i], ininds[i])
+        end
+    end
+
 end
 
 
@@ -326,30 +358,12 @@ end
 "Convert lightcone to MPO"
 # must be updated to account for the removal of identities
 function MPO(lightcone::Lightcone)
-    # convert lightcone to mpo by using the ij_dict and the itmps.MPO(it.ITensor) function, keeping track of the deltas for even depths
-
-    circ = lightcone.circuit
-    depth = lightcone.depth
+    # convert lightcone to mpo by using the apply(mps, lightcone) function defined above on an MPO of delta tensors
     siteinds = lightcone.sitesAB
 
-    mpo_list = []
-    for layer in lightcone.layers
-        qr_list::Vector{it.ITensor} = []
-        i = layer[1][1][1]
-        if iseven(i)    # add a delta at the edges for even layers
-            push!(qr_list, it.prime(it.delta(siteinds[1], siteinds[1]'), depth-i))
-        end
-        for (pos, inds) in layer
-            Q, R = it.qr(circ[pos[1]][pos[2]], inds[1], inds[3])
-            push!(qr_list, Q)
-            push!(qr_list, R)
-        end
-        if iseven(i)    # add a delta at the edges for even layers
-            push!(qr_list, it.prime(it.delta(siteinds[end], siteinds[end]'), depth-i))
-        end
-        layer_mpo = itmps.MPO(qr_list)
-        push!(mpo_list, layer_mpo)
-    end
+    mpo_list = [it.delta(ind, ind') for ind in siteinds]
+    mpo = itmps.MPO(mpo_list)
+    apply!(mpo, [lightcone])
 
-    return mpo_list
+    return mpo
 end

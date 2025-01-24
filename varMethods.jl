@@ -263,7 +263,7 @@ function invertSweep(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}; er
             break
         end
         
-        if tau > 9
+        if tau > 25
             println("Attempt stopped at tau = $tau, ITensor cannot go above")
             break
         end
@@ -458,9 +458,9 @@ function invertGlobal(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, inpu
             return tau, lc, err, rest...
         end
         
-        if tau > 15
+        if tau > 25
             println("Attempt stopped at tau = $tau, ITensor cannot go above")
-            break
+            return tau, lc, err, rest...
         end
 
         tau += 1
@@ -529,13 +529,11 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo)
     d = lightcone.d
     N = lightcone.size
 
-    L_blocks::Vector{it.ITensor} = []
     R_blocks::Vector{it.ITensor} = []
 
     # construct L_1
     # first item is the delta, i.e. the first site of mpo_low which is composed of only deltas, then the mpo site
     leftmost_block = mpo[1]  # 2 indices
-    push!(L_blocks, leftmost_block)
 
     # construct R_N
     rightmost_block = mpo[N]
@@ -590,7 +588,6 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo)
         for block in all_blocks
             leftmost_block *= block
         end
-        push!(L_blocks, leftmost_block)
 
         # update rightmost_block for next j
         if j < N-1
@@ -599,10 +596,9 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo)
     end
 
     # compute environment now that we contracted all blocks, so that we are effectively computing the overlap
-    overlap = Array(L_blocks[end])[1]
+    overlap = Array(leftmost_block)[1]
 
-    # we use the absolute value as a cost function
-    #abs_ov = abs(overlap)
+    # we use the real part of the overlap as a cost function
     abs_ov = real(overlap)
 
     # correct gradient to account for the cost function being the absolute value of the overlap, not the abs squared
@@ -618,7 +614,7 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo)
 end
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it"
-function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 10000, gradtol = 1E-8)
+function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 20000, gradtol = 1E-8)
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
@@ -668,7 +664,7 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
     arrUmin, neg_overlap, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport =true , inner = inner);
     updateLightcone!(lightcone, arrUmin)
 
-    return lightcone, neg_overlap, gradmin, numfg, normgradhistory
+    return Dict([("lightcone", lightcone), ("neg_overlap", neg_overlap), ("gradmin", gradmin), ("niter", numfg), ("history", normgradhistory)])
 
 end
 
@@ -683,18 +679,22 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
 
     while !found
         println("Attempting depth $tau...")
-        lc, neg_overlap, rest... = invertGlobalSweep(mpo, tau, input_inds, output_inds; kargs...)
-        err = abs(overlap + neg_overlap)
+        results = invertGlobalSweep(mpo, tau, input_inds, output_inds; kargs...)
+        err = abs(overlap + results["neg_overlap"])
         if err < eps
             found = true
-            tau = lc.depth
+            tau = results["lightcone"].depth
             println("Convergence within desired error achieved with depth $tau\n")
-            return tau, lc, err, rest...
+            results["tau"] = tau
+            results["err"] = err
+            return results
         end
         
-        if tau > 15
+        if tau > 24
             println("Attempt stopped at tau = $tau, ITensor cannot go above")
-            break
+            results["tau"] = tau
+            results["err"] = err
+            return results
         end
 
         tau += 1
@@ -717,11 +717,12 @@ function invertGlobalSweep(mps::itmps.MPS; tau = 0, kargs...)
     end
 
     if iszero(tau)
-        tau, lc, err, rest... = invertGlobalSweep(mps, siteinds, outinds; overlap=1, kargs...)
-        return tau, lc, err, rest...
+        results = invertGlobalSweep(mps, siteinds, outinds; overlap=1, kargs...)
+        return results
     else
-        lc, neg_overlap, rest... = invertGlobalSweep(mps, tau, siteinds, outinds; kargs...)
-        return lc, abs(1+neg_overlap), rest...
+        results = invertGlobalSweep(mps, tau, siteinds, outinds; kargs...)
+        results["err"] = abs(1+neg_overlap)
+        return results
     end
 
 end
@@ -746,11 +747,12 @@ function invertGlobalSweep(mpo::itmps.MPO; tau = 0, kargs...)
     outinds = it.uniqueinds(allinds, siteinds)
 
     if iszero(tau)
-        tau, lc, err, rest... = invertGlobalSweep(mpo, outinds, siteinds; overlap = 2^N, kargs...)
-        return tau, lc, err, rest...
+        results = invertGlobalSweep(mpo, outinds, siteinds; overlap = 2^N, kargs...)
+        return results
     else
-        lc, neg_overlap, rest... = invertGlobalSweep(mpo, tau, outinds, siteinds; kargs...)
-        return lc, abs(2^N+neg_overlap), rest...
+        results = invertGlobalSweep(mpo, tau, outinds, siteinds; kargs...)
+        results["err"] = abs(2^N+neg_overlap)
+        return results
     end
 
 end

@@ -309,8 +309,8 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2, eps_trunc = 0
 
         reduced_mps = itmps.MPS(reduced_mps)
         
-        tau_inv, _, err_inv, _ = mt.invertGlobalSweep(reduced_mps; start_tau = (range in rangesA ? 1 : 2))
-        push!(results_second_part, [tau_inv, err_inv])
+        results2 = mt.invertGlobalSweep(reduced_mps; start_tau = (range in rangesA ? 1 : 2))
+        push!(results_second_part, results2)
     end
     
     return V_list, err_list, lc_list, mps_trunc, results_second_part
@@ -479,10 +479,10 @@ function invertMPSLiu(mps::itmps.MPS; d = 2, eps_trunc = 0.01, eps_inv = 0.01)
 
         reduced_mps = itmps.MPS(reduced_mps)
         
-        tau2, lc2, err2, _ = mt.invertGlobalSweep(reduced_mps; start_tau = (range in rangesA ? 1 : 2), eps = eps_inv)
-        push!(lc_list2, lc2)
-        push!(tau_list2, tau2)
-        push!(err_list2, err2)
+        results2 = mt.invertGlobalSweep(reduced_mps; start_tau = (range in rangesA ? 1 : 2), eps = eps_inv)
+        push!(lc_list2, results2["lightcone"])
+        push!(tau_list2, results2["tau"])
+        push!(err_list2, results2["err"])
     end
 
 
@@ -506,7 +506,8 @@ it.set_warn_order(28)
 N = 16
 
 mps = mt.randMPS(N, 2)
-#mps = mt.initialize_fdqc(N, 3)
+#mps = mt.initialize_fdqc(N, 2)
+@show mps
 siteinds = it.siteinds(mps)
 
 
@@ -514,7 +515,7 @@ siteinds = it.siteinds(mps)
 #mpsfinal, lclist, mps_trunc, second_part = results[3:6]
 
 #@time results = mt.invertGlobalSweep(mps)
-results2 = mt.invertMPSMalzGlobal(mps, eps_malz = 0.4)
+results2 = mt.invertMPSMalzGlobal(mps, q=4, eps_malz = 0.4, eps_V = 0.01)
 
 
 

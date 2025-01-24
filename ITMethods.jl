@@ -156,7 +156,7 @@ function cut!(psi::itmps.MPS, b::Integer)
 end
 
 
-function brickwork(psi::itmps.MPS, brick_odd::Matrix, brick_even::Matrix, t::Integer; cutoff = 1E-14)
+function brickwork(psi::itmps.MPS, brick_odd::Matrix, brick_even::Matrix, t::Integer; cutoff = 1E-15)
     N = length(psi)
     sites = it.siteinds(psi)
     layerOdd = [it.op(brick_odd, sites[b+1], sites[b]) for b in 1:2:(N-1)]
@@ -170,7 +170,7 @@ end
 
 
 "Apply depth-t brickwork of 2-local random unitaries"
-function brickwork(psi::itmps.MPS, t::Int; cutoff = 1E-14)
+function brickwork(psi::itmps.MPS, t::Int; cutoff = 1E-15)
     N = length(psi)
     sites = it.siteinds(psi)
     d = sites[1].space
@@ -200,13 +200,13 @@ function initialize_ghz(N::Int)
     return ghz
 end
 
-function initialize_fdqc(N::Int, tau::Int)
+function initialize_fdqc(N::Int, tau::Int; kargs...)
     fdqc = initialize_vac(N)
     fdqc = brickwork(fdqc, tau)
     return fdqc
 end
 
-function initialize_fdqc(N::Int, tau::Int, brick_odd::Matrix, brick_even::Matrix)
+function initialize_fdqc(N::Int, tau::Int, brick_odd::Matrix, brick_even::Matrix; kargs...)
     fdqc = initialize_vac(N)
     fdqc = brickwork(fdqc, brick_odd, brick_even, tau)
     return fdqc

@@ -4,69 +4,109 @@ import ITensorMPS as itmps
 import ITensors as it
 import Plots
 using LaTeXStrings, LinearAlgebra, Statistics, Random
-using DelimitedFiles
+using CSV
+using DataFrames
 
-
+it.set_warn_order(28)
 
 # Prepare initial state
-q_found = []
-tau_found = []
-eps_array = [0.5, 0.2, 0.1, 0.05, 0.02, 0.01]
-q_list = [2,3,4,5,6,10]
-tau_list = [i for i in 1:10]
+eps_array = [0.2*2.0^(-i) for i in 0:4]
 
+N = 30
 
-N = 60
-eps = 0.1 
-
-# Random bond 2 mps
-testMPS = mt.randMPS(it.siteinds("Qubit", N), 2)
-
-for eps in eps_array
-    println("\nAssuming error threshold eps = $eps\n")
-
-    while true
-        q = q_list[1]
-        println("Inverting with q = $q...")
-        fid, sweep = mt.invertMPSMalz(testMPS, q, err = eps, n_sweeps = 1000)
-        err = 1-sqrt(fid)
-        println("Inverted q = $q with error $err, converged in $sweep sweeps")
-        if err < eps
-            push!(q_found, q)
-            break
-        else
-            global q_list = q_list[2:end]
-        end
+function execute(command, N, eps_array; D = 2, tau = 3)
+# Choose object to invert
+    if command == "randMPS"
+        test = mt.randMPS(N, D)
+    elseif command == "FDQC"
+        test = mt.initialize_fdqc(N, tau)
+    elseif command == "FDMPO"
+        siteinds = it.siteinds("Qubit", N)
+        test = mt.MPO(mt.newLightcone(siteinds, tau))
     end
 
-    while true
-        tau = tau_list[1]
-        println("Inverting with tau = $tau...")
-        fid, sweep = mt.invertMPS(testMPS, tau, err = eps, n_sweeps = 1000)
-        err = 1-sqrt(fid)
-        println("Inverted tau = $tau with error $err, converged in $sweep sweeps")
-        if err < eps
-            push!(tau_found, tau)
-            break
-        else
-            global tau_list = tau_list[2:end]
+    tau_sweep = []
+    tau_global = []
+    err_sweep = []
+    err_global = []
+    niter_sweep = []
+    niter_global = []
+
+    if command == "FDMPO"
+        eps_array = eps_array .* 2^N
+    end
+    for eps in eps_array
+        println("\nAssuming error threshold eps = $eps\n")
+
+        # check that latest err is greater than the required one, otherwise we already know what tau is and we can move to next error
+        if length(err_global) > 0
+            if err_global[end] < eps
+                push!(tau_global, tau_global[end])
+                push!(err_global, err_global[end])
+                push!(niter_global, niter_global[end])
+                continue
+            end
         end
+
+        #results2 = mt.invertGlobalSweep(test; eps = eps, maxiter = 5000000, start_tau = (eps == .eps_array[1] ? 1 : tau_global[end]+1))
+        results2 = mt.invertGlobalSweep(test; eps = eps, maxiter = 5000000, start_tau = 5)
+        err2, tau2, niter2 = results2["err"], results2["tau"], results2["niter"]
+        push!(tau_global, tau2)
+        push!(err_global, err2)
+        push!(niter_global, niter2)
     end
 
+    for eps in eps_array
+        println("\nAssuming error threshold eps = $eps\n")
+
+        # check that latest err is greater than the required one, otherwise we already know what tau is and we can move to next error
+        if length(err_sweep) > 0
+            if err_sweep[end] < eps
+                push!(tau_sweep, tau_sweep[end])
+                push!(err_sweep, err_sweep[end])
+                push!(niter_sweep, niter_sweep[end])
+                continue
+            end
+        end
+
+        results = mt.invertSweep(test; n_runs = 1, err_to_one = eps, start_tau = (eps == eps_array[1] ? 1 : tau_sweep[end]+1))
+        err1, tau1, niter1 = 1-results[2], results[4], results[3]
+        push!(tau_sweep, tau1)
+        push!(err_sweep, err1)
+        push!(niter_sweep, niter1)
+    end
+
+    
+
+    #data = [eps_array, tau_sweep, tau_global]
+    #writedlm( "D:\\Julia\\MyProject\\Data\\SweepVsGlobal\\randmps.csv", data, ',')
+    data_sweep = DataFrame(Error = eps_array, Depth1 = tau_sweep, Iterations1 = niter_sweep)
+    data_global = DataFrame(Depth2 = tau_global, Iterations2 = niter_global)
+    data = hcat(data_sweep, data_global)
+    CSV.write("D:\\Julia\\MyProject\\Data\\SweepVsGlobal\\"*command*".csv", data)
+
+    Plots.plot(title = L"N=30, \ D=2", ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
+    Plots.plot!(eps_array, tau_sweep, lc=:green, primary=false)
+    Plots.plot!(eps_array, tau_sweep, seriestype=:scatter, mc=:green, legend=true, label="invertSweep")
+
+    Plots.plot!(eps_array, tau_global, lc=:red, primary=false)
+    Plots.plot!(eps_array, tau_global, seriestype=:scatter, mc=:red, label="invertGlobalSweep", legend=:bottomright)
+    Plots.plot!(xscale=:log)
+    #Plots.plot!(title = L"N="*string(N), ylabel = L"\epsilon / M", xlabel = L"\tau")
+    Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\SweepVSGlobal"*command*".pdf")
+
+    Plots.plot(title = L"N=30, \ D=2", ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
+    Plots.plot!(eps_array, tau_sweep, lc=:green, primary=false)
+    Plots.plot!(eps_array, tau_sweep, seriestype=:scatter, mc=:green, legend=true, label="invertSweep")
+
+    Plots.plot!(eps_array, tau_global, lc=:red, primary=false)
+    Plots.plot!(eps_array, tau_global, seriestype=:scatter, mc=:red, label="invertGlobalSweep", legend=:bottomright)
+    Plots.plot!(xscale=:log)
+
+    return data
 end
 
-
-Plots.plot(title = L"N=60, \ D=2", ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
-Plots.plot!(eps_array, tau_found, lc=:green, primary=false)
-Plots.plot!(eps_array, tau_found, seriestype=:scatter, mc=:green, legend=true, label="Variational")
-
-Plots.plot!(eps_array, 2 .* q_found .- 1, lc=:red, primary=false)
-Plots.plot!(eps_array, 2 .* q_found .- 1, seriestype=:scatter, mc=:red, label="Malz", legend=:bottomright)
-Plots.plot!(xscale=:log)
-#Plots.plot!(title = L"N="*string(N), ylabel = L"\epsilon / M", xlabel = L"\tau")
-Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\MalzVSPollmann.pdf");
-
-
+data = execute("FDMPO", N, eps_array)
 
 #unitaries = [reshape(Array(circ[i,j], it.inds(circ[i,j])), (4, 4)) for i in 1:tau, j in 1:div(N,2)]
 
