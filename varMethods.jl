@@ -1,6 +1,294 @@
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}; d = 2, output_inds = nothing, conv_err = 1E-6, n_sweeps = 1E6)
+function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{Matrix}} = nothing)
+    mpo = deepcopy(mpo[1:end])
+    N = length(mpo)
+
+    # noprime the input inds
+    # change the output inds to a prime of the input inds to match the inds of the first layer of gates
+    siteinds = it.noprime(input_inds)
+    d = siteinds[1].space
+    tempinds = it.siteinds(d, N)
+    for i in 1:N
+        it.replaceind!(mpo[i], input_inds[i], tempinds[i])
+        it.replaceind!(mpo[i], output_inds[i], it.prime(siteinds[i], tau))
+        it.replaceind!(mpo[i], tempinds[i], siteinds[i])
+    end
+
+    if N == 2   #solution is immediate via SVD
+        env = conj(mpo[1]*mpo[2])
+
+        inds = siteinds
+        U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
+        u, v = it.commonind(U, S), it.commonind(Vdag, S)
+
+        # evaluate fidelity
+        newfid = real(tr(Array(S, (u, v))))
+        gate_ji_opt = U * it.replaceind(Vdag, v, u)
+        lightcone = newLightcone(siteinds, 1; lightbounds = (false, false))
+        lightcone.circuit[1][1] = it.replaceprime(gate_ji_opt, tau => 1)
+
+        println("Matrix is 2-local, converged to fidelity $newfid immediately")
+        return lightcone, -newfid, nothing
+    end
+
+    # create random brickwork circuit
+    # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
+    lightcone = newLightcone(siteinds, tau; U_array = init_array, lightbounds = (false, false))
+
+    L_blocks::Vector{it.ITensor} = []
+    R_blocks::Vector{it.ITensor} = []
+
+    # construct L_1
+    # first item is zero projector, then there are the gates in ascending order, then the mpo site
+    leftmost_block = mpo[1]  # 2 indices
+    push!(L_blocks, leftmost_block)
+
+    # construct R_N
+    rightmost_block = mpo[N]
+    push!(R_blocks, rightmost_block)
+
+    # contract everything on the right and save rightmost_block at each intermediate step
+    # must be done only the first time, when j=2 (so contract up to j=3)
+    for k in (N-1):-1:3
+        # extract right gates associated with site k
+        gates_k = lightcone.gates_by_site[k]
+        coords_right = [gate["coords"] for gate in gates_k if gate["orientation"]=="R"]
+        right_gates_k = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_right]
+        all_blocks = [right_gates_k; mpo[k]]
+
+        # if k even contract in descending order, else ascending
+        all_blocks = iseven(k) ? reverse(all_blocks) : all_blocks
+        for block in all_blocks
+            rightmost_block *= block
+        end
+        push!(R_blocks, rightmost_block)
+    end
+    reverse!(R_blocks)
+
+    # start the loop
+    rev = false
+    first_sweep = true
+    fid, newfid = 1, 0
+    j = 2  
+    sweep = 0
+
+    while sweep < maxiter
+
+        # extract all gates touching site j
+        gates_j = lightcone.gates_by_site[j]
+        coords_j = [gate["coords"] for gate in gates_j]
+        tensors_j = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_j]
+
+        # optimize each gate
+        for i in 1:tau
+            gate_ji = gates_j[i]    # extract gate j
+            
+            left_tensors = []
+            right_tensors = []
+            for l in [1:i-1; i+1:tau]
+                gate_jl = gates_j[l]
+                if gate_jl["orientation"] == "L"
+                    push!(left_tensors, tensors_j[l])
+                else
+                    push!(right_tensors, tensors_j[l])
+                end
+            end
+
+            contract_left = []
+            contract_right = []
+            if isodd(tau+j)
+                push!(contract_left, mpo[j])
+            else
+                push!(contract_right, mpo[j])
+            end
+            contract_left = [left_tensors; contract_left]
+            contract_right = [right_tensors; contract_right]
+            
+            env_left = leftmost_block
+            for gate in contract_left
+                env_left *= gate
+            end
+            env_right = rightmost_block
+            for gate in contract_right
+                env_right *= gate
+            end
+
+            env = conj(env_left*env_right)
+
+            inds = gate_ji["inds"]
+            U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
+            u, v = it.commonind(U, S), it.commonind(Vdag, S)
+
+            # evaluate fidelity as Tr(Env*Gate), i.e. the overlap (NOT SQUARED)
+            newfid = real(tr(Array(S, (u, v))))/normalization
+
+            #replace gate_ji with optimized one, both in gates_j (used in this loop) and in circuit
+            gate_ji_opt = U * it.replaceind(Vdag, v, u)
+            tensors_j[i] = gate_ji_opt
+            lightcone.circuit[i][div(j,2) + mod(i,2)*mod(j,2)] = gate_ji_opt
+        end
+
+        # while loop end conditions
+        if newfid >= 1
+            newfid = 1
+            break
+        end
+
+        if j == 2 && first_sweep == false
+            rev = false
+            sweep += 1
+        end
+
+        if j == N-1
+            first_sweep = false
+            rev = true
+            sweep += 1
+        end
+
+        # if we arrived at the end of the sweep
+        if (j==2 && first_sweep==false) || j==N-1
+            # compare the relative increase in frobenius norm
+            ratio = 1 - sqrt((1-newfid)/(1-fid))
+            #convergence occurs when fidelity after new sweep doesn't change considerably
+            if -conv_err < ratio < conv_err && first_sweep == false
+                break   
+            end
+            if ratio >= 0   # only register if the ratio has increased, otherwise it's useless
+                fid = newfid
+            end
+        end
+
+        
+        if N > 3
+            # update L_blocks or R_blocks depending on sweep direction
+            if rev == false
+                gates_to_append = tensors_j[(1+mod(j,2)):2:end]     # follow fig. 6
+                all_blocks = [gates_to_append; mpo[j]]
+                all_blocks = isodd(j) ? reverse(all_blocks) : all_blocks
+                for block in all_blocks
+                    leftmost_block *= block
+                end
+                if first_sweep == true
+                    push!(L_blocks, leftmost_block)
+                else
+                    L_blocks[j] = leftmost_block
+                end
+                rightmost_block = R_blocks[j]       #it should be j+2 but R_blocks starts from site 3
+            else
+                gates_to_append = tensors_j[(2-mod(j,2)):2:end]
+                all_blocks = [gates_to_append; mpo[j]]
+                all_blocks = iseven(j) ? reverse(all_blocks) : all_blocks
+                for block in all_blocks
+                    rightmost_block *= block
+                end
+                R_blocks[j-2] = rightmost_block         #same argument
+                leftmost_block = L_blocks[j-2]
+            end
+            j = rev ? j-1 : j+1
+        end
+
+    end
+
+    println("Converged to fidelity $newfid with $sweep sweeps")
+
+    return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", sweep)])
+
+end
+
+"Calls invertSweepLC for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
+function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; overlap = 1, normalization = 1, eps = 1E-6, start_tau = 1, kargs...)
+    obj = typeof(mpo)
+    true_overlap = overlap*normalization
+    println("Attempting invertSweepLC inversion of $obj to overlap value = $true_overlap up to relative error $eps, starting from depth $start_tau")
+    tau = start_tau
+    found = false
+
+    while !found
+        println("Attempting depth $tau...")
+        results = invertSweepLC(mpo, tau, input_inds, output_inds; normalization = normalization, kargs...)
+        err = abs(overlap - results["overlap"])
+        if err < eps
+            found = true
+            tau = results["lightcone"].depth
+            println("Convergence within desired error achieved with depth $tau\n")
+            results["tau"] = tau
+            results["err"] = err
+            return results
+        end
+        
+        if tau > 24
+            println("Attempt stopped at tau = $tau, ITensor cannot go above")
+            results["tau"] = tau
+            results["err"] = err
+            return results
+        end
+
+        tau += 1
+    end
+end
+
+
+"Wrapper for ITensorsMPS.MPS input. Before calling invertSweepLC, it conjugates mps (mps to invert must be above)
+and prepares a layer of zero bras to construct the mpo |0><psi|. Then calls invertSweepLC with overlap 1 and error eps"
+function invertSweepLC(mps::itmps.MPS; tau = 0, kargs...)
+    N = length(mps)
+    mps = conj(deepcopy(mps))
+    siteinds = it.siteinds(mps)
+    outinds = siteinds'
+
+    for i in 1:N
+        ind = siteinds[i]
+        vec = [1; [0 for _ in 1:ind.space-1]]
+        mps[i] *= it.ITensor(vec, ind')
+    end
+
+    if iszero(tau)
+        results = invertSweepLC(mps, siteinds, outinds; overlap=1, kargs...)
+        return results
+    else
+        results = invertSweepLC(mps, tau, siteinds, outinds; kargs...)
+        results["err"] = abs(1-results["overlap"])
+        return results
+    end
+
+end
+
+
+"Wrapper for ITensorsMPS.MPO input. Calls invertSweepLC by first taking the dagger and extracting upper and lower indices"
+function invertSweepLC(mpo::itmps.MPO; tau = 0, kargs...)
+    N = length(mpo)
+    mpo = conj(mpo)
+    allinds = reduce(vcat, it.siteinds(mpo))
+    # determine primelevel of inputinds, which will be the lowest found in allinds
+    first2inds = allinds[1:2]   
+    plev_in = 0
+    while true
+        ind = it.inds(first2inds, plev = plev_in)
+        if length(ind) > 0
+            break
+        end
+        plev_in += 1
+    end
+    siteinds = it.inds(allinds, plev = plev_in)
+    outinds = it.uniqueinds(allinds, siteinds)
+
+    if iszero(tau)
+        results = invertSweepLC(mpo, outinds, siteinds; overlap = 1, normalization = 2^N, kargs...)
+        return results
+    else
+        results = invertSweepLC(mpo, tau, outinds, siteinds; normalization = 2^N, kargs...)
+        results["err"] = abs(1-results["overlap"])
+        return results
+    end
+
+end
+
+
+
+"Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
+If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
+function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}; d = 2, output_inds = nothing, conv_err = 1E-6, maxiter = 1E6)
     N = length(mpo)
     siteinds = input_inds
     mpo_mode = !isnothing(output_inds)
@@ -100,7 +388,7 @@ function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index
     j = 2  
     sweep = 0
 
-    while sweep < n_sweeps
+    while sweep < maxiter
 
         # extract all gates touching site j
         gates_j = [circuit[i][div(j,2) + mod(i,2)*mod(j,2)] for i in 1:tau]
@@ -235,9 +523,9 @@ function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index
 end
 
 
-"Calls invertSweep for Vector{ITensor} mpo input with increasing inversion depth tau until it converges with fidelity F = 1-err_to_one"
-function invertSweep(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}; err_to_one = 1E-6, start_tau = 1, n_runs = 10, kargs...)
-    println("Tolerance $err_to_one, starting from depth $start_tau")
+"Calls invertSweep for Vector{ITensor} mpo input with increasing inversion depth tau until it converges with fidelity F = 1-eps"
+function invertSweep(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}; eps = 1E-6, start_tau = 1, n_runs = 10, kargs...)
+    println("Tolerance $eps, starting from depth $start_tau")
     tau = start_tau
     found = false
 
@@ -257,7 +545,7 @@ function invertSweep(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}; er
         avgfid = mean(fids)
         println("Avg fidelity = $avgfid")
 
-        if abs(1-fid_best) < err_to_one
+        if abs(1-fid_best) < eps
             found = true
             println("Convergence within desired error achieved with depth $tau\n")
             break
@@ -524,7 +812,7 @@ end
 
 
 "Cost function and gradient for invertGlobalSweep optimization"
-function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo)
+function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization = 1)
     updateLightcone!(lightcone, U_array)
     d = lightcone.d
     N = lightcone.size
@@ -599,10 +887,11 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo)
     overlap = Array(leftmost_block)[1]
 
     # we use the real part of the overlap as a cost function
-    abs_ov = real(overlap)
+    abs_ov = real(overlap)/normalization
 
     # correct gradient to account for the cost function being the absolute value of the overlap, not the abs squared
     #grad *= overlap/abs_ov
+    grad = grad/normalization
     riem_grad = project(U_array, grad)
 
     # put a - sign so that it minimizes
@@ -614,7 +903,7 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo)
 end
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it"
-function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 20000, gradtol = 1E-8)
+function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array = nothing)
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
@@ -637,7 +926,7 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
         u, v = it.commonind(U, S), it.commonind(Vdag, S)
 
         # evaluate fidelity
-        newfid = real(tr(Array(S, (u, v))))
+        newfid = real(tr(Array(S, (u, v))))/normalization
         gate_ji_opt = U * it.replaceind(Vdag, v, u)
         lightcone = newLightcone(siteinds, 1; lightbounds = (false, false))
         lightcone.circuit[1][1] = it.replaceprime(gate_ji_opt, tau => 1)
@@ -648,12 +937,12 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
 
     # create random brickwork circuit
     # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    lightcone = newLightcone(siteinds, tau; lightbounds = lightbounds)
+    lightcone = newLightcone(siteinds, tau; U_array = init_array, lightbounds = lightbounds)
 
 
     # setup optimization stuff
     arrU0 = Array(lightcone)
-    fg = arrU -> _fgGlobalSweep(arrU, lightcone, mpo)
+    fg = arrU -> _fgGlobalSweep(arrU, lightcone, mpo; normalization = normalization)
 
     # Quasi-Newton method
     m = 5
@@ -671,15 +960,16 @@ end
 
 
 "Calls invertBW for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
-function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; overlap = 1, eps = 1E-6, start_tau = 2, kargs...)
+function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; overlap = 1, normalization = 1, eps = 1E-6, start_tau = 2, kargs...)
     obj = typeof(mpo)
-    println("Attempting inversion of $obj to overlap value = $overlap up to error $eps, starting from depth $start_tau")
+    true_overlap = overlap*normalization
+    println("Attempting inversion of $obj to overlap value = $true_overlap up to relative error $eps, starting from depth $start_tau")
     tau = start_tau
     found = false
 
     while !found
         println("Attempting depth $tau...")
-        results = invertGlobalSweep(mpo, tau, input_inds, output_inds; kargs...)
+        results = invertGlobalSweep(mpo, tau, input_inds, output_inds; normalization = normalization, kargs...)
         err = abs(overlap + results["neg_overlap"])
         if err < eps
             found = true
@@ -721,7 +1011,7 @@ function invertGlobalSweep(mps::itmps.MPS; tau = 0, kargs...)
         return results
     else
         results = invertGlobalSweep(mps, tau, siteinds, outinds; kargs...)
-        results["err"] = abs(1+neg_overlap)
+        results["err"] = abs(1+results["neg_overlap"])
         return results
     end
 
@@ -747,12 +1037,29 @@ function invertGlobalSweep(mpo::itmps.MPO; tau = 0, kargs...)
     outinds = it.uniqueinds(allinds, siteinds)
 
     if iszero(tau)
-        results = invertGlobalSweep(mpo, outinds, siteinds; overlap = 2^N, kargs...)
+        results = invertGlobalSweep(mpo, outinds, siteinds; overlap = 1, normalization = 2^N, kargs...)
         return results
     else
-        results = invertGlobalSweep(mpo, tau, outinds, siteinds; kargs...)
-        results["err"] = abs(2^N+neg_overlap)
+        results = invertGlobalSweep(mpo, tau, outinds, siteinds; normalization = 2^N, kargs...)
+        results["err"] = abs(1+results["neg_overlap"])
         return results
     end
 
+end
+
+
+function invertCombined(obj::Union{itmps.MPS, itmps.MPO}; kargs...)
+    results_sweep = invertSweep(obj; kargs...)
+    circuit = results_sweep[1]
+    arrU0 = []
+    for i in 1:length(circuit)
+        layer = circuit[i]
+        len = length(layer)
+        for j in (isodd(i) ? (1:len) : (len:-1:1))
+            push!(arrU0, circuit[i][j])
+        end
+    end
+
+    results_global = invertGlobalSweep(obj; init_array = arrU0, kargs...)
+    return results_global
 end

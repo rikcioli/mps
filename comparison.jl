@@ -32,9 +32,8 @@ function execute(command, N, eps_array; D = 2, tau = 3)
     niter_sweep = []
     niter_global = []
 
-    if command == "FDMPO"
-        eps_array = eps_array .* 2^N
-    end
+
+
     for eps in eps_array
         println("\nAssuming error threshold eps = $eps\n")
 
@@ -49,12 +48,14 @@ function execute(command, N, eps_array; D = 2, tau = 3)
         end
 
         #results2 = mt.invertGlobalSweep(test; eps = eps, maxiter = 5000000, start_tau = (eps == .eps_array[1] ? 1 : tau_global[end]+1))
-        results2 = mt.invertGlobalSweep(test; eps = eps, maxiter = 5000000, start_tau = 5)
+        results2 = mt.invertSweep(test; eps = eps, maxiter = 10000, start_tau = 2)
         err2, tau2, niter2 = results2["err"], results2["tau"], results2["niter"]
+        return results2
         push!(tau_global, tau2)
         push!(err_global, err2)
         push!(niter_global, niter2)
     end
+
 
     for eps in eps_array
         println("\nAssuming error threshold eps = $eps\n")
@@ -69,13 +70,13 @@ function execute(command, N, eps_array; D = 2, tau = 3)
             end
         end
 
-        results = mt.invertSweep(test; n_runs = 1, err_to_one = eps, start_tau = (eps == eps_array[1] ? 1 : tau_sweep[end]+1))
+        #results = mt.invertSweep(test; n_runs = 1, eps = eps, start_tau = (eps == eps_array[1] ? 1 : tau_sweep[end]+1))
+        results = mt.invertSweep(test; n_runs = 1, eps = eps, start_tau = 2)
         err1, tau1, niter1 = 1-results[2], results[4], results[3]
         push!(tau_sweep, tau1)
         push!(err_sweep, err1)
         push!(niter_sweep, niter1)
     end
-
     
 
     #data = [eps_array, tau_sweep, tau_global]
@@ -83,7 +84,7 @@ function execute(command, N, eps_array; D = 2, tau = 3)
     data_sweep = DataFrame(Error = eps_array, Depth1 = tau_sweep, Iterations1 = niter_sweep)
     data_global = DataFrame(Depth2 = tau_global, Iterations2 = niter_global)
     data = hcat(data_sweep, data_global)
-    CSV.write("D:\\Julia\\MyProject\\Data\\SweepVsGlobal\\"*command*".csv", data)
+    #CSV.write("D:\\Julia\\MyProject\\Data\\SweepVsGlobal\\"*command*".csv", data)
 
     Plots.plot(title = L"N=30, \ D=2", ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
     Plots.plot!(eps_array, tau_sweep, lc=:green, primary=false)
@@ -93,7 +94,7 @@ function execute(command, N, eps_array; D = 2, tau = 3)
     Plots.plot!(eps_array, tau_global, seriestype=:scatter, mc=:red, label="invertGlobalSweep", legend=:bottomright)
     Plots.plot!(xscale=:log)
     #Plots.plot!(title = L"N="*string(N), ylabel = L"\epsilon / M", xlabel = L"\tau")
-    Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\SweepVSGlobal"*command*".pdf")
+    #Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\SweepVSGlobal"*command*".pdf")
 
     Plots.plot(title = L"N=30, \ D=2", ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
     Plots.plot!(eps_array, tau_sweep, lc=:green, primary=false)
@@ -106,7 +107,10 @@ function execute(command, N, eps_array; D = 2, tau = 3)
     return data
 end
 
-data = execute("FDMPO", N, eps_array)
+data = execute("FDMPO", 30, eps_array)
+
+
+
 
 #unitaries = [reshape(Array(circ[i,j], it.inds(circ[i,j])), (4, 4)) for i in 1:tau, j in 1:div(N,2)]
 

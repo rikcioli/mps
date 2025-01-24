@@ -229,7 +229,7 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
 
         it.replaceprime!(V_mpo, q-2*bitlength+1 => 1)
         # invert final V
-        _, _, _, tau = invertSweep(V_mpo; d = d, err_to_one = eps_V/((newN^2)*d^q), kargs...)
+        _, _, _, tau = invertSweep(V_mpo; d = d, eps = eps_V/((newN^2)*d^q), kargs...)
         
         # account for the swap gates 
         if i > 1
@@ -291,7 +291,7 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
     end
 
     # invert each mps in the list
-    results = [invertSweep(Wmps; d = d, err_to_one = eps_bell/npairs) for Wmps in Wmps_list]
+    results = [invertSweep(Wmps; d = d, eps = eps_bell/npairs) for Wmps in Wmps_list]
 
     W_tau_list = [res[4] for res in results]
 

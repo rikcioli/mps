@@ -60,16 +60,20 @@ function retract(arrU, arrX, t)
 
     # ensure unitarity of arrU
     arrU_polar = polar(arrU)
-    # non_unitarity = norm(arrU - arrU_polar)/length(arrU)
-    # @show non_unitarity
+    #non_unitarity = norm(arrU - arrU_polar)/length(arrU)
+    #if non_unitarity > 1e-10
+    #    @show non_unitarity
+    #end
     arrU = arrU_polar
 
     arrUinv = [U' for U in arrU]
     arrX_id = arrUinv .* arrX
 
     # ensure skewness of arrX_id
-    # non_skewness = norm(arrX_id - skew(arrX_id))/length(arrU)
-    # @show non_skewness
+    #non_skewness = norm(arrX_id - skew(arrX_id))/length(arrU)
+    #if non_skewness > 1E-10
+    #    @show non_skewness
+    #end
     # if non_skewness > 1E-15 + eps()
     #     throw(DomainError(non_skewness, "arrX is not in the tangent space at arrU"))
     # end
