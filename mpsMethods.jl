@@ -300,7 +300,7 @@ end
 
 
 # ONLY WORKS FOR d=2
-function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, eps_V = 1E-2, kargs...)
+function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, eps_V = 1E-2, kargsP = NamedTuple(), kargsV= NamedTuple(), kargsW = NamedTuple())
     N = length(mps)
     siteinds = it.siteinds(mps)
     linkinds = it.linkinds(mps)
@@ -313,7 +313,15 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
 
     local blockMPS, new_siteinds, newN, npairs, block_linkinds, block_linkinds_dims
 
-    q_list = iszero(q) ? [i for i in 2:N-1 if (mod(N,i) == 0 && i-2*bitlength >= 0 && (iseven(i) && Dmin<D))] : [q]
+    q_list = iszero(q) ? [i for i in 2:N-1 if (mod(N,i) == 0 && i-2*bitlength >= 0)] : [q]  # make sure q is large enough based on D
+
+    # find out if input state has uniform bond dimension in the bulk; if not, it means it's a FDQC and we can only block an even number of sites
+    # otherwise the different bond dimensions will cause problems
+    bulkdims = linkdims[bitlength+1 : N-1-bitlength]
+    if length(Set(bulkdims)) > 1
+        @show Set(bulkdims)
+        q_list = [i for i in q_list if iseven(i)]
+    end
 
     local q_found, circuit, err
     for q in q_list
@@ -365,7 +373,7 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
         push!(sep_mps, blockMPS[end])
 
         ## Start variational optimization to approximate P blocks
-        circuit, overlap, sweepB = invertSweep(conj(sep_mps), 1, new_siteinds; d = D, kargs...)
+        circuit, overlap, sweepB = invertSweep(conj(sep_mps), 1, new_siteinds; d = D, kargsP...)
         err = 1-overlap
 
         if err < eps_malz
@@ -507,7 +515,7 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
         it.replaceprime!(V_mpo, q-2*bitlength+1 => 1)
         push!(V_mpo_list, V_mpo)
         # invert final V
-        res = invertGlobalSweep(V_mpo; eps = eps_V/(newN^2), overlap = d^q)
+        res = invert(V_mpo, invertMethod; eps = eps_V/(newN^2), start_tau = 2, kargsV...)
         tau = res["tau"]
         lc = res["lightcone"]
         # NOTE: FOR NOW invertGlobalSweep ONLY WORKS WITH QUBITS, AS IT OPTIMIZES OVER U(4) UNITARIES
@@ -548,7 +556,7 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
 
     # invert each mps in the list
     # NOTE: INVERTGLOBAL ONLY WORKS ON QUBITS
-    results = [invertGlobalSweep(Wmps; eps = eps_bell/npairs) for Wmps in Wmps_list]
+    results = [invert(Wmps, invertMethod; eps = eps_bell/npairs, kargsW...) for Wmps in Wmps_list]
     W_tau_list = [res["tau"] for res in results]
     W_lc_list::Vector{Lightcone} = [res["lightcone"] for res in results]
 
@@ -557,34 +565,36 @@ function invertMPSMalzGlobal(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 
     mps_final = initialize_vac(N, siteinds)
     apply!(mps_final, W_lc_list)
 
-    zero = [it.ITensor([1; 0], siteinds[i]) for i in 1:N]
+    # compare with exact W|0>
+    Wexact = [it.ITensor([1; 0], siteinds[i]) for i in 1:N]
     for i in 1:npairs
         for j in q*i-bitlength+1 : q*i+bitlength
             jshift = j-(q*i-bitlength)
-            zero[j] = Wmps_list[i][jshift]
+            Wexact[j] = Wmps_list[i][jshift]
         end
     end
-    Wstep_mps = itmps.MPS(zero)
+    Wstep_mps = itmps.MPS(Wexact)
     err_W = 1-abs(Array(contract(conj(Wstep_mps), mps_final))[1])
     @show err_W 
 
+    # apply swaps before the V unitaries
     spacing = q-2*bitlength
     for i in 1:npairs
         for j in i*q+bitlength : -1 : i*q+1
             for t in 1:(i < npairs ? spacing : spacing-1)   #one less swap for the last W gate, since we are putting the |0> contraction on the right instead of the left
                 apply!(SWAP, Wstep_mps, j+t-1)
+                apply!(SWAP, mps_final, j+t-1)
             end
         end
     end
+
+    # apply V_mpo on Wstep_mps to check that conversion to mpo worked - must be equal to the fidelity obtained in the blocking part
     V_mpo_final = itmps.MPO(reduce(vcat, [mpo[1:end] for mpo in V_mpo_list]))
-    it.orthogonalize!(V_mpo_final, 1)
-    it.orthogonalize!(Wstep_mps, 1)
-
     res = it.apply(V_mpo_final, Wstep_mps)
-
     fidelity = abs(Array(contract(conj(mps), res))[1])
     @show fidelity
-            
+
+    # apply V unitaries as fdqc on mps_final to construct the final inversion circuit
     apply!(mps_final, V_lc_list)
     err_total = 1-abs(Array(contract(conj(mps), mps_final))[1])
     @show err_total

@@ -318,7 +318,7 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2, eps_trunc = 0
 end
 
 
-function invertMPSLiu(mps::itmps.MPS; d = 2, eps_trunc = 0.01, eps_inv = 0.01)
+function invertMPSLiu(mps::itmps.MPS, invertMethod; d = 2, eps_trunc = 0.01, eps_inv = 0.01, kargs...)
 
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
@@ -479,7 +479,7 @@ function invertMPSLiu(mps::itmps.MPS; d = 2, eps_trunc = 0.01, eps_inv = 0.01)
 
         reduced_mps = itmps.MPS(reduced_mps)
         
-        results2 = mt.invertGlobalSweep(reduced_mps; start_tau = (range in rangesA ? 1 : 2), eps = eps_inv)
+        results2 = mt.invert(reduced_mps, invertMethod; start_tau = (range in rangesA ? 1 : 2), eps = eps_inv, kargs...)
         push!(lc_list2, results2["lightcone"])
         push!(tau_list2, results2["tau"])
         push!(err_list2, results2["err"])
@@ -503,11 +503,10 @@ end
 
 it.set_warn_order(28)
 
-N = 16
+N = 60
 
-mps = mt.randMPS(N, 2)
-#mps = mt.initialize_fdqc(N, 2)
-@show mps
+#mps = mt.randMPS(N, 2)
+mps = mt.initialize_fdqc(N, 2)
 siteinds = it.siteinds(mps)
 
 
@@ -515,7 +514,7 @@ siteinds = it.siteinds(mps)
 #mpsfinal, lclist, mps_trunc, second_part = results[3:6]
 
 #@time results = mt.invertGlobalSweep(mps)
-results2 = mt.invertMPSMalzGlobal(mps, q=4, eps_malz = 0.4, eps_V = 0.01)
+results2 = mt.invertMPSMalz(mps, mt.invertGlobalSweep; eps_malz = 0.4, eps_V = 0.01, kargsV = (nruns = 10, ))
 
 
 

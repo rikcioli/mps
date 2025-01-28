@@ -1,3 +1,5 @@
+import Distributed
+
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
 function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{Matrix}} = nothing)
@@ -23,13 +25,13 @@ function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau
         u, v = it.commonind(U, S), it.commonind(Vdag, S)
 
         # evaluate fidelity
-        newfid = real(tr(Array(S, (u, v))))
+        newfid = real(tr(Array(S, (u, v))))/normalization
         gate_ji_opt = U * it.replaceind(Vdag, v, u)
         lightcone = newLightcone(siteinds, 1; lightbounds = (false, false))
         lightcone.circuit[1][1] = it.replaceprime(gate_ji_opt, tau => 1)
 
         println("Matrix is 2-local, converged to fidelity $newfid immediately")
-        return lightcone, -newfid, nothing
+        return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", 1)])
     end
 
     # create random brickwork circuit
@@ -190,50 +192,223 @@ function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau
 
     end
 
-    println("Converged to fidelity $newfid with $sweep sweeps")
+    println("Converged to fidelity $newfid with $sweep sweeps\n")
 
     return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", sweep)])
 
 end
 
-"Calls invertSweepLC for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
-function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; overlap = 1, normalization = 1, eps = 1E-6, start_tau = 1, kargs...)
-    obj = typeof(mpo)
-    true_overlap = overlap*normalization
-    println("Attempting invertSweepLC inversion of $obj to overlap value = $true_overlap up to relative error $eps, starting from depth $start_tau")
-    tau = start_tau
-    found = false
 
+"Cost function and gradient for invertGlobalSweep optimization"
+function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization = 1)
+    updateLightcone!(lightcone, U_array)
+    d = lightcone.d
+    N = lightcone.size
+
+    R_blocks::Vector{it.ITensor} = []
+
+    # construct L_1
+    # first item is the delta, i.e. the first site of mpo_low which is composed of only deltas, then the mpo site
+    leftmost_block = mpo[1]  # 2 indices
+
+    # construct R_N
+    rightmost_block = mpo[N]
+
+    # contract everything on the left and save rightmost_block at each intermediate step
+    # must be done only the first time, when j=2 (so contract up to j=3)
+    for k in N:-1:3
+        # extract left gates associated with site k
+        gates_k = lightcone.gates_by_site[k]
+        coords_left = [gate["coords"] for gate in gates_k if gate["orientation"]=="L"]
+        tensors_left = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_left]
+
+        #right_gates_k = [lightcone.circuit[i][div(k,2)+mod(k,2)] for i in (2-mod(k,2)):2:tau]
+        all_blocks = (k==N ? tensors_left : [tensors_left; mpo[k]])
+        for block in all_blocks
+            rightmost_block *= block
+        end
+        push!(R_blocks, rightmost_block)
+    end
+    reverse!(R_blocks)
+
+    # start the sweep
+    grad = [Array{ComplexF64}(undef, 0, 0) for _ in 1:length(lightcone.coords)]
+
+    for j in 2:N
+        # extract all gates on the left of site j
+        gates_j = lightcone.gates_by_site[j]
+        coords_left = [gate["coords"] for gate in gates_j if gate["orientation"]=="L"]
+        tensors_left = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_left]
+
+        # evaluate gradient by removing each gate
+        for l in 1:length(tensors_left)
+            not_l_tensors = [tensors_left[1:l-1]; tensors_left[l+1:end]]
+            contract_left = [mpo[j]; not_l_tensors]
+            
+            env_left = leftmost_block
+            for gate in contract_left
+                env_left *= gate
+            end
+
+            env = (j<N ? env_left*rightmost_block : env_left)
+
+            gate_jl = filter(gate -> gate["orientation"] == "L", gates_j)[l]
+            gate_jl_inds, gate_jl_num = gate_jl["inds"], gate_jl["number"]
+            ddUjl = Array(env, gate_jl_inds)
+            ddUjl = conj(reshape(ddUjl, (d^2, d^2)))
+            grad[gate_jl_num] = ddUjl
+        end
+
+        # update leftmost_block for next j and add it to L_blocks list
+        all_blocks = [tensors_left; mpo[j]]
+        for block in all_blocks
+            leftmost_block *= block
+        end
+
+        # update rightmost_block for next j
+        if j < N-1
+            rightmost_block = R_blocks[j]       #R_blocks starts from site 3
+        end
+    end
+
+    # compute environment now that we contracted all blocks, so that we are effectively computing the overlap
+    overlap = Array(leftmost_block)[1]
+
+    # we use the real part of the overlap as a cost function
+    abs_ov = real(overlap)/normalization
+
+    # correct gradient to account for the cost function being the absolute value of the overlap, not the abs squared
+    #grad *= overlap/abs_ov
+    grad = grad/normalization
+    riem_grad = project(U_array, grad)
+
+    # put a - sign so that it minimizes
+    cost = -abs_ov
+    riem_grad = -riem_grad
+
+    return cost, riem_grad
+
+end
+
+"Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it"
+function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array::Union{Nothing, Vector{Matrix}} = nothing)
+    mpo = deepcopy(mpo[1:end])
+    N = length(mpo)
+
+    # noprime the input inds
+    # change the output inds to a prime of the input inds to match the inds of the first layer of gates
+    siteinds = it.noprime(input_inds)
+    d = siteinds[1].space
+    tempinds = it.siteinds(d, N)
+    for i in 1:N
+        it.replaceind!(mpo[i], input_inds[i], tempinds[i])
+        it.replaceind!(mpo[i], output_inds[i], it.prime(siteinds[i], tau))
+        it.replaceind!(mpo[i], tempinds[i], siteinds[i])
+    end
+
+    if N == 2   #solution is immediate via SVD
+        env = conj(mpo[1]*mpo[2])
+
+        inds = siteinds
+        U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
+        u, v = it.commonind(U, S), it.commonind(Vdag, S)
+
+        # evaluate fidelity
+        newfid = real(tr(Array(S, (u, v))))/normalization
+        gate_ji_opt = U * it.replaceind(Vdag, v, u)
+        lightcone = newLightcone(siteinds, 1; lightbounds = (false, false))
+        lightcone.circuit[1][1] = it.replaceprime(gate_ji_opt, tau => 1)
+
+        println("Matrix is 2-local, converged to fidelity $newfid immediately")
+        return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", 1)])
+    end
+
+    # create random brickwork circuit
+    # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
+    lightcone = newLightcone(siteinds, tau; U_array = init_array, lightbounds = lightbounds)
+
+
+    # setup optimization stuff
+    arrU0 = Array(lightcone)
+    fg = arrU -> _fgGlobalSweep(arrU, lightcone, mpo; normalization = normalization)
+
+    # Quasi-Newton method
+    m = 5
+    algorithm = LBFGS(m;maxiter = maxiter, gradtol = gradtol, verbosity = 1)
+
+    # optimize and store results
+    # note that arrUmin is already stored in current lightcone, ready to be applied to mps
+    arrUmin, neg_overlap, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport =true , inner = inner);
+    updateLightcone!(lightcone, arrUmin)
+
+    return Dict([("lightcone", lightcone), ("overlap", -neg_overlap), ("gradmin", gradmin), ("niter", numfg), ("history", normgradhistory)])
+
+end
+
+
+"Calls invertSweepLC for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
+function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}, invertMethod; tau = 0, nruns = 1, overlap = 1, eps = 1E-6, start_tau = 1, return_all = false, kargs...)
+    obj = typeof(mpo)
+    print("Attempting inversion of $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\n")
+
+    fixed_tau_mode = true
+    if iszero(tau)
+        print("Overlap (normalized): $overlap\nRelative error: $eps\nStarting depth: $start_tau\n")
+        tau = start_tau
+        fixed_tau_mode = false
+    else
+        print("Inversion circuit depth: $tau\n")
+
+    end
+
+    found = false
     while !found
         println("Attempting depth $tau...")
-        results = invertSweepLC(mpo, tau, input_inds, output_inds; normalization = normalization, kargs...)
-        err = abs(overlap - results["overlap"])
-        if err < eps
-            found = true
-            tau = results["lightcone"].depth
-            println("Convergence within desired error achieved with depth $tau\n")
-            results["tau"] = tau
-            results["err"] = err
-            return results
-        end
-        
-        if tau > 24
-            println("Attempt stopped at tau = $tau, ITensor cannot go above")
-            results["tau"] = tau
-            results["err"] = err
-            return results
+        # choose multiprocessing method
+        results_array::Vector{Dict{String, Any}} = [Dict([("ready", 0)]) for _ in 1:nruns]
+        Threads.@threads for i in 1:nruns
+            res = invertMethod(mpo, tau, input_inds, output_inds; kargs...)
+            results_array[i] = res
         end
 
+        # results_array = [invertMethod(mpo, tau, input_inds, output_inds; kargs...) for _ in 1:nruns]
+        
+        ## f = obj -> invertMethod(obj, tau, input_inds, output_inds; kargs...)
+        ## results_array = Distributed.pmap(f, (mpo for _ in 1:nruns))
+        
+        errs = [abs(overlap - results["overlap"]) for results in results_array]
+        err_min_pos = argmin(errs)
+        err_min = errs[err_min_pos]
+        if err_min < eps || tau > 24 || fixed_tau_mode
+            found = true
+            tau = results_array[err_min_pos]["lightcone"].depth
+            for i in 1:nruns
+                results_array[i]["err"] = errs[i]
+                results_array[i]["tau"] = tau
+            end
+            resdict = results_array[err_min_pos]
+            if return_all
+                resdict = Dict([("Best", results_array[err_min_pos]), ("All", results_array)])
+            end
+
+            if err_min < eps
+                println("Found inversion circuit up to required error with depth $tau\n")
+            elseif tau > 24
+                println("Inversion failed, algorithm stopped at tau = 25")
+            end
+            return resdict
+        end
+        
         tau += 1
     end
 end
 
 
-"Wrapper for ITensorsMPS.MPS input. Before calling invertSweepLC, it conjugates mps (mps to invert must be above)
-and prepares a layer of zero bras to construct the mpo |0><psi|. Then calls invertSweepLC with overlap 1 and error eps"
-function invertSweepLC(mps::itmps.MPS; tau = 0, kargs...)
+"Wrapper for ITensorsMPS.MPS input. Before calling invert, it conjugates mps (mps to invert must be above)
+and prepares a layer of zero bras to construct the mpo |0><psi|. Then calls invertMethod with overlap 1 and error eps"
+function invert(mps::itmps.MPS, invertMethod; kargs...)
     N = length(mps)
-    mps = conj(deepcopy(mps))
+    mps = conj(mps)
     siteinds = it.siteinds(mps)
     outinds = siteinds'
 
@@ -243,20 +418,13 @@ function invertSweepLC(mps::itmps.MPS; tau = 0, kargs...)
         mps[i] *= it.ITensor(vec, ind')
     end
 
-    if iszero(tau)
-        results = invertSweepLC(mps, siteinds, outinds; overlap=1, kargs...)
-        return results
-    else
-        results = invertSweepLC(mps, tau, siteinds, outinds; kargs...)
-        results["err"] = abs(1-results["overlap"])
-        return results
-    end
-
+    results = invert(mps, siteinds, outinds, invertMethod; overlap=1, normalization=1, kargs...)
+    return results
 end
 
 
-"Wrapper for ITensorsMPS.MPO input. Calls invertSweepLC by first taking the dagger and extracting upper and lower indices"
-function invertSweepLC(mpo::itmps.MPO; tau = 0, kargs...)
+"Wrapper for ITensorsMPS.MPO input. Calls invert by first taking the dagger and extracting upper and lower indices"
+function invert(mpo::itmps.MPO, invertMethod; kargs...)
     N = length(mpo)
     mpo = conj(mpo)
     allinds = reduce(vcat, it.siteinds(mpo))
@@ -273,15 +441,28 @@ function invertSweepLC(mpo::itmps.MPO; tau = 0, kargs...)
     siteinds = it.inds(allinds, plev = plev_in)
     outinds = it.uniqueinds(allinds, siteinds)
 
-    if iszero(tau)
-        results = invertSweepLC(mpo, outinds, siteinds; overlap = 1, normalization = 2^N, kargs...)
-        return results
-    else
-        results = invertSweepLC(mpo, tau, outinds, siteinds; normalization = 2^N, kargs...)
-        results["err"] = abs(1-results["overlap"])
-        return results
-    end
+    results = invert(mpo, outinds, siteinds, invertMethod; overlap = 1, normalization = 2^N, kargs...) #DO NOT CHANGE NORMALIZATION, WE NEED FIDELITY TO BE NORM. TO 1 OR THE RATIO WON'T WORK
+    return results
+end
 
+"Combines invertSweepLC with invertGlobalSweep for ITensorsMPS.MPS or ITensorsMPS.MPO objects"
+function invertCombined(object::Union{itmps.MPS, itmps.MPO}; kargs...)
+    results_sweep = invert(object, invertSweepLC; kargs...)
+    lc = results_sweep["lightcone"]
+    arrU0 = Array(lc)
+
+    results_global = invert(object, invertGlobalSweep; init_array = arrU0, kargs...)
+    return results_global
+end
+
+"Combines invertSweepLC with invertGlobalSweep for Vector{ITensor} objects"
+function invertCombined(object::Vector{it.ITensor}, siteinds, outinds; kargs...)
+    results_sweep = invert(object, input_inds, output_inds, invertSweepLC; kargs...)
+    lc = results_sweep["lightcone"]
+    arrU0 = Array(lc)
+
+    results_global = invert(object, input_inds, output_inds, invertGlobalSweep; init_array = arrU0, kargs...)
+    return results_global
 end
 
 
@@ -808,258 +989,4 @@ function invertGlobal(mpo::itmps.MPO; tau = 0, kargs...)
         return lc, abs(2^N+neg_overlap), rest...
     end
 
-end
-
-
-"Cost function and gradient for invertGlobalSweep optimization"
-function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization = 1)
-    updateLightcone!(lightcone, U_array)
-    d = lightcone.d
-    N = lightcone.size
-
-    R_blocks::Vector{it.ITensor} = []
-
-    # construct L_1
-    # first item is the delta, i.e. the first site of mpo_low which is composed of only deltas, then the mpo site
-    leftmost_block = mpo[1]  # 2 indices
-
-    # construct R_N
-    rightmost_block = mpo[N]
-
-    # contract everything on the left and save rightmost_block at each intermediate step
-    # must be done only the first time, when j=2 (so contract up to j=3)
-    for k in N:-1:3
-        # extract left gates associated with site k
-        gates_k = lightcone.gates_by_site[k]
-        coords_left = [gate["coords"] for gate in gates_k if gate["orientation"]=="L"]
-        tensors_left = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_left]
-
-        #right_gates_k = [lightcone.circuit[i][div(k,2)+mod(k,2)] for i in (2-mod(k,2)):2:tau]
-        all_blocks = (k==N ? tensors_left : [tensors_left; mpo[k]])
-        for block in all_blocks
-            rightmost_block *= block
-        end
-        push!(R_blocks, rightmost_block)
-    end
-    reverse!(R_blocks)
-
-    # start the sweep
-    grad = [Array{ComplexF64}(undef, 0, 0) for _ in 1:length(lightcone.coords)]
-
-    for j in 2:N
-        # extract all gates on the left of site j
-        gates_j = lightcone.gates_by_site[j]
-        coords_left = [gate["coords"] for gate in gates_j if gate["orientation"]=="L"]
-        tensors_left = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_left]
-
-        # evaluate gradient by removing each gate
-        for l in 1:length(tensors_left)
-            not_l_tensors = [tensors_left[1:l-1]; tensors_left[l+1:end]]
-            contract_left = [mpo[j]; not_l_tensors]
-            
-            env_left = leftmost_block
-            for gate in contract_left
-                env_left *= gate
-            end
-
-            env = (j<N ? env_left*rightmost_block : env_left)
-
-            gate_jl = filter(gate -> gate["orientation"] == "L", gates_j)[l]
-            gate_jl_inds, gate_jl_num = gate_jl["inds"], gate_jl["number"]
-            ddUjl = Array(env, gate_jl_inds)
-            ddUjl = conj(reshape(ddUjl, (d^2, d^2)))
-            grad[gate_jl_num] = ddUjl
-        end
-
-        # update leftmost_block for next j and add it to L_blocks list
-        all_blocks = [tensors_left; mpo[j]]
-        for block in all_blocks
-            leftmost_block *= block
-        end
-
-        # update rightmost_block for next j
-        if j < N-1
-            rightmost_block = R_blocks[j]       #R_blocks starts from site 3
-        end
-    end
-
-    # compute environment now that we contracted all blocks, so that we are effectively computing the overlap
-    overlap = Array(leftmost_block)[1]
-
-    # we use the real part of the overlap as a cost function
-    abs_ov = real(overlap)/normalization
-
-    # correct gradient to account for the cost function being the absolute value of the overlap, not the abs squared
-    #grad *= overlap/abs_ov
-    grad = grad/normalization
-    riem_grad = project(U_array, grad)
-
-    # put a - sign so that it minimizes
-    cost = -abs_ov
-    riem_grad = -riem_grad
-
-    return cost, riem_grad
-
-end
-
-"Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it"
-function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array = nothing)
-    mpo = deepcopy(mpo[1:end])
-    N = length(mpo)
-
-    # noprime the input inds
-    # change the output inds to a prime of the input inds to match the inds of the first layer of gates
-    siteinds = it.noprime(input_inds)
-    d = siteinds[1].space
-    tempinds = it.siteinds(d, N)
-    for i in 1:N
-        it.replaceind!(mpo[i], input_inds[i], tempinds[i])
-        it.replaceind!(mpo[i], output_inds[i], it.prime(siteinds[i], tau))
-        it.replaceind!(mpo[i], tempinds[i], siteinds[i])
-    end
-
-    if N == 2   #solution is immediate via SVD
-        env = conj(mpo[1]*mpo[2])
-
-        inds = siteinds
-        U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
-        u, v = it.commonind(U, S), it.commonind(Vdag, S)
-
-        # evaluate fidelity
-        newfid = real(tr(Array(S, (u, v))))/normalization
-        gate_ji_opt = U * it.replaceind(Vdag, v, u)
-        lightcone = newLightcone(siteinds, 1; lightbounds = (false, false))
-        lightcone.circuit[1][1] = it.replaceprime(gate_ji_opt, tau => 1)
-
-        println("Matrix is 2-local, converged to fidelity $newfid immediately")
-        return lightcone, -newfid, nothing
-    end
-
-    # create random brickwork circuit
-    # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    lightcone = newLightcone(siteinds, tau; U_array = init_array, lightbounds = lightbounds)
-
-
-    # setup optimization stuff
-    arrU0 = Array(lightcone)
-    fg = arrU -> _fgGlobalSweep(arrU, lightcone, mpo; normalization = normalization)
-
-    # Quasi-Newton method
-    m = 5
-    algorithm = LBFGS(m;maxiter = maxiter, gradtol = gradtol, verbosity = 1)
-
-    # optimize and store results
-    # note that arrUmin is already stored in current lightcone, ready to be applied to mps
-    arrUmin, neg_overlap, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport =true , inner = inner);
-    updateLightcone!(lightcone, arrUmin)
-
-    return Dict([("lightcone", lightcone), ("neg_overlap", neg_overlap), ("gradmin", gradmin), ("niter", numfg), ("history", normgradhistory)])
-
-end
-
-
-
-"Calls invertBW for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
-function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; overlap = 1, normalization = 1, eps = 1E-6, start_tau = 2, kargs...)
-    obj = typeof(mpo)
-    true_overlap = overlap*normalization
-    println("Attempting inversion of $obj to overlap value = $true_overlap up to relative error $eps, starting from depth $start_tau")
-    tau = start_tau
-    found = false
-
-    while !found
-        println("Attempting depth $tau...")
-        results = invertGlobalSweep(mpo, tau, input_inds, output_inds; normalization = normalization, kargs...)
-        err = abs(overlap + results["neg_overlap"])
-        if err < eps
-            found = true
-            tau = results["lightcone"].depth
-            println("Convergence within desired error achieved with depth $tau\n")
-            results["tau"] = tau
-            results["err"] = err
-            return results
-        end
-        
-        if tau > 24
-            println("Attempt stopped at tau = $tau, ITensor cannot go above")
-            results["tau"] = tau
-            results["err"] = err
-            return results
-        end
-
-        tau += 1
-    end
-end
-
-
-"Wrapper for ITensorsMPS.MPS input. Before calling invertGlobal, it conjugates mps (mps to invert must be above)
-and prepares a layer of zero bras to construct the mpo |0><psi|. Then calls invertGlobal with overlap 1 and error eps"
-function invertGlobalSweep(mps::itmps.MPS; tau = 0, kargs...)
-    N = length(mps)
-    mps = conj(deepcopy(mps))
-    siteinds = it.siteinds(mps)
-    outinds = siteinds'
-
-    for i in 1:N
-        ind = siteinds[i]
-        vec = [1; [0 for _ in 1:ind.space-1]]
-        mps[i] *= it.ITensor(vec, ind')
-    end
-
-    if iszero(tau)
-        results = invertGlobalSweep(mps, siteinds, outinds; overlap=1, kargs...)
-        return results
-    else
-        results = invertGlobalSweep(mps, tau, siteinds, outinds; kargs...)
-        results["err"] = abs(1+results["neg_overlap"])
-        return results
-    end
-
-end
-
-
-"Wrapper for ITensorsMPS.MPO input. Calls invertGlobal by first taking the dagger and extracting upper and lower indices"
-function invertGlobalSweep(mpo::itmps.MPO; tau = 0, kargs...)
-    N = length(mpo)
-    mpo = conj(mpo)
-    allinds = reduce(vcat, it.siteinds(mpo))
-    # determine primelevel of inputinds, which will be the lowest found in allinds
-    first2inds = allinds[1:2]   
-    plev_in = 0
-    while true
-        ind = it.inds(first2inds, plev = plev_in)
-        if length(ind) > 0
-            break
-        end
-        plev_in += 1
-    end
-    siteinds = it.inds(allinds, plev = plev_in)
-    outinds = it.uniqueinds(allinds, siteinds)
-
-    if iszero(tau)
-        results = invertGlobalSweep(mpo, outinds, siteinds; overlap = 1, normalization = 2^N, kargs...)
-        return results
-    else
-        results = invertGlobalSweep(mpo, tau, outinds, siteinds; normalization = 2^N, kargs...)
-        results["err"] = abs(1+results["neg_overlap"])
-        return results
-    end
-
-end
-
-
-function invertCombined(obj::Union{itmps.MPS, itmps.MPO}; kargs...)
-    results_sweep = invertSweep(obj; kargs...)
-    circuit = results_sweep[1]
-    arrU0 = []
-    for i in 1:length(circuit)
-        layer = circuit[i]
-        len = length(layer)
-        for j in (isodd(i) ? (1:len) : (len:-1:1))
-            push!(arrU0, circuit[i][j])
-        end
-    end
-
-    results_global = invertGlobalSweep(obj; init_array = arrU0, kargs...)
-    return results_global
 end

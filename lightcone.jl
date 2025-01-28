@@ -8,11 +8,11 @@ struct Lightcone
     depth::Int64                            # circuit depth
     lightbounds::Tuple{Bool, Bool}          # (leftslope == 'light', rightslope == 'light')
     sitesAB::Vector{it.Index}               # siteinds of AB region
-    coords                                  # coordinates of all unitaries
-    id_coords                               # coordinates of all identities
-    layers                                  # coordinates of all gates ordered by layer
+    coords::Vector{Tuple{Tuple{Int64,Int64}, NTuple{4, it.Index{Int64}}}}    # coordinates of all unitaries
+    id_coords::Vector{Tuple{Tuple{Int64, Int64}}}                          # coordinates of all identities - WILL BE DEPRECATED SOONER OR LATER
+    layers::Vector{Vector{Tuple{Tuple{Int64,Int64}, NTuple{4, it.Index{Int64}}}}}        # coordinates of all gates ordered by layer
     range::Vector{Tuple{Int64, Int64}}      # leftmost and rightmost sites on which each layer acts non-trivially
-    gates_by_site                           # coordinates of all the gates to the left of each qubit
+    gates_by_site::Vector{Vector{Dict{String,Any}}}                           # coordinates of all the gates to the left of each qubit
 end
 
 
@@ -55,11 +55,11 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
 
     # finally convert the U_array 
     circuit::Vector{Vector{it.ITensor}} = []
-    coords = []
-    id_coords = []
-    layers_coords = []
-    range = []
-    gates_by_site = [[] for _ in 1:sizeAB]
+    coords::Vector{Tuple{Tuple{Int64,Int64}, NTuple{4, it.Index{Int64}}}} = []
+    id_coords::Vector{Tuple{Tuple{Int64, Int64}}} = []
+    layers_coords::Vector{Vector{Tuple{Tuple{Int64,Int64}, NTuple{4, it.Index{Int64}}}}} = []
+    range::Vector{Tuple{Int64, Int64}} = []
+    gates_by_site::Vector{Vector{Dict{String,Any}}} = [[] for _ in 1:sizeAB]
 
     k = 1
     for i in 1:depth
