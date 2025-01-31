@@ -10,10 +10,10 @@ using DataFrames, StatsPlots
 it.set_warn_order(28)
 
 # Prepare initial state
-eps_array = [0.2*2.0^(-i) for i in 0:4]
+eps_array = [0.5*2.0^(-i) for i in 0:4]
 #eps_array = [0.01]
 
-N = 16
+N = 60
 
 function execute(command, N, eps_array; D = 2, tau = 3)
 # Choose object to invert
@@ -23,89 +23,64 @@ function execute(command, N, eps_array; D = 2, tau = 3)
         test = mt.initialize_fdqc(N, tau)
     end
 
-    tau_sweep = []
-    tau_global = []
-    err_sweep = []
-    err_global = []
-    niter_sweep = []
-    niter_global = []
+    tau_malz = []
+    err_malz = []
+    tau_liu = []
+    err_liu = []
+
+    #for eps in eps_array
+    #    println("\nAssuming error threshold eps = $eps\n")
+#
+    #    results = mt.invertMPSMalz(test, mt.invertGlobalSweep; eps = eps, kargsV = (nruns = 20,))
+    #    err_total = results["err_total"]
+    #    tau_total = maximum(results["V_tau"]) + maximum(results["W_tau"])
+    #    push!(tau_malz, tau_total)
+    #    push!(err_malz, err_total)
+    #end
 
 
     for eps in eps_array
         println("\nAssuming error threshold eps = $eps\n")
 
-        results = mt.invertMPSMalz(test, mt.invertGlobalSweep; eps_malz = 1E-2, eps_bell = 1E-2, eps_V = 1E-2, nruns = 10, maxiter = 10000, eps = eps, start_tau = (eps == eps_array[1] ? 3 : tau_sweep[end]+1))
-        res_array = results["All"]
-        #err1, tau1, niter1 = bestres["err"], bestres["tau"], bestres["niter"]
-        err_sweep = [result["err"] for result in res_array]
-        niter_sweep = [result["niter"] for result in res_array]
-        #push!(tau_sweep, tau1)
-        #push!(err_sweep, err1)
-        #push!(niter_sweep, niter1)
-    end
-
-
-
-    for eps in eps_array
-        println("\nAssuming error threshold eps = $eps\n")
-
-        # check that latest err is greater than the required one, otherwise we already know what tau is and we can move to next error
-        if length(err_global) > 0
-            if err_global[end] < eps
-                push!(tau_global, tau_global[end])
-                push!(err_global, err_global[end])
-                push!(niter_global, niter_global[end])
-                continue
+        factor = 1
+        start_tau = 1
+        local results, err_total
+        for _ in 1:10
+            results = mt.invertMPSLiu(test, mt.invertGlobalSweep; start_tau = start_tau, eps_trunc = eps/factor, eps_inv = eps/factor, kargs_inv = (nruns = 10,))
+            err_total = results["err_total"]
+            if err_total < eps
+                break
+            else
+                factor*=2
             end
         end
-
-        results2 = mt.invert(test, mt.invertGlobalSweep; nruns = 100, return_all=true, eps = eps, gradtol = 1e-8, maxiter = 10000, start_tau = (eps == eps_array[1] ? 3 : tau_global[end]+1))
-        #bestres2 = results2["Best"]
-        res2_array = results2["All"]
-        #err2, tau2, niter2 = bestres2["err"], bestres2["tau"], bestres2["niter"]
-        #push!(tau_global, tau2)
-        #push!(err_global, err2)
-        #push!(niter_global, niter2)
-        err_global = [result["err"] for result in res2_array]
-        niter_global = [result["niter"] for result in res2_array]
+        tau_total = maximum(results["tau2"]) + results["tau1"]
+        push!(tau_liu, tau_total)
+        push!(err_liu, err_total)
+        start_tau = results["tau1"]
     end
 
-    
+    data = DataFrame(Error = eps_array, tau_Malz = tau_malz, err_Malz = err_malz, tau_Liu = tau_liu, err_Liu = err_liu)
+    CSV.write("D:\\Julia\\MyProject\\Data\\MalzVSLiu\\"*command*"_10R.csv", data)
 
-    #data = [eps_array, tau_sweep, tau_global]
-    #writedlm( "D:\\Julia\\MyProject\\Data\\SweepVsGlobal\\randmps.csv", data, ',')
-    ###data_sweep = DataFrame(Error = eps_array, Depth1 = tau_sweep, Iterations1 = niter_sweep)
-    ###data_global = DataFrame(Depth2 = tau_global, Iterations2 = niter_global)
-    ###data = hcat(data_sweep, data_global)
+    Plots.plot(title = L"N="*string(N), ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
+    #Plots.plot!(eps_array, tau_malz, lc=:green, primary=false)
+    #Plots.plot!(eps_array, tau_malz, seriestype=:scatter, mc=:green, legend=true, label="Malz")
 
-    data = DataFrame(Err_sweep = err_sweep, Niter_sweep = niter_sweep, Err_global = err_global, Niter_global = niter_global)
-    CSV.write("D:\\Julia\\MyProject\\Data\\SweepVsGlobal\\"*command*"_3D_1000R.csv", data)
+    Plots.plot!(eps_array, tau_liu, lc=:red, primary=false)
+    Plots.plot!(eps_array, tau_liu, seriestype=:scatter, mc=:red, label="Liu", legend=:bottomright)
+    Plots.plot!(xscale=:log)
 
-    ###Plots.plot(title = L"N=16, \ D=2", ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
-    ###Plots.plot!(eps_array, tau_sweep, lc=:green, primary=false)
-    ###Plots.plot!(eps_array, tau_sweep, seriestype=:scatter, mc=:green, legend=true, label="invertSweep")
-###
-    ###Plots.plot!(eps_array, tau_global, lc=:red, primary=false)
-    ###Plots.plot!(eps_array, tau_global, seriestype=:scatter, mc=:red, label="invertGlobalSweep", legend=:bottomright)
-    ###Plots.plot!(xscale=:log)
-    ####Plots.plot!(title = L"N="*string(N), ylabel = L"\epsilon / M", xlabel = L"\tau")
-    ###Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\SweepVSGlobal"*command*".pdf")
-###
-    ###Plots.plot(title = L"N=16, \ D=2", ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
-    ###Plots.plot!(eps_array, tau_sweep, lc=:green, primary=false)
-    ###Plots.plot!(eps_array, tau_sweep, seriestype=:scatter, mc=:green, legend=true, label="invertSweep")
-###
-    ###Plots.plot!(eps_array, tau_global, lc=:red, primary=false)
-    ###Plots.plot!(eps_array, tau_global, seriestype=:scatter, mc=:red, label="invertGlobalSweep", legend=:bottomright)
-    ###Plots.plot!(xscale=:log)
+    Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\MalzVSLiu"*command*".pdf")
 
     return data
 end
 
-#data = execute("FDMPO", N, eps_array)
+data = execute("randMPS", N, eps_array)
 
 
-
+#test = mt.randMPS(N, 2)
+#results = [mt.invertMPSMalz(test, mt.invertGlobalSweep; q=i, kargsV = (nruns = 10, )) for i in 2:5]
 
 
 #unitaries = [reshape(Array(circ[i,j], it.inds(circ[i,j])), (4, 4)) for i in 1:tau, j in 1:div(N,2)]

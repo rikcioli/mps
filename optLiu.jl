@@ -318,7 +318,7 @@ function invertMPSLiu(mps::itmps.MPS, tau, sizeAB, spacing; d = 2, eps_trunc = 0
 end
 
 
-function invertMPSLiu(mps::itmps.MPS, invertMethod; d = 2, eps_trunc = 0.01, eps_inv = 0.01, kargs...)
+function invertMPSLiu(mps::itmps.MPS, invertMethod; d = 2, eps_trunc = 0.01, eps_inv = 0.01, kargs_inv = NamedTuple())
 
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
@@ -326,40 +326,11 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; d = 2, eps_trunc = 0.01, eps
     #eps_liu = eps_trunc/N
 
     local mps_trunc, boundaries, rangesA, V_list, err_list, lc_list, err_trunc
-    tau = 1
+    tau = 3
     while true
         mps_copy = deepcopy(mps)
-        # first determine depth of input state, i.e. find lightcone that inverts to 0 up to error eps_liu
-        # we do this by inverting an increasingly wider lightcone on sites 1:2j for j=1,2,3,...
-        ###found = false
-        ###right_endsite = 2
-        ###tau = 1
 
-        ###println("Finding depth of initial state up to error $eps_liu")
-        ###while !found
-        ###    reduced_mps = mps[1:right_endsite]
-        ###    local_sites = siteinds[1:right_endsite]
-        ###    lightcone = mt.newLightcone(local_sites, tau; lightbounds = (true, true))
-        ###    # setup optimization stuff
-        ###    arrU0 = Array(lightcone)
-        ###    fg = arrU -> _fgLiu(arrU, lightcone, reduced_mps)
-        ###    # Quasi-Newton method
-        ###    m = 5
-        ###    algorithm = LBFGS(m;maxiter = 10000, gradtol = 1E-8, verbosity = 1)
-        ###    # optimize and store results
-        ###    # note that arrUmin is already stored in current lightcone, ready to be applied to mps
-        ###    arrUmin, negfid, _ = optimize(fg, arrU0, algorithm; retract = mt.retract, transport! = mt.transport!, isometrictransport =true , inner = mt.inner);
-
-        ###    err = 1+negfid
-        ###    if err < eps_inv
-        ###        found = true
-        ###    else
-        ###        tau += 1
-        ###        right_endsite += 2 
-        ###    end
-        ###end
-
-        # at this point we have tau, we already know that both the sizeAB and the spacing have to be chosen
+        # for a given tau, we already know that both the sizeAB and the spacing have to be chosen
         # so that the final state is a tensor product of pure states
         sizeAB = 6*(tau-1)
         spacing = 2*(tau-1)
@@ -407,7 +378,7 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; d = 2, eps_trunc = 0.01, eps
             fg = arrU -> _fgLiu(arrU, lightcone, reduced_mps)
             # Quasi-Newton method
             m = 5
-            algorithm = LBFGS(m;maxiter = 10000, gradtol = 1E-8, verbosity = 1)
+            algorithm = LBFGS(m;maxiter = 20000, gradtol = 1E-8, verbosity = 1)
             # optimize and store results
             # note that arrUmin is already stored in current lightcone, ready to be applied to mps
             arrUmin, err, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = mt.retract, transport! = mt.transport!, isometrictransport =true , inner = mt.inner);
@@ -479,7 +450,7 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; d = 2, eps_trunc = 0.01, eps
 
         reduced_mps = itmps.MPS(reduced_mps)
         
-        results2 = mt.invert(reduced_mps, invertMethod; start_tau = (range in rangesA ? 1 : 2), eps = eps_inv, kargs...)
+        results2 = mt.invert(reduced_mps, invertMethod; start_tau = (range in rangesA ? 1 : 2), eps = eps_inv, kargs_inv...)
         push!(lc_list2, results2["lightcone"])
         push!(tau_list2, results2["tau"])
         push!(err_list2, results2["err"])
@@ -505,16 +476,16 @@ it.set_warn_order(28)
 
 N = 60
 
-#mps = mt.randMPS(N, 2)
-mps = mt.initialize_fdqc(N, 2)
+mps = mt.randMPS(N, 2)
+#mps = mt.initialize_fdqc(N, 2)
 siteinds = it.siteinds(mps)
 
 
-#results = invertMPSLiu(mps)
+results = invertMPSLiu(mps, mt.invertGlobalSweep)
 #mpsfinal, lclist, mps_trunc, second_part = results[3:6]
 
 #@time results = mt.invertGlobalSweep(mps)
-results2 = mt.invertMPSMalz(mps, mt.invertGlobalSweep; eps_malz = 0.4, eps_V = 0.01, kargsV = (nruns = 10, ))
+#results2 = mt.invertMPSMalz(mps, mt.invertGlobalSweep; eps_malz = 0.4, eps_V = 0.01, kargsV = (nruns = 10, ))
 
 
 

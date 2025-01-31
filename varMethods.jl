@@ -71,7 +71,7 @@ function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau
     # start the loop
     rev = false
     first_sweep = true
-    fid, newfid = 1, 0
+    fid, newfid = 0, 0
     j = 2  
     sweep = 0
 

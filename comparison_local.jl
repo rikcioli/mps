@@ -13,8 +13,8 @@ it.set_warn_order(28)
 @show Threads.nthreads()
 
 # Prepare initial state
-eps_array = [0.2*2.0^(-i) for i in 0:4]
-#eps_array = [0.01]
+#eps_array = [0.2*2.0^(-i) for i in 0:4]
+eps_array = [0.01]
 
 N = 30
 
@@ -37,20 +37,23 @@ function execute(command, N, eps_array; D = 2, tau = 3)
     niter_global = []
 
 
-    for eps in eps_array
-        println("\nAssuming error threshold eps = $eps\n")
+    for tau in 1:7
+        #println("\nAssuming error threshold eps = $eps\n")
+        println("Inverting tau = $tau\n")
 
         # check that latest err is greater than the required one, otherwise we already know what tau is and we can move to next error
-        if length(err_sweep) > 0
-            if err_sweep[end] < eps
-                push!(tau_sweep, tau_sweep[end])
-                push!(err_sweep, err_sweep[end])
-                push!(niter_sweep, niter_sweep[end])
-                continue
-            end
-        end
+        #if length(err_sweep) > 0
+        #    if err_sweep[end] < eps
+        #        push!(tau_sweep, tau_sweep[end])
+        #        push!(err_sweep, err_sweep[end])
+        #        push!(niter_sweep, niter_sweep[end])
+        #        continue
+        #    end
+        #end
 
-        results = mt.invert(test, mt.invertSweepLC; nruns = 1, maxiter = 100000, eps = eps, start_tau = (eps == eps_array[1] ? 1 : tau_sweep[end]+1))
+        #results = mt.invert(test, mt.invertSweepLC; return_all=true, nruns = 10, maxiter = 20000, eps = eps, tau = (eps == eps_array[1] ? 3 : tau_sweep[end]+1))
+        results = mt.invert(test, mt.invertSweepLC; nruns = 10, maxiter = 1000000, tau = tau)
+        #res_array = results["All"]
         err1, tau1, niter1 = results["err"], results["tau"], results["niter"]
         #err_sweep = [result["err"] for result in res_array]
         #niter_sweep = [result["niter"] for result in res_array]
@@ -61,20 +64,20 @@ function execute(command, N, eps_array; D = 2, tau = 3)
 
 
 
-        println("\nAssuming error threshold eps = $eps\n")
+        #println("\nAssuming error threshold eps = $eps\n")
 
         # check that latest err is greater than the required one, otherwise we already know what tau is and we can move to next error
-        if length(err_global) > 0
-            if err_global[end] < eps
-                push!(tau_global, tau_global[end])
-                push!(err_global, err_global[end])
-                push!(niter_global, niter_global[end])
-                continue
-            end
-        end
+        #if length(err_global) > 0
+        #    if err_global[end] < eps
+        #        push!(tau_global, tau_global[end])
+        #        push!(err_global, err_global[end])
+        #        push!(niter_global, niter_global[end])
+        #        continue
+        #    end
+        #end
 
-        #results2 = mt.invert(test, mt.invertGlobalSweep; nruns = 1, eps = eps, gradtol = 1e-8, maxiter = 100000, start_tau = (eps == eps_array[1] ? 1 : tau_global[end]+1))
-        results2 = mt.invertSweep(test; n_runs=1, maxiter = 100000, eps=eps, start_tau = (eps == eps_array[1] ? 1 : tau_global[end]+1))
+        #results2 = mt.invert(test, mt.invertGlobalSweep; return_all=true, nruns = 100, eps = eps, gradtol = 1e-8, maxiter = 20000, start_tau = (eps == eps_array[1] ? 3 : tau_global[end]+1))
+        results2 = mt.invert(test, mt.invertGlobalSweep; nruns = 10, gradtol = 1e-6, maxiter = 1000000, tau = tau)
         #res2_array = results2["All"]
         err2, tau2, niter2 = results2["err"], results2["tau"], results2["niter"]
         push!(tau_global, tau2)
@@ -88,50 +91,69 @@ function execute(command, N, eps_array; D = 2, tau = 3)
 
     #data = [eps_array, tau_sweep, tau_global]
     #writedlm( "D:\\Julia\\MyProject\\Data\\SweepVsGlobal\\randmps.csv", data, ',')
-    data_sweep = DataFrame(Error = eps_array, Depth1 = tau_sweep, Iterations1 = niter_sweep)
-    data_global = DataFrame(Depth2 = tau_global, Iterations2 = niter_global)
-    data = hcat(data_sweep, data_global)
+    ###data_sweep = DataFrame(Error = eps_array, Depth1 = tau_sweep, Iterations1 = niter_sweep)
+    ###data_global = DataFrame(Depth2 = tau_global, Iterations2 = niter_global)
+    ###data = hcat(data_sweep, data_global)
 
-    data = DataFrame(Err_sweep = err_sweep, Niter_sweep = niter_sweep, Err_global = err_global, Niter_global = niter_global)
-    #CSV.write("D:\\Julia\\MyProject\\Data\\SweepVsGlobal\\"*command*"_30Q_10R.csv", data)
+    data = DataFrame(Tau = tau_sweep, Err_sweep = err_sweep, Niter_sweep = niter_sweep, Err_global = err_global, Niter_global = niter_global)
+    CSV.write("D:\\Julia\\MyProject\\Data\\SweepVsGlobal\\"*command*"_30Q_2D_10R_7DM.csv", data)
 
-    Plots.plot(title = L"N=30, \ D=2", ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
-    Plots.plot!(eps_array, tau_sweep, lc=:green, primary=false)
-    Plots.plot!(eps_array, tau_sweep, seriestype=:scatter, mc=:green, legend=true, label="invertSweep")
-
-    Plots.plot!(eps_array, tau_global, lc=:red, primary=false)
-    Plots.plot!(eps_array, tau_global, seriestype=:scatter, mc=:red, label="invertGlobalSweep", legend=:bottomright)
-    Plots.plot!(xscale=:log)
+    ###Plots.plot(title = L"N=30, \ D=2", ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
+    ###Plots.plot!(eps_array, tau_sweep, lc=:green, primary=false)
+    ###Plots.plot!(eps_array, tau_sweep, seriestype=:scatter, mc=:green, legend=true, label="invertSweep")
+###
+    ###Plots.plot!(eps_array, tau_global, lc=:red, primary=false)
+    ###Plots.plot!(eps_array, tau_global, seriestype=:scatter, mc=:red, label="invertGlobalSweep", legend=:bottomright)
+    ###Plots.plot!(xscale=:log)
     #Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\SweepVSGlobal"*command*"_30Q_10R.pdf")
     return data
 end
 
+
+function logbins(data_array; nbins = 50)
+    bounds = extrema(data_array)
+    roundbounds = round.(bounds, sigdigits=1)
+    intbounds = (Int(floor(log10(bounds[1]))), Int(ceil(log10(bounds[2]))))
+    bins = 10.0 .^ range(intbounds[1], stop = intbounds[2], length = nbins)
+    return bins, roundbounds, intbounds
+end
+
+
 data = execute("randMPS", N, eps_array)
 
 #hist = @df data histogram(cols(1:4); layout=4, bins = 100)
-#Plots.histogram!(hist, title = L"N = 30, \tau = 3")
-#Plots.histogram!(hist[1], xlabel = L"\epsilon")
-#Plots.histogram!(hist[2], xlabel = L"N_{iter}")
-#Plots.histogram!(hist[3], xlabel = L"\epsilon")
-#Plots.histogram!(hist[4], xlabel = L"N_{iter}")
-#Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\FDQC_SweepVSGlobal_hist.pdf")
-
-#Plots.histogram2d(data.Err_sweep, data.Niter_sweep, xlabel = L"\mathrm{Error}", ylabel = L"N_{iter}", title = L"\mathrm{invertSweepLC}, N=30, \tau = 3, N_{run}=100", bins = (30,20))
-#Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\FDQC_Sweep_2dhist.pdf")
-#Plots.histogram2d(data.Err_global, data.Niter_global, xlabel = L"\mathrm{Error}", ylabel = L"N_{iter}", title = L"\mathrm{invertGlobalSweep}, N=30, \tau = 3, N_{run}=100", bins = (30,20))
-#Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\FDQC_Global_2dhist.pdf")
 
 
-#data = DataFrame(CSV.File("D:\\Julia\\MyProject\\Data\\SweepVsGlobal\\randmps.csv"))#
+#hist = Plots.histogram(title = L"N = 16, \tau = 3", layout=4)
+#bins1, rbounds1, ibounds1 = logbins(data.Err_sweep)
+#Plots.histogram!(hist[1], data.Err_sweep, bins = bins1, label="Err_sweep", legend=:top, xlabel = L"\epsilon", xscale=:log10, xlims = (rbounds1[1]/2, rbounds1[2]*2), xticks = (10.0 .^ (ibounds1[1]:ibounds1[2])))
+#Plots.histogram!(hist[2], data.Niter_sweep, bins=50, label="Niter_sweep", xlabel = L"N_{iter}")
+#bins2, rbounds2, ibounds2 = logbins(data.Err_global)
+#Plots.histogram!(hist[3], data.Err_global, bins = bins2, label="Err_global", legend=:top, xscale=:log10, xlims = (rbounds2[1]/2, rbounds2[2]*2), xlabel = L"\epsilon", xticks = (10.0 .^ (ibounds2[1]:ibounds2[2])))
+#Plots.histogram!(hist[4], data.Niter_global, bins=50, label="Niter_global", xlabel = L"N_{iter}")
+#Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\FDQC_16Q_SweepVSGlobal_hist.pdf")
+#
+#Plots.histogram2d(data.Err_sweep, data.Niter_sweep, bins = (bins1, 50), xscale=:log10, xticks = (10.0 .^ (ibounds1[1]:ibounds1[2])))
+#Plots.histogram2d!(xlabel = L"\epsilon", ylabel = L"N_{iter}", title = L"\mathrm{invertSweepLC}, N=16, \tau = 3, N_{run}=100")
+#Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\FDQC_16Q_Sweep_2dhist.pdf")
+#
+#Plots.histogram2d(data.Err_global, data.Niter_global, bins = (bins2, 50), xscale=:log10, xticks = (10.0 .^ (ibounds2[1]:ibounds2[2])))
+#Plots.histogram2d!(xlabel = L"\epsilon", ylabel = L"N_{iter}", title = L"\mathrm{invertGlobalSweep}, N=16, \tau = 3, N_{run}=100")
+#Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\FDQC_16Q_Global_2dhist.pdf")
 
-#Plots.plot(title = L"N=30, \ D=2", ylabel = L"N_{iter}", xlabel = L"\epsilon", xflip = true)
-#Plots.plot!(eps_array, data.Iterations1, lc=:green, primary=false)
-#Plots.plot!(eps_array, data.Iterations1, seriestype=:scatter, mc=:green, legend=true, label="invertSweep")#
 
-#Plots.plot!(eps_array, data.Iterations2, lc=:red, primary=false)
-#Plots.plot!(eps_array, data.Iterations2, seriestype=:scatter, mc=:red, label="invertGlobalSweep", legend=:bottomright)
-#Plots.plot!(xscale=:log, yscale=:log)
-#Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\SweepVSGlobal_randMPS_niter.pdf")
+
+
+data = DataFrame(CSV.File("D:\\Julia\\MyProject\\Data\\SweepVsGlobal\\randMPS_30Q_4D_10R_7DM.csv"))
+
+Plots.plot(title = L"N=30, \ D=4", ylabel = L"\epsilon", xlabel = L"\tau")
+Plots.plot!(data.Tau, data.Err_sweep, lc=:green, primary=false)
+Plots.plot!(data.Tau, data.Err_sweep, seriestype=:scatter, mc=:green, legend=true, label="invertSweepLC")#
+
+Plots.plot!(data.Tau, data.Err_global, lc=:red, primary=false)
+Plots.plot!(data.Tau, data.Err_global, seriestype=:scatter, mc=:red, label="invertGlobalSweep", legend=:topright)
+Plots.plot!(yscale=:log)
+Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\randMPS_4D_errVStau.pdf")
 
 
 

@@ -146,13 +146,14 @@ end
 function cut!(psi::itmps.MPS, b::Integer)
     it.orthogonalize!(psi, b)
     indsb = it.uniqueinds(psi[b], psi[b+1])
-    U, S, V = it.svd(psi[b], indsb, cutoff = 1E-15)
+    U, S, V = it.svd(psi[b]*psi[b+1], indsb, cutoff = 1E-18)
 
     u, v = it.inds(S)
     w = it.Index(1)
     projU = it.ITensor([1; [0 for _ in 1:u.space-1]], (u,w))
     projV = it.ITensor([1; [0 for _ in 1:v.space-1]], (w,v))
-    psi[b] = U*projU*projV*V
+    psi[b] = U*projU
+    psi[b+1] = projV*V
 end
 
 
