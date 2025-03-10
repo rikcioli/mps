@@ -4,7 +4,9 @@ import ITensorMPS as itmps
 import ITensors as it
 import Plots
 using LaTeXStrings, LinearAlgebra, Statistics, Random
-using DelimitedFiles
+using CSV
+using DataFrames
+using Colors
 
 function execute(Nrange, eps_list, gate)
     tau_depth_eps = []
@@ -17,7 +19,12 @@ function execute(Nrange, eps_list, gate)
         for eps in eps_list
             psi = mt.initialize_fdqc(N, div(N,2), gate, gate)
             mt.project_tozero!(psi, proj)
-            tau, lc, err, rest... = mt.invertGlobalSweep(psi, eps = eps, maxiter = 20000, start_tau=1)
+            start_tau = 1
+            if length(tau_eps) > 0
+                start_tau = tau_eps[end]
+            end
+            results = mt.invert(psi, mt.invertGlobalSweep; eps = eps, maxiter = 10000, nruns=12, start_tau=start_tau)
+            tau = results["tau"]
             push!(tau_eps, tau)
         end
     
@@ -26,26 +33,48 @@ function execute(Nrange, eps_list, gate)
     return tau_depth_eps
 end
 
-eps_list = [0.5*2.0^(-j) for j in 1:3]
-Nrange = 2:2:18
-gate = mt.random_unitary(4)
-tau_depth_eps = execute(Nrange, eps_list, gate)
 
-depths = div.(Vector(Nrange), 2)
-tau_eps_depth = [getindex.(tau_depth_eps,i) for i=1:length(tau_depth_eps[1])]
-Plots.plot(ylabel = L"\tau", xlabel = L"\mathrm{true \ depth}")
-Plots.plot!(depths, tau_eps_depth[1], lc=:green, primary=false)
-Plots.plot!(depths, tau_eps_depth[1], seriestype=:scatter, mc=:green, markersize=:3, primary=true, label=L"\epsilon=0.1")
-Plots.plot!(depths, tau_eps_depth[2], lc=:blue, primary=false)
-Plots.plot!(depths, tau_eps_depth[2], seriestype=:scatter, mc=:blue, markersize=:3, primary=true, label=L"\epsilon=0.05")
-Plots.plot!(depths, tau_eps_depth[3], lc=:red, primary=false)
-Plots.plot!(depths, tau_eps_depth[3], seriestype=:scatter, mc=:red, markersize=:3, primary=true, label=L"\epsilon=0.025")
-Plots.plot!(depths, tau_eps_depth[4], lc=:yellow, primary=false)
-Plots.plot!(depths, tau_eps_depth[4], seriestype=:scatter, mc=:yellow, markersize=:3, primary=true, label=L"\epsilon=0.0125")
-#Plots.plot!(1:5, taus_pereps[2], lc=:blue, primary=false)
-#Plots.plot!(1:5, taus_pereps[2], seriestype=:scatter, mc=:blue, markersize=:3, primary=true, label=L"\epsilon=0.05")
-#Plots.plot!(1:5, taus_pereps[3], lc=:red, primary=false)
-#Plots.plot!(1:5, taus_pereps[3], seriestype=:scatter, mc=:red, markersize=:3, primary=true, label=L"\epsilon=0.025")
+let Nrange, gate, eps_list
+
+    eps_list = [0.0125*2.0^(-j) for j in 1:3]
+    Nrange = 2:2:12
+    gate = mt.random_unitary(4)
+
+    tau_depth_eps = execute(Nrange, eps_list, gate)
+
+    depths = div.(Vector(Nrange), 2)
+    tau_eps_depth = [getindex.(tau_depth_eps,i) for i=1:length(tau_depth_eps[1])]
+
+    data = DataFrame(Error_required = eps_list, Depth = tau_eps_depth)
+    CSV.write("D:\\Julia\\MyProject\\Data\\MalzVSLiu\\measFD2.csv", data)
+
+    #Plots.plot(ylabel = L"\tau", xlabel = L"\mathrm{true \ depth}")
+    #Plots.plot!(depths, tau_eps_depth[1], lc=:green, primary=false)
+    #Plots.plot!(depths, tau_eps_depth[1], seriestype=:scatter, mc=:green, markersize=:3, primary=true, label=L"\epsilon=0.1")
+    #Plots.plot!(depths, tau_eps_depth[2], lc=:blue, primary=false)
+    #Plots.plot!(depths, tau_eps_depth[2], seriestype=:scatter, mc=:blue, markersize=:3, primary=true, label=L"\epsilon=0.05")
+    #Plots.plot!(depths, tau_eps_depth[3], lc=:red, primary=false)
+    #Plots.plot!(depths, tau_eps_depth[3], seriestype=:scatter, mc=:red, markersize=:3, primary=true, label=L"\epsilon=0.025")
+    #Plots.plot!(depths, tau_eps_depth[4], lc=:yellow, primary=false)
+    #Plots.plot!(depths, tau_eps_depth[4], seriestype=:scatter, mc=:yellow, markersize=:3, primary=true, label=L"\epsilon=0.0125")
+    #Plots.plot!(1:5, taus_pereps[2], lc=:blue, primary=false)
+    #Plots.plot!(1:5, taus_pereps[2], seriestype=:scatter, mc=:blue, markersize=:3, primary=true, label=L"\epsilon=0.05")
+    #Plots.plot!(1:5, taus_pereps[3], lc=:red, primary=false)
+    #Plots.plot!(1:5, taus_pereps[3], seriestype=:scatter, mc=:red, markersize=:3, primary=true, label=L"\epsilon=0.025")
+end
+
+data = DataFrame(CSV.File("D:\\Julia\\MyProject\\Data\\MalzVSLiu\\measFD2.csv"))
+Plots.plot(ylabel = L"\mathrm{inverted \ depth}", xlabel = L"\mathrm{true \ depth}")
+depths = data.True_depth
+
+Plots.plot!(depths, data.e2, marker = (:circle,5), primary=true, label=L"\epsilon=0.2")
+Plots.plot!(depths, data.e1, marker = (:circle,5), primary=true, label=L"\epsilon=0.1")
+Plots.plot!(depths, data.e05, marker = (:circle,5), primary=true, label=L"\epsilon=0.05")
+Plots.plot!(depths, data.e025, marker = (:circle,5), primary=true, label=L"\epsilon=0.025")
+Plots.plot!(depths, data.e0125, marker = (:circle,5), primary=true, label=L"\epsilon=0.0125")
+Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\measFDQC.pdf")
+
+
 
 ### # Prepare initial state
 ### 

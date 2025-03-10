@@ -4,6 +4,8 @@ import ITensorMPS as itmps
 import ITensors as it
 using LinearAlgebra, Statistics, Random, OptimKit
 
+it.set_warn_order(28)
+
 
 const H = [1 1
            1 -1]/sqrt(2)
@@ -17,6 +19,11 @@ const CX = [1 0 0 0
             0 1 0 0
             0 0 0 1
             0 0 1 0]
+
+const Id2 = [1 0 0 0
+            0 1 0 0
+            0 0 1 0
+            0 0 0 1]
 
 const SWAP = [1 0 0 0
               0 0 1 0
@@ -636,7 +643,7 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITe
     plevconj = lightcone.depth+1    #inds of conj mps are primed to depth+1
     interval = lightcone.range[end]
 
-    siteinds = it.prime(lightcone.sitesAB, lightcone.depth)
+    siteinds = it.prime(lightcone.siteinds, lightcone.depth)
     reduced_mps = [it.prime(tensor, lightcone.depth) for tensor in reduced_mps]
     reduced_mps_conj = [conj(it.prime(tensor, plevconj)) for tensor in reduced_mps]   
 
@@ -672,8 +679,7 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITe
     for k in N:-1:3
         # extract left gates associated with site k
         gates_k = lightcone.gates_by_site[k]
-        coords_left = [gate["coords"] for gate in gates_k if gate["orientation"]=="L"]
-        tensors_left = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_left]
+        tensors_left = [lightcone.circuit[gate["pos"]] for gate in gates_k if gate["orientation"]=="L"]
 
         # insert a zero proj if we are in region A, else insert identity
         ind = it.noprime(siteinds[k])
@@ -691,12 +697,11 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITe
     reverse!(R_blocks)
 
     # now sweep from left to right by removing each unitary at a time to compute gradient
-    grad = [Array{ComplexF64}(undef, 0, 0) for _ in 1:length(lightcone.coords)]
+    grad = [Array{ComplexF64}(undef, 0, 0) for _ in 1:lightcone.n_unitaries]
     for j in 2:N
         # extract all gates on the left of site j
         gates_j = lightcone.gates_by_site[j]
-        coords_left = [gate["coords"] for gate in gates_j if gate["orientation"]=="L"]
-        tensors_left = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_left]
+        tensors_left = [lightcone.circuit[gate["pos"]] for gate in gates_j if gate["orientation"]=="L"]
 
         # insert a zero proj if we are in region A, else insert identity
         ind = it.noprime(siteinds[j])
@@ -726,10 +731,10 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITe
             end
 
             gate_jl = filter(gate -> gate["orientation"] == "L", gates_j)[l]
-            gate_jl_inds, gate_jl_num = gate_jl["inds"], gate_jl["number"]
+            gate_jl_inds, gate_jl_pos = gate_jl["inds"], gate_jl["pos"]
             ddUjl = Array(env, gate_jl_inds)
             ddUjl = 2*conj(reshape(ddUjl, (d^2, d^2)))
-            grad[gate_jl_num] = ddUjl
+            grad[gate_jl_pos] = ddUjl
         end
 
         # update leftmost_block for next j and add it to L_blocks list
@@ -745,11 +750,11 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITe
 
     # compute environment now that we contracted all blocks, so that we are effectively computing the overlap
     # we use the absolute value as a cost function
-    overlap_sq = abs(Array(leftmost_block)[1])
+    overlap = abs(Array(leftmost_block)[1])
     riem_grad = project(U_array, grad)
 
     # put a - sign so that it minimizes
-    cost = -overlap_sq
+    cost = -overlap
     riem_grad = - riem_grad
 
     return cost, riem_grad
@@ -758,14 +763,16 @@ end
 
 
 
-function invertMPSLiu(mps::itmps.MPS, invertMethod; d = 2, start_tau = 1, eps_trunc = 0.01, eps_inv = 0.01, kargs_inv = NamedTuple())
+function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, kargs_inv = NamedTuple())
 
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
     siteinds = it.siteinds(mps)
-    #eps_liu = eps_trunc/N
+    eps1 = eps # error of the whole first part, that is inversion of reduced dm + truncation
+    eps2 = eps # error of the second part, that is inversion of the pure states
+    println("Attempting inversion of MPS with invertMPSLiu and errors:\neps1 = $eps1\neps2 = $eps2")
 
-    local mps_trunc, boundaries, rangesA, V_list, err_list, lc_list, err_trunc
+    local mps_trunc, boundaries, rangesA, V_list, err_list, lc_list, err1
     tau = start_tau
     while true
         mps_copy = deepcopy(mps)
@@ -790,50 +797,51 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; d = 2, start_tau = 1, eps_tr
             push!(initial_pos, i)
             i += sizeAB+spacing
         end
-        rangesAB = [(i, min(i+sizeAB-1, N)) for i in initial_pos]
+        rangesAB = [(j, min(j+sizeAB-1, N)) for j in initial_pos]
         @show rangesAB
-        rangesA = []
+        rangesA = Array{Tuple, 1}(undef, length(initial_pos))
 
-        V_list = []
-        lc_list::Vector{Lightcone} = []
-        err_list = []
-        println("Inverting reduced density matrices...")
-        for i in initial_pos
-            last_site = min(i+sizeAB-1, N)
-            k_sites = siteinds[i:last_site]
-            it.orthogonalize!(mps_copy, div(i+last_site, 2))
+        lc_list = Array{Lightcone, 1}(undef, length(initial_pos))
+        #lc_list::Vector{Lightcone} = []
+        err_list = Array{Float64, 1}(undef, length(initial_pos))
+        #err_list = []
 
-            # extract reduced mps on k_sites and construct lightcone structure of depth tau
-            reduced_mps = mps_copy[i:last_site]
-            # FOR NOW CAN ONLY DEAL WITH (TRUE, TRUE)
-            #lightbounds != (true, true) && 
-            #    throw(DomainError(lightbounds, "Try to choose spacing so that regions to invert are away from boundaries"))
-            lightbounds = (true, last_site==N ? false : true)
-            lightcone = newLightcone(k_sites, tau; lightbounds = lightbounds)
-            rangeA = lightcone.range[end]
-            if !lightbounds[2]
-                rangeA = (rangeA[1], N)
-            end
-            push!(rangesA, (rangeA[1]+i-1, rangeA[2]+i-1))
-
-            # setup optimization stuff
-            arrU0 = Array(lightcone)
-            fg = arrU -> _fgLiu(arrU, lightcone, reduced_mps)
-            # Quasi-Newton method
-            m = 5
-            algorithm = LBFGS(m;maxiter = 20000, gradtol = 1E-8, verbosity = 1)
-            # optimize and store results
-            # note that arrUmin is already stored in current lightcone, ready to be applied to mps
-            arrUmin, err, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport = true , inner = inner);
-            
-            push!(lc_list, lightcone)
-            push!(V_list, arrUmin)
-            push!(err_list, 1+err)
+        reduced_mps_list = []
+        k_sites_list = []
+        for (first_site, last_site) in rangesAB
+            it.orthogonalize!(mps_copy, div(first_site+last_site, 2))
+            push!(reduced_mps_list, mps_copy[first_site:last_site])
+            push!(k_sites_list, siteinds[first_site:last_site])
         end
 
-        it.prime!(mps_copy, tau)
-        contract!(mps_copy, lc_list, initial_pos)
-        mps_copy = it.noprime(mps_copy)
+        println("Inverting reduced density matrices...")
+        # all variables defined inside each thread have a _
+        Threads.@threads for l in 1:length(rangesAB)
+            (_first_site, _last_site) = rangesAB[l]
+            _reduced_mps = reduced_mps_list[l]
+            _k_sites = k_sites_list[l]
+            
+            _lightbounds = (true, _last_site==N ? false : true)   # first region will always be left for step 2, last region could end up in step 1
+            _lightcone = newLightcone(_k_sites, tau; lightbounds = _lightbounds)
+            _rangeA_rel = _lightcone.range[end]       # region which will be inverted to 0, relative to first site of lightcone
+            _rangeA_abs = (_rangeA_rel[1]+_first_site-1, _last_site==N ? N : _rangeA_rel[2]+_first_site-1)      # same region relative to total mps sites
+            rangesA[l] = _rangeA_abs
+
+            # setup optimization stuff
+            _arrU0 = Array(_lightcone)
+            _fg = arrU -> _fgLiu(arrU, _lightcone, _reduced_mps)
+            # Quasi-Newton method
+            _algorithm = LBFGS(5; maxiter = 20000, gradtol = 1E-8, verbosity = 1)
+            # optimize and store results
+            # note that arrUmin is already stored in current lightcone, ready to be applied to mps
+            _, _neg_overlap, _ = optimize(_fg, _arrU0, _algorithm; retract = retract, transport! = transport!, isometrictransport = true , inner = inner);
+            
+            lc_list[l] = _lightcone
+            err_list[l] = 1+_neg_overlap
+        end
+        
+        # now that we inverted we apply the circuits, truncate and apply back to compute err1
+        apply!(mps_copy, lc_list)
         mps_trunc = deepcopy(mps_copy)
 
         @show rangesA
@@ -849,68 +857,84 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; d = 2, start_tau = 1, eps_tr
             end
         end
         push!(boundaries, N)
-        err_trunc = norm(mps_copy - mps_trunc)
-        @show err_trunc
 
-        if err_trunc <= eps_trunc
+        mps_reconstr = deepcopy(mps_trunc)
+        apply!(mps_reconstr, lc_list, dagger=true)
+        err1 = 1-abs(dot(mps, mps_reconstr))
+        @show err1
+
+        if -eps1 <= err1 <= eps1
             break
         else
-            println("Convergence not found with initial depth tau = $tau, increasing inversion depth")
-            #eps_liu /= 2
+            println("Inversion and truncation to required error failed with initial depth tau = $tau, increasing inversion depth")
             tau += 1
         end
     end
 
-    println("Truncation reached within requested eps_trunc, inverting local states...")
+    println("Inversion and truncation reached within requested eps_trunc, inverting local states with local error eps2/N_regions^2 = $(eps2/length(rangesA)^2)")
+    epsinv2 = eps2/length(rangesA)^2
     trunc_siteinds = it.siteinds(mps_trunc)
     trunc_linkinds = it.linkinds(mps_trunc)
-    lc_list2::Vector{Lightcone} = []
-    tau_list2 = []
-    err_list2 = []
 
-    ranges = []
-    for l in 1:length(boundaries)-1
-        push!(ranges, (boundaries[l]+1, boundaries[l+1]))
-    end
-    @show ranges
+    local lc_list2, tau_list2, err_list2, mps_final, err2, err_total
+    for attempt in 1:10
+        lc_list2::Vector{Lightcone} = []
+        tau_list2 = []
+        err_list2 = []
 
-    for range in ranges
-        # extract reduced mps and remove external linkind (which will be 1-dim)
-        reduced_mps = mps_trunc[range[1]:range[2]]
-        
-        if range[1]>1
-            comb1 = it.combiner(trunc_linkinds[range[1]-1], trunc_siteinds[range[1]])
-            reduced_mps[1] *= comb1
-            cind = it.combinedind(comb1)
-            it.replaceind!(reduced_mps[1], cind, trunc_siteinds[range[1]])
+        ranges = []
+        for l in 1:length(boundaries)-1
+            push!(ranges, (boundaries[l]+1, boundaries[l+1]))
         end
-        if range[end]<N
-            comb2 = it.combiner(trunc_linkinds[range[2]], trunc_siteinds[range[2]])
-            reduced_mps[end] *= comb2
-            cind = it.combinedind(comb2)
-            it.replaceind!(reduced_mps[end], cind, trunc_siteinds[range[2]])
+        @show ranges
+
+        for range in ranges
+            # extract reduced mps and remove external linkind (which will be 1-dim)
+            reduced_mps = mps_trunc[range[1]:range[2]]
+            
+            if range[1]>1
+                comb1 = it.combiner(trunc_linkinds[range[1]-1], trunc_siteinds[range[1]])
+                reduced_mps[1] *= comb1
+                cind = it.combinedind(comb1)
+                it.replaceind!(reduced_mps[1], cind, trunc_siteinds[range[1]])
+            end
+            if range[end]<N
+                comb2 = it.combiner(trunc_linkinds[range[2]], trunc_siteinds[range[2]])
+                reduced_mps[end] *= comb2
+                cind = it.combinedind(comb2)
+                it.replaceind!(reduced_mps[end], cind, trunc_siteinds[range[2]])
+            end
+
+            reduced_mps = itmps.MPS(reduced_mps)
+            
+            results2 = invert(reduced_mps, invertMethod; start_tau = (range in rangesA ? 1 : 2), eps = epsinv2, kargs_inv...)
+            push!(lc_list2, results2["lightcone"])
+            push!(tau_list2, results2["tau"])
+            push!(err_list2, results2["err"])
         end
 
-        reduced_mps = itmps.MPS(reduced_mps)
+
+        # finally create a 0 state and apply all the V to recreate the original state for final total error
+        mps_final = initialize_vac(N, trunc_siteinds)
+        apply!(mps_final, lc_list2)
+        err2 = 1-abs(dot(mps_final, mps_trunc))
+        @show err2
+
+        it.replace_siteinds!(mps_final, siteinds)
+        apply!(mps_final, lc_list, dagger=true)
         
-        results2 = invert(reduced_mps, invertMethod; start_tau = (range in rangesA ? 1 : 2), eps = eps_inv, kargs_inv...)
-        push!(lc_list2, results2["lightcone"])
-        push!(tau_list2, results2["tau"])
-        push!(err_list2, results2["err"])
+        err_total = 1-abs(dot(mps_final, mps))
+        @show err_total
+        if err_total < eps
+            break
+        else
+            println("Convergence up to desired total error not found with initial eps2 = $epsinv2, reducing the error...")
+            epsinv2 *= 0.5
+        end
+
     end
-
-
-    # finally create a 0 state and apply all the V to recreate the original state for final total error
-    mps_final = initialize_vac(N, trunc_siteinds)
-    apply!(mps_final, lc_list2)
-    err2tot = 1-abs(Array(contract(mps_final, conj(mps_trunc)))[1])
-    @show err2tot
-    it.replace_siteinds!(mps_final, siteinds)
-    apply!(mps_final, lc_list, dagger=true)
-    err_total = 1-abs(Array(contract(mps_final, conj(mps)))[1])
-    @show err_total
     
-    return Dict([("lc1", lc_list), ("tau1", tau), ("err1", err_list), ("lc2", lc_list2), ("tau2", tau_list2), ("err2", err_list2), ("mps_final", mps_final), ("err_trunc", err_trunc), ("err_inv", err2tot), ("err_total", err_total)])
+    return Dict([("lc1", lc_list), ("tau1", tau), ("errinv1", err_list), ("lc2", lc_list2), ("tau2", tau_list2), ("errinv2", err_list2), ("mps_final", mps_final), ("err1", err1), ("err2", err2), ("err_total", err_total)])
 
 end
 

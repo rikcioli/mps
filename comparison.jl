@@ -6,19 +6,16 @@ import Plots
 using LaTeXStrings, LinearAlgebra, Statistics, Random
 using CSV
 using DataFrames, StatsPlots
+using JET, Profile
 
 it.set_warn_order(28)
 
-# Prepare initial state
-eps_array = [0.5*2.0^(-i) for i in 0:4]
-#eps_array = [0.01]
-
-N = 60
 
 function execute(command, N, eps_array; D = 2, tau = 3)
 # Choose object to invert
     if command == "randMPS"
-        test = mt.randMPS(N, D)
+        test = it.random_mps(it.siteinds(2, N), linkdims = D)
+        it.orthogonalize!(test, 3)
     elseif command == "FDQC"
         test = mt.initialize_fdqc(N, tau)
     end
@@ -38,15 +35,24 @@ function execute(command, N, eps_array; D = 2, tau = 3)
     #    push!(err_malz, err_total)
     #end
 
+    mt.disentangle!(test, 3)
 
+    start_tau = 1
     for eps in eps_array
         println("\nAssuming error threshold eps = $eps\n")
 
+        if eps != eps_array[1]
+            if err_liu[end] < eps
+                push!(err_liu, err_liu[end])
+                push!(tau_liu, tau_liu[end])
+                continue
+            end
+        end
+
         factor = 1
-        start_tau = 1
         local results, err_total
         for _ in 1:10
-            results = mt.invertMPSLiu(test, mt.invertGlobalSweep; start_tau = start_tau, eps_trunc = eps/factor, eps_inv = eps/factor, kargs_inv = (nruns = 10,))
+            results = mt.invertMPSLiu(test, mt.invertGlobalSweep; start_tau = start_tau, eps = eps/factor, kargs_inv = (nruns = 10,))
             err_total = results["err_total"]
             if err_total < eps
                 break
@@ -60,8 +66,8 @@ function execute(command, N, eps_array; D = 2, tau = 3)
         start_tau = results["tau1"]
     end
 
-    data = DataFrame(Error = eps_array, tau_Malz = tau_malz, err_Malz = err_malz, tau_Liu = tau_liu, err_Liu = err_liu)
-    CSV.write("D:\\Julia\\MyProject\\Data\\MalzVSLiu\\"*command*"_10R.csv", data)
+    data = DataFrame(Error = eps_array, tau_Liu = tau_liu, err_Liu = err_liu)
+    CSV.write("D:\\Julia\\MyProject\\Data\\MalzVSLiu\\"*command*"_DisenLiu.csv", data)
 
     Plots.plot(title = L"N="*string(N), ylabel = L"\tau", xlabel = L"\epsilon", xflip = true)
     #Plots.plot!(eps_array, tau_malz, lc=:green, primary=false)
@@ -71,12 +77,62 @@ function execute(command, N, eps_array; D = 2, tau = 3)
     Plots.plot!(eps_array, tau_liu, seriestype=:scatter, mc=:red, label="Liu", legend=:bottomright)
     Plots.plot!(xscale=:log)
 
-    Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\MalzVSLiu"*command*".pdf")
+    Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\MalzVSLiu"*command*"DisenLiu.pdf")
 
     return data
 end
 
-data = execute("randMPS", N, eps_array)
+
+function create_invert(N, tau_list)
+    # Choose object to invert
+    tau_liu = []
+    err_liu = []
+    start_tau = 2
+    for tau in tau_list
+        test = mt.initialize_fdqc(N, tau)
+    
+        
+        results = mt.invertMPSLiu(test, mt.invertGlobalSweep; start_tau = start_tau, eps = 1e-5, kargs_inv = (nruns = 10, maxiter = 10000))
+
+        err_total = results["err_total"]
+        tau_total = maximum(results["tau2"]) + results["tau1"]
+        push!(tau_liu, tau_total)
+        push!(err_liu, err_total)
+        start_tau = results["tau1"]
+    
+    end
+    
+    data = DataFrame(True_depth = tau_list, Inverted_depth = tau_liu, Error = err_liu)
+    CSV.write("D:\\Julia\\MyProject\\Data\\MalzVSLiu\\LiuD3QC.csv", data)
+    
+    Plots.plot(title = L"N="*string(N), ylabel = L"\tilde{\tau}_{\mathrm{tot}}", xlabel = L"\tau")
+    #Plots.plot!(eps_array, tau_malz, lc=:green, primary=false)
+    #Plots.plot!(eps_array, tau_malz, seriestype=:scatter, mc=:green, legend=true, label="Malz")
+    
+    Plots.plot!(tau_list, tau_liu, lc=:red, primary=false)
+    Plots.plot!(tau_list, tau_liu, seriestype=:scatter, mc=:red, legend=false)
+    #Plots.plot!(xscale=:log)
+
+    Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\LiuD3QCdepth.pdf")
+    
+    return data
+end
+
+
+
+let N, eps_array
+
+    N = 60
+    #eps_array = [0.5*2.0^(-i) for i in 0:4]
+    eps_array = [0.01] 
+    data = execute("randMPS", N, eps_array)
+
+end
+
+
+
+
+#@profview datas = create_invert(20, [2])
 
 
 #test = mt.randMPS(N, 2)

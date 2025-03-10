@@ -2,21 +2,22 @@
 ### LIGHTCONE METHODS ###
 
 struct Lightcone
-    circuit::Vector{Vector{it.ITensor}}     # circuit[i] is the i-th layer, circuit[odd][1] acts on sites (1, 2), circuit[even][1] acts on sites (2, 3)
+    circuit::Vector{it.ITensor}             # array containing the it.ITensor unitaries
+    inds_arr::Vector{NTuple{4, it.Index{Int64}}}    # contains the indices of all the tensors
     d::Int64                                # dimension of the physical space
     size::Int64                             # number of qubits the whole circuit acts on
     depth::Int64                            # circuit depth
+    n_unitaries::Int64                      # number of unitaries
     lightbounds::Tuple{Bool, Bool}          # (leftslope == 'light', rightslope == 'light')
-    sitesAB::Vector{it.Index}               # siteinds of AB region
-    coords::Vector{Tuple{Tuple{Int64,Int64}, NTuple{4, it.Index{Int64}}}}    # coordinates of all unitaries
-    id_coords::Vector{Tuple{Tuple{Int64, Int64}}}                          # coordinates of all identities - WILL BE DEPRECATED SOONER OR LATER
-    layers::Vector{Vector{Tuple{Tuple{Int64,Int64}, NTuple{4, it.Index{Int64}}}}}        # coordinates of all gates ordered by layer
+    siteinds::Vector{it.Index}              # siteinds of AB region
     range::Vector{Tuple{Int64, Int64}}      # leftmost and rightmost sites on which each layer acts non-trivially
-    gates_by_site::Vector{Vector{Dict{String,Any}}}                           # coordinates of all the gates to the left of each qubit
+    gates_by_site::Vector{Vector{Dict{String,Any}}}    # positions, inds and orientations of all the gates touching each qubit
+    gates_by_layer::Vector{Vector{Int64}}     # positions of all gates sorted by depth
+    sites_by_gate::Vector{Tuple{Int64, Int64}}  # vector contaning all the sites each gate is acting on
 end
 
 
-function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, lightbounds = (true, true))
+function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array::Union{Nothing, Vector{<:Matrix}} = nothing, lightbounds = (true, true))
 
     # extract number of sites on which lightcone acts
     sizeAB = length(siteinds)
@@ -44,26 +45,35 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
     
     # if U_array is not given, construct an array of random d-by-d unitaries
     d = siteinds[1].space
+    n_unitaries = div(sizeAB-1,2)*depth + mod(sizeAB-1,2)*div(depth+1,2)
+    if depth > 2
+        dep_m2 = depth-2
+        n_unitaries -= n_light*(div(dep_m2+1,2)^2 + mod(dep_m2+1,2)*div(dep_m2+1,2))
+    end
     if isnothing(U_array)
-        n_unitaries = (sizeAB-1)*div(depth,2) + div(sizeAB,2)
-        if depth > 2
-            dep_m2 = depth-2
-            n_unitaries -= n_light*(div(dep_m2+1,2)^2 + mod(dep_m2+1,2)*div(dep_m2+1,2))
-        end
         U_array = [random_unitary(d^2) for _ in 1:n_unitaries]
+    else
+        n_insert = length(U_array)
+        n_insert > n_unitaries &&
+            throw(DomainError(n_insert, "Number of inserted unitaries is too large for this lightcone 
+            structure\nInserted unitaries: $n_insert\nLightcone unitaries: $n_unitaries\n"))
+        if n_insert < n_unitaries
+            #@warn "Number of inserted unitaries ($n_insert) is lower than maximum capacity ($n_unitaries), filling the missing spaces with identities"
+            Ids = [1.0*Id2 for _ in 1:n_unitaries-n_insert]
+            U_array = [U_array; Ids]
+        end
     end
 
     # finally convert the U_array 
-    circuit::Vector{Vector{it.ITensor}} = []
-    coords::Vector{Tuple{Tuple{Int64,Int64}, NTuple{4, it.Index{Int64}}}} = []
-    id_coords::Vector{Tuple{Tuple{Int64, Int64}}} = []
-    layers_coords::Vector{Vector{Tuple{Tuple{Int64,Int64}, NTuple{4, it.Index{Int64}}}}} = []
+    circuit::Vector{it.ITensor} = []
+    inds_arr::Vector{NTuple{4, it.Index{Int64}}} = []
+
     range::Vector{Tuple{Int64, Int64}} = []
     gates_by_site::Vector{Vector{Dict{String,Any}}} = [[] for _ in 1:sizeAB]
-
+    gates_by_layer::Vector{Vector{Int64}} = []
+    sites_by_gate::Vector{Tuple{Int64, Int64}} = []
     k = 1
     for i in 1:depth
-        layer_i::Vector{it.ITensor} = []
         # limits for circuit indices, left limit is always 1
         # right limit is sizeAB/2 for odd layers, sizeAB/2 or sizeAB/2-1 for even layers depending on the parity of sizeAB
         llim, rlim = 1, div(sizeAB,2)-mod(sizeAB+1,2)*mod(i+1,2)
@@ -81,10 +91,10 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
         end
         push!(range, (lrange, rrange))
 
-        layer_i_coords = []
+        layer_i_pos::Vector{Int64} = []
         # sweep over unitaries, from left to right if depth odd, otherwise from right to left
         # this will be helpful with the og center
-        for j in (isodd(i) ? (llim:rlim) : (rlim:-1:llim))
+        for j in (isodd(i) ? (lslope:rslope) : (rslope:-1:lslope))
             # prepare inds for current unitary
             sites_involved = (2*j-mod(i,2), 2*j-mod(i,2)+1)
             inds = it.prime((siteinds[sites_involved[1]], siteinds[sites_involved[2]]), depth-i)
@@ -116,61 +126,49 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array = nothing, li
             end
 
             fullinds = Tuple(ind for ind in fullinds)
-            #fullinds = (fullinds[1], fullinds[2], fullinds[3], fullinds[4])
 
             # insert unitary 
-            if j < lslope || j > rslope     # this is needed for lightbounds, since we stored unitaries in an array of arrays
-                # one should refactor stuff so that the positions are accessed by appropriate dictionaries, but the arrays are
-                # all in a line
-                brick = it.ITensor(1)
-                push!(id_coords, ((i,j),))
-            else
-                brick = it.ITensor(U_array[k], fullinds)
-                push!(coords, ((i,j), fullinds))
-                k += 1
+            brick = it.ITensor(U_array[k], fullinds)
+            push!(circuit, brick)
+            push!(inds_arr, fullinds)
+            
+            push!(gates_by_site[sites_involved[1]], Dict([("inds", fullinds), ("pos", k), ("orientation", "R")]))
+            push!(gates_by_site[sites_involved[2]], Dict([("inds", fullinds), ("pos", k), ("orientation", "L")]))
+            push!(sites_by_gate, sites_involved)
+            push!(layer_i_pos, k)
 
-                push!(gates_by_site[sites_involved[1]], Dict([("coords", (i,j)), ("inds", fullinds), ("number", k-1), ("orientation", "R")]))
-                push!(gates_by_site[sites_involved[2]], Dict([("coords", (i,j)), ("inds", fullinds), ("number", k-1), ("orientation", "L")]))
-            end
-
-            push!(layer_i, brick)
-            push!(layer_i_coords, ((i,j), fullinds))
+            k += 1
 
         end
         if iseven(i)
-            reverse!(layer_i)
+            reverse!(layer_i_pos)
         end
-        push!(circuit, layer_i)
-        push!(layers_coords, layer_i_coords)
+        push!(gates_by_layer, layer_i_pos)
     end
 
 
-    return Lightcone(circuit, d, sizeAB, depth, lightbounds, siteinds, coords, id_coords, layers_coords, range, gates_by_site)
-
+    return Lightcone(circuit, inds_arr, d, sizeAB, depth, n_unitaries, lightbounds, siteinds, range, gates_by_site, gates_by_layer, sites_by_gate)
 end
 
 "Update Lightcone in-place"
 function updateLightcone!(lightcone::Lightcone, U_array::Vector{<:Matrix})
     n_unitaries = length(U_array)
-    if length(lightcone.coords) != n_unitaries
-        throw(BoundsError(n_unitaries, "Number of updated unitaries does not match lightcone structure"))
+    if lightcone.n_unitaries != n_unitaries
+        throw(DomainError(n_unitaries, "Number of updated unitaries does not match lightcone structure"))
     end
 
     for k in 1:n_unitaries
-        (i,j), inds = lightcone.coords[k]
         U = U_array[k]
+        inds = lightcone.inds_arr[k]
         U_tensor = it.ITensor(U, inds)
-        lightcone.circuit[i][j] = U_tensor
+        lightcone.circuit[k] = U_tensor
     end
 end
 
 "Flatten Lightcone to 1D array, from bottom to top"
 function Base.Array(lightcone::Lightcone)
-    arr::Vector{Matrix} = []
     d = lightcone.d
-    for ((i,j), inds) in lightcone.coords
-        push!(arr, reshape(Array(lightcone.circuit[i][j], inds), (d^2,d^2)))
-    end
+    arr = [reshape(Array(lightcone.circuit[k], lightcone.inds_arr[k]), (d^2,d^2)) for k in 1:lightcone.n_unitaries]
     return arr
 end
 
@@ -180,13 +178,13 @@ function contract!(psi::Union{itmps.MPS, Vector{it.ITensor}}, lightcone::Lightco
     if l1 != l2
         throw(DomainError(l1, "Cannot apply lightcone of size $l2 to mps of length $l1: the two lengths must be equal"))
     end
-    (i,j), inds = lightcone.coords[k]
-    U = lightcone.circuit[i][j]
+    inds = lightcone.inds_arr[k]
+    U = lightcone.circuit[k]
     if dagger
         U = conj(U)
     end
 
-    b = 2*j-mod(i,2)    # where to apply the unitary
+    b = lightcone.sites_by_gate[k][1]    # where to apply the unitary
 
     W = psi[b]*psi[b+1]
     suminds = it.commoninds(inds, W)
@@ -206,17 +204,18 @@ end
 
 "Apply lightcone to mps psi, from base to top. Lightcone.size must be equal to length(psi)"
 function contract!(psi::Union{itmps.MPS, Vector{it.ITensor}}, lightcone::Lightcone; cutoff = 1E-15)
-    for k in 1:length(lightcone.coords)
-        contract!(psi, lightcone, k)
+    for k in 1:lightcone.n_unitaries
+        contract!(psi, lightcone, k; cutoff=cutoff)
     end
 end
 
-"Apply lightcone to mps psi, from base to top. Lightcones' sitesAB must match mps siteinds only in id, not in primelevel.
-If dagger is true, all the unitaries are conjugated and the order of application is inverted"
-function apply!(mps::Union{itmps.MPS, itmps.MPO}, lightcones::Vector{Lightcone}; dagger = false)
+"Apply lightcone to MPS/MPO, from base to top. Lightcones' siteinds must match mps siteinds only in id, not in primelevel.
+If dagger is true, all the unitaries are conjugated and the order of application is inverted
+If an empty list is passed as entropy_arr karg it will be filled with half-subsystem entropies at each timestep"
+function apply!(mps::Union{itmps.MPS, itmps.MPO}, lightcones::Vector{Lightcone}; dagger = false, cutoff = 1E-15, entropy_arr = nothing)
     N = length(mps)
 
-    if typeof(mps) == itmps.MPO
+    if isa(mps, itmps.MPO)
         allinds = reduce(vcat, it.siteinds(mps))
         # determine primelevel of inputinds, which will be the lowest found in allinds
         first2inds = allinds[1:2]   
@@ -244,7 +243,7 @@ function apply!(mps::Union{itmps.MPS, itmps.MPO}, lightcones::Vector{Lightcone};
 
     l = 1
     for lc in lightcones
-        firstind = it.noprime(lc.sitesAB[1])
+        firstind = it.noprime(lc.siteinds[1])
         while l < N
             if firstind == it.noprime(siteinds[l])   #then apply lightcone here
                 depth = lc.depth
@@ -257,10 +256,10 @@ function apply!(mps::Union{itmps.MPS, itmps.MPO}, lightcones::Vector{Lightcone};
                     end
                 end
                 # apply lc
-                n_unitaries = length(lc.coords)
-                for k in 1:n_unitaries
-                    (i,j), inds = (dagger ? lc.coords[n_unitaries-k+1] : lc.coords[k])  #apply in reverse if dagger is required
-                    U = lc.circuit[i][j]
+                n_unitaries = lc.n_unitaries
+                for k in (dagger ? (n_unitaries:-1:1) : (1:n_unitaries)) #apply in reverse if dagger is required
+                    inds = lc.inds_arr[k]
+                    U = lc.circuit[k]
                     if dagger
                         U = conj(U)
                     end
@@ -271,9 +270,8 @@ function apply!(mps::Union{itmps.MPS, itmps.MPO}, lightcones::Vector{Lightcone};
                     #     coords = (i,j)
                     #     throw(DomainError(non_unitarity, "Non-unitary matrix found in lightcone number $l at coords $coords"))
                     # end
-                    b = l-1 + 2*j-mod(i,2)
+                    b = l-1 + lc.sites_by_gate[k][1]
                     it.orthogonalize!(mps, b+1)
-                    #norm0 = norm(mps)
         
                     W = mps[b]*mps[b+1]
                     suminds = it.commoninds(inds, W)
@@ -282,7 +280,7 @@ function apply!(mps::Union{itmps.MPS, itmps.MPO}, lightcones::Vector{Lightcone};
                     
                     it.replaceinds!(W, outinds, suminds)
                     indsb = it.uniqueinds(mps[b], mps[b+1])
-                    U, S, V = it.svd(W, indsb, cutoff = 1E-15)
+                    U, S, V = it.svd(W, indsb, cutoff = cutoff)
                     mps[b] = it.replaceinds(U, suminds, outinds)
                     mps[b+1] = it.replaceinds(S*V, suminds, outinds) 
         
@@ -290,6 +288,14 @@ function apply!(mps::Union{itmps.MPS, itmps.MPO}, lightcones::Vector{Lightcone};
                     # if abs(norm0-norm1)>1E-14
                     #     throw(DomainError(norm1, "MPS norm has changed during the application of lightcone of initpos $initpos"))
                     # end
+                    if !isnothing(entropy_arr) && lc.sites_by_gate[k] == (div(size,2), div(size,2)+1) 
+                        SvN = 0.0
+                        for n in 1:it.dim(S, 1)
+                          p = S[n,n]^2
+                          SvN -= p * log(p)
+                        end
+                        push!(entropy_arr, SvN)
+                    end
                 end
                 l += size
                 break
@@ -301,69 +307,29 @@ function apply!(mps::Union{itmps.MPS, itmps.MPO}, lightcones::Vector{Lightcone};
     if dagger
         it.noprime!(mps)
     end
-    if typeof(mps) == itmps.MPO
+    if isa(mps, itmps.MPO)
         for i in 1:N
             it.replaceind!(mps[i], siteinds[i], ininds'[i])
             it.replaceind!(mps[i], new_ininds[i], ininds[i])
         end
     end
-
 end
 
 
-
-"Apply vector of Lightcones to MPS, from base to top. The lightcones positions are specified by the ints contained in initial_pos. Prime level of mps siteinds must be the same as lightcones'."
-function contract!(mps::itmps.MPS, lightcones::Vector{Lightcone}, initial_pos::Vector{<:Int}; cutoff = 1E-15)
-    
-    n_lightcones = length(initial_pos)
-    
-    for l in 1:n_lightcones
-        lc = lightcones[l]
-        initpos = initial_pos[l]
-
-        for k in 1:length(lc.coords)
-            (i,j), inds = lc.coords[k]
-            U = lc.circuit[i][j]
-            Umat = reshape(Array(U, inds), (inds[1].space^2, inds[1].space^2))
-            non_unitarity = norm(Umat'Umat - I)
-            if non_unitarity > 1E-14
-                coords = (i,j)
-                throw(DomainError(non_unitarity, "Non-unitary matrix found in lightcone number $l at coords $coords"))
-            end
-
-            b = initpos-1 + 2*j-mod(i,2)
-            it.orthogonalize!(mps, b+1)
-            norm0 = norm(mps)
-
-            W = mps[b]*mps[b+1]
-            suminds = it.commoninds(inds, W)
-            outinds = it.uniqueinds(U, suminds)
-            W *= U
-            
-            it.replaceinds!(W, outinds, suminds)
-            indsb = it.uniqueinds(mps[b], mps[b+1])
-            U, S, V = it.svd(W, indsb, cutoff = cutoff)
-            mps[b] = it.replaceinds(U, suminds, outinds)
-            mps[b+1] = it.replaceinds(S*V, suminds, outinds) 
-
-            norm1 = norm(mps)
-            if abs(norm0-norm1)>1E-14
-                throw(DomainError(norm1, "MPS norm has changed during the application of lightcone of initpos $initpos"))
-            end
-        end
-    end
-
+function apply!(mps::Union{itmps.MPS, itmps.MPO}, lightcone::Lightcone; kargs...)
+    apply!(mps, [lightcone]; kargs...)
 end
+
 
 "Convert lightcone to MPO"
 # must be updated to account for the removal of identities
 function MPO(lightcone::Lightcone)
     # convert lightcone to mpo by using the apply(mps, lightcone) function defined above on an MPO of delta tensors
-    siteinds = lightcone.sitesAB
+    siteinds = lightcone.siteinds
 
     mpo_list = [it.delta(ind, ind') for ind in siteinds]
     mpo = itmps.MPO(mpo_list)
-    apply!(mpo, [lightcone])
+    apply!(mpo, lightcone)
 
     return mpo
 end

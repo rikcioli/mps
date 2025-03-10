@@ -12,19 +12,23 @@ function fix_phase(U)
     return U*diagm(exp.(-1im*ϕs))
 end
 
+function dist_un(U1::AbstractMatrix, U2::AbstractMatrix)
+    return dist_un([U1], [U2])
+end
+
 "Geodesic distance between two arrays of unitaries"
 function dist_un(arrU1::Vector{<:AbstractMatrix}, arrU2::Vector{<:AbstractMatrix})
     distances_sq = []
-    for k in length(arrU1)
+    for k in 1:length(arrU1)
         U1, U2 = arrU1[k], arrU2[k]
         V = eigvals(fix_phase(U1)'fix_phase(U2))
-        dist_sq = sum(map(x->atan(imag(x),real(x))^2,V)) +eps()
+        dist_sq = sum(map(x->atan(imag(x),real(x))^2,V))
         push!(distances_sq, dist_sq)
     end
     return sqrt(sum(distances_sq)) 
 end
 
-function skew(X)
+function skew(X::AbstractMatrix)
     return (X - X')/2
 end
 
@@ -39,15 +43,21 @@ function project(arrU::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix})
     return arrU .* skew([U' for U in arrU] .* arrD)
 end
 
-function polar(M)
+function polar(M::AbstractMatrix)
     U, S, V = svd(M)
     P = V*diagm(S)*V'
     W = U*V'
     return P, W
 end
 
-function polar(arrM::Vector{<:AbstractMatrix})
-    arrU = [polar(M)[2] for M in arrM]
+function extractU(M::AbstractMatrix)
+    U, S, V = svd(M)
+    W = U*V'
+    return W
+end
+
+function extractU(arrM::Vector{<:AbstractMatrix})
+    arrU = [extractU(M) for M in arrM]
     return arrU
 end
 
@@ -56,15 +66,16 @@ end
 #X is the gradient obtained using projection.
 #return both the "retracted" unitary as well as the tangent vector at the retracted point
 # always stabilize unitarity and skewness, it could leave tangent space due to numerical errors
-function retract(arrU, arrX, t)
+function retract(arrU::Vector{<:AbstractMatrix}, arrX::Vector{<:AbstractMatrix}, t::AbstractFloat)
 
     # ensure unitarity of arrU
-    arrU_polar = polar(arrU)
+    arrU_unitary = extractU(arrU)
+
     #non_unitarity = norm(arrU - arrU_polar)/length(arrU)
     #if non_unitarity > 1e-10
     #    @show non_unitarity
     #end
-    arrU = arrU_polar
+    arrU = arrU_unitary
 
     arrUinv = [U' for U in arrU]
     arrX_id = arrUinv .* arrX
@@ -88,10 +99,10 @@ function retract(arrU, arrX, t)
     return arrU_new, arrX_new
 end
 
-function inner(arrU, arrX, arrY)
+function inner(arrU::Vector{<:AbstractMatrix}, arrX::Vector{<:AbstractMatrix}, arrY::Vector{<:AbstractMatrix})
     return real(tr(arrX'*arrY))
 end
-function inner(arrX, arrY)
+function inner(arrX::Vector{<:AbstractMatrix}, arrY::Vector{<:AbstractMatrix})
     return real(tr(arrX'*arrY))
 end
 
@@ -100,7 +111,7 @@ end
 with step length α, can be in place but the return value is used. 
 Transport also receives x′ = retract(x, η, α)[1] as final argument, 
 which has been computed before and can contain useful data that does not need to be recomputed"""
-function transport!(ξ, arrU, η, α, arrU_new)
+function transport!(ξ, arrU::Vector{<:AbstractMatrix}, η, α, arrU_new::Vector{<:AbstractMatrix})
     arrUinv = [U' for U in arrU]
     ξ = arrU_new .* arrUinv .* ξ
     return ξ

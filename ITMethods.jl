@@ -171,7 +171,7 @@ end
 
 
 "Apply depth-t brickwork of 2-local random unitaries"
-function brickwork(psi::itmps.MPS, t::Int; cutoff = 1E-15)
+function brickwork(psi::itmps.MPS, t::Integer; cutoff = 1E-15)
     N = length(psi)
     sites = it.siteinds(psi)
     d = sites[1].space
@@ -182,7 +182,7 @@ function brickwork(psi::itmps.MPS, t::Int; cutoff = 1E-15)
     return psi
 end
 
-function initialize_vac(N::Int, siteinds = nothing)
+function initialize_vac(N::Integer, siteinds = nothing)
     if isnothing(siteinds)
         siteinds = it.siteinds("Qubit", N)
     end
@@ -191,7 +191,7 @@ function initialize_vac(N::Int, siteinds = nothing)
     return vac
 end
 
-function initialize_ghz(N::Int)
+function initialize_ghz(N::Integer)
     ghz = initialize_vac(N)
     brick = CX * kron(H, Id)
     ghz = apply(brick, ghz, 1)
@@ -201,19 +201,66 @@ function initialize_ghz(N::Int)
     return ghz
 end
 
-function initialize_fdqc(N::Int, tau::Int; kargs...)
+function initialize_fdqc(N::Integer, tau::Integer; kargs...)
     fdqc = initialize_vac(N)
     fdqc = brickwork(fdqc, tau)
     return fdqc
 end
 
-function initialize_fdqc(N::Int, tau::Int, brick_odd::Matrix, brick_even::Matrix; kargs...)
+function initialize_fdqc(N::Integer, tau::Integer, brick_odd::Matrix, brick_even::Matrix; kargs...)
     fdqc = initialize_vac(N)
     fdqc = brickwork(fdqc, brick_odd, brick_even, tau)
     return fdqc
 end
 
-# function initialize_fdqc(N::Int, tau::Int, lightbounds, gate = nothing, d = 2)
+function initialize_ising(N::Integer, h::Real; nsweeps = 10)
+    sites = it.siteinds("Qubit",N)
+
+    os = it.OpSum()
+    for j=1:N-1
+      os += -1.,"Z",j,"Z",j+1
+      os += -h,"X",j
+    end
+    os += -h,"X",N
+    H = it.MPO(os,sites)
+
+    psi0 = it.random_mps(sites; linkdims=2)
+    maxdim = 200
+    cutoff = 1E-12
+
+    energy, psi = it.dmrg(H,psi0;nsweeps,maxdim,cutoff)
+
+    return energy, psi
+end
+
+function initialize_2Dheisenberg(Nx::Integer, Ny::Integer, Jx::Real, Jy::Real, Jz::Real; nsweeps = 10)
+
+    N = Nx*Ny
+    sites = it.siteinds("Qubit",N)
+
+    # Obtain an array of LatticeBond structs
+    # which define nearest-neighbor site pairs
+    # on the 2D square lattice
+    lattice = it.square_lattice(Nx, Ny)
+
+    os = it.OpSum()
+    for b in lattice
+        os += -Jz, "Z", b.s1, "Z", b.s2
+        os += -Jx, "X", b.s1, "X", b.s2
+        os += -Jy, "Y", b.s1, "Y", b.s2
+    end
+    H = it.MPO(os,sites)
+
+    psi0 = it.random_mps(sites; linkdims=2)
+    maxdim = [64]
+    cutoff = [1E-15]
+
+    energy, psi = it.dmrg(H,psi0;nsweeps,maxdim,cutoff)
+
+    return energy, psi
+end
+
+# function initialize_fdqc(N::Integer, tau::Integer, lightbounds, gate = nothing, d = 2)
 #     mps = initialize_vac(N)
 #     siteinds = it.siteinds(mps)
 #     lc = newLightcone(siteinds, tau, U_array = U_array, lightbounds = lightbounds)
@@ -224,7 +271,7 @@ end
 # end
 
 "Returns mps of Haar random isometries with bond dimension D"
-function randMPS(sites::Vector{<:it.Index}, D::Int)
+function randMPS(sites::Vector{<:it.Index}, D::Integer)
     N = length(sites)
     d = sites[1].space
 
@@ -255,7 +302,7 @@ function randMPS(sites::Vector{<:it.Index}, D::Int)
 end
 
 "Returns N-qubit random MPS with bond dimension D"
-function randMPS(N::Int, D::Int)
+function randMPS(N::Integer, D::Integer)
     return randMPS(it.siteinds("Qubit", N), D)
 end
 
@@ -296,7 +343,7 @@ end
 
 ### CUSTOM MPO METHODS ###
 "Convert unitary to MPO via repeated SVD"
-function unitary_to_mpo(U::Union{Matrix, Vector{Float64}}; d = 2, siteinds = nothing, skip_qudits = 0, orthogonalize = true)
+function unitary_to_mpo(U::Union{Matrix, Vector{AbstractFloat}}; d = 2, siteinds = nothing, skip_qudits = 0, orthogonalize = true)
     D = size(U, 1)
     N = length(digits(D-1, base=d))     # N = logd(D)
 
@@ -369,7 +416,7 @@ end
 ### RG METHODS ###
 
 "Performs blocking on an MPS, q sites at a time. Returns the blocked MPS as an array of it, together with the siteinds."
-function blocking(mps::Union{Vector{it.ITensor},itmps.MPS}, q::Int)
+function blocking(mps::Union{Vector{it.ITensor},itmps.MPS}, q::Integer)
     N = length(mps)
     newN = div(N, q)
     r = mod(N, q)

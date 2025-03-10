@@ -2,7 +2,7 @@ import Distributed
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{Matrix}} = nothing)
+function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
@@ -28,7 +28,7 @@ function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau
         newfid = real(tr(Array(S, (u, v))))/normalization
         gate_ji_opt = U * it.replaceind(Vdag, v, u)
         lightcone = newLightcone(siteinds, 1; lightbounds = (false, false))
-        lightcone.circuit[1][1] = it.replaceprime(gate_ji_opt, tau => 1)
+        lightcone.circuit[1] = it.replaceprime(gate_ji_opt, tau => 1)
 
         println("Matrix is 2-local, converged to fidelity $newfid immediately")
         return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", 1)])
@@ -55,8 +55,7 @@ function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau
     for k in (N-1):-1:3
         # extract right gates associated with site k
         gates_k = lightcone.gates_by_site[k]
-        coords_right = [gate["coords"] for gate in gates_k if gate["orientation"]=="R"]
-        right_gates_k = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_right]
+        right_gates_k = [lightcone.circuit[gate["pos"]] for gate in gates_k if gate["orientation"]=="R"]
         all_blocks = [right_gates_k; mpo[k]]
 
         # if k even contract in descending order, else ascending
@@ -79,12 +78,11 @@ function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau
 
         # extract all gates touching site j
         gates_j = lightcone.gates_by_site[j]
-        coords_j = [gate["coords"] for gate in gates_j]
-        tensors_j = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_j]
+        tensors_j = [lightcone.circuit[gate["pos"]] for gate in gates_j]
 
         # optimize each gate
         for i in 1:tau
-            gate_ji = gates_j[i]    # extract gate j
+            gate_ji = gates_j[i]    # extract gate ji
             
             left_tensors = []
             right_tensors = []
@@ -128,7 +126,7 @@ function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau
             #replace gate_ji with optimized one, both in gates_j (used in this loop) and in circuit
             gate_ji_opt = U * it.replaceind(Vdag, v, u)
             tensors_j[i] = gate_ji_opt
-            lightcone.circuit[i][div(j,2) + mod(i,2)*mod(j,2)] = gate_ji_opt
+            lightcone.circuit[gate_ji["pos"]] = gate_ji_opt
         end
 
         # while loop end conditions
@@ -219,10 +217,8 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization
     for k in N:-1:3
         # extract left gates associated with site k
         gates_k = lightcone.gates_by_site[k]
-        coords_left = [gate["coords"] for gate in gates_k if gate["orientation"]=="L"]
-        tensors_left = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_left]
+        tensors_left = [lightcone.circuit[gate["pos"]] for gate in gates_k if gate["orientation"]=="L"]
 
-        #right_gates_k = [lightcone.circuit[i][div(k,2)+mod(k,2)] for i in (2-mod(k,2)):2:tau]
         all_blocks = (k==N ? tensors_left : [tensors_left; mpo[k]])
         for block in all_blocks
             rightmost_block *= block
@@ -232,13 +228,12 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization
     reverse!(R_blocks)
 
     # start the sweep
-    grad = [Array{ComplexF64}(undef, 0, 0) for _ in 1:length(lightcone.coords)]
+    grad = [Array{ComplexF64}(undef, 0, 0) for _ in 1:lightcone.n_unitaries]
 
     for j in 2:N
         # extract all gates on the left of site j
         gates_j = lightcone.gates_by_site[j]
-        coords_left = [gate["coords"] for gate in gates_j if gate["orientation"]=="L"]
-        tensors_left = [lightcone.circuit[pos[1]][pos[2]] for pos in coords_left]
+        tensors_left = [lightcone.circuit[gate["pos"]] for gate in gates_j if gate["orientation"]=="L"]
 
         # evaluate gradient by removing each gate
         for l in 1:length(tensors_left)
@@ -253,10 +248,10 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization
             env = (j<N ? env_left*rightmost_block : env_left)
 
             gate_jl = filter(gate -> gate["orientation"] == "L", gates_j)[l]
-            gate_jl_inds, gate_jl_num = gate_jl["inds"], gate_jl["number"]
+            gate_jl_inds, gate_jl_pos = gate_jl["inds"], gate_jl["pos"]
             ddUjl = Array(env, gate_jl_inds)
             ddUjl = conj(reshape(ddUjl, (d^2, d^2)))
-            grad[gate_jl_num] = ddUjl
+            grad[gate_jl_pos] = ddUjl
         end
 
         # update leftmost_block for next j and add it to L_blocks list
@@ -291,7 +286,7 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization
 end
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it"
-function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array::Union{Nothing, Vector{Matrix}} = nothing)
+function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
@@ -317,7 +312,7 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
         newfid = real(tr(Array(S, (u, v))))/normalization
         gate_ji_opt = U * it.replaceind(Vdag, v, u)
         lightcone = newLightcone(siteinds, 1; lightbounds = (false, false))
-        lightcone.circuit[1][1] = it.replaceprime(gate_ji_opt, tau => 1)
+        lightcone.circuit[1] = it.replaceprime(gate_ji_opt, tau => 1)
 
         println("Matrix is 2-local, converged to fidelity $newfid immediately")
         return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", 1)])
@@ -329,7 +324,7 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
 
 
     # setup optimization stuff
-    arrU0 = Array(lightcone)
+    arrU0 = Array(lightcone)    # ALWAYS NEEDED, since if the init_array has lower number of unitaries the lightcone fills it with identities
     fg = arrU -> _fgGlobalSweep(arrU, lightcone, mpo; normalization = normalization)
 
     # Quasi-Newton method
@@ -338,7 +333,7 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
 
     # optimize and store results
     # note that arrUmin is already stored in current lightcone, ready to be applied to mps
-    arrUmin, neg_overlap, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport =true , inner = inner);
+    arrUmin, neg_overlap, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport = true, inner = inner);
     updateLightcone!(lightcone, arrUmin)
 
     return Dict([("lightcone", lightcone), ("overlap", -neg_overlap), ("gradmin", gradmin), ("niter", numfg), ("history", normgradhistory)])
@@ -347,7 +342,7 @@ end
 
 
 "Calls invertSweepLC for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
-function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}, invertMethod; tau = 0, nruns = 1, overlap = 1, eps = 1E-6, start_tau = 1, return_all = false, kargs...)
+function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}, invertMethod; tau = 0, eps = 1e-12, nruns = 1, overlap = 1, start_tau = 1, return_all = false, kargs...)
     obj = typeof(mpo)
     print("Attempting inversion of $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\n")
 
@@ -362,12 +357,13 @@ function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds
     end
 
     found = false
+    best_guess = nothing
     while !found
         println("Attempting depth $tau...")
         # choose multiprocessing method
         results_array::Vector{Dict{String, Any}} = [Dict([("ready", 0)]) for _ in 1:nruns]
         Threads.@threads for i in 1:nruns
-            res = invertMethod(mpo, tau, input_inds, output_inds; kargs...)
+            res = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, kargs...)
             results_array[i] = res
         end
 
@@ -387,9 +383,6 @@ function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds
                 results_array[i]["tau"] = tau
             end
             resdict = results_array[err_min_pos]
-            if return_all
-                resdict = Dict([("Best", results_array[err_min_pos]), ("All", results_array)])
-            end
 
             if err_min < eps
                 println("Found inversion circuit up to required error with depth $tau\n")
@@ -398,7 +391,7 @@ function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds
             end
             return resdict
         end
-        
+        best_guess = Array(results_array[err_min_pos]["lightcone"])
         tau += 1
     end
 end
@@ -806,187 +799,128 @@ function invertSweep(V::it.ITensor, input_ind::it.Index; tau = 0, kargs...)
 end
 
 
-"Cost function and gradient for invertGlobal optimization"
-function _fgGlobal(U_array::Vector{<:Matrix}, lightcone, mpo, mpo_low)
-    mpo = deepcopy(mpo)
-    mpo_low = deepcopy(mpo_low)
+
+function _fg_disentangle(U_array::Vector{<:Matrix}, lightcone, reduced_mps, counter)
     updateLightcone!(lightcone, U_array)
-    len = length(lightcone.coords)
-
-    # compute gradient by removing one unitary at a time and applying
-    # all unitaries that come before to the virtual mpo_low
-    # all unitaries that come after to the original mpo
-    # the shift to the next unitary is made by applying U_k Udag_k+1
-    grad::Vector{Matrix} = []
-    for k in len:-1:2   # contract up to first unitary
-        contract!(mpo, lightcone, k)
-    end
-
-    # evaluate gradient by sweeping over snake of unitaries
     d = lightcone.d
-    for k in 1:len
-        _, inds_k = lightcone.coords[k]
-        ddUk = contract(mpo, mpo_low)
-        ddUk = Array(ddUk, inds_k)
-        ddUk = conj(reshape(ddUk, (d^2, d^2)))
-        push!(grad, ddUk)
-        if k < len
-            contract!(mpo_low, lightcone, k)
-            contract!(mpo, lightcone, k+1; dagger=true)
-        end
-    end
-    # compute total overlap (which is a complex number)
-    contract!(mpo_low, lightcone, len)
-    overlap = Array(contract(mpo, mpo_low))[1]
-    # we use the real part of the overlap as a cost function (gradient can be computed analytically)
-    abs_ov = real(overlap)
+    N = length(reduced_mps)
+    siteinds = it.siteinds(reduced_mps)
 
-    # correct gradient to account for a smooth cost function (the overlap squared)
-    # WE DON'T: SIMPLY USE THE REAL PART AND IT WON'T BE NEEDED
-    #grad *= overlap/abs_ov
-    riem_grad = project(U_array, grad)
-
-    # put a - sign so that it minimizes
-    cost = -abs_ov
-    riem_grad = -riem_grad
-
-    return cost, riem_grad
-end
-
-# NEW VERSION USING OPT TECH
-"Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
-If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertGlobal(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 1000, gradtol = 1E-8)
-    mpo = deepcopy(mpo[1:end])
-    N = length(mpo)
-    siteinds = input_inds
-
-    # create random brickwork circuit
-    # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    lightcone = newLightcone(siteinds, tau; lightbounds = lightbounds)
-
-    if N == 2   #solution is immediate via SVD
-        env = conj(mpo[1]*mpo[2])
-
-        inds = siteinds
-        U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
-        u, v = it.commonind(U, S), it.commonind(Vdag, S)
-
-        # evaluate fidelity
-        newfid = real(tr(Array(S, (u, v))))
-        gate_ji_opt = U * it.replaceind(Vdag, v, u)
-        lightcone.circuit[1][1] = gate_ji_opt
-
-        println("Matrix is 2-local, converged to fidelity $newfid immediately")
-        return lightcone, -newfid, nothing
-    end
-
-    # we create a virtual lower mpo to temporarily contract left snakes with
-    # it will just be an array of deltas that will be contracted at the end with the 
-    # upper mpo (which is the original mpo) and the left snakes
-    dim = output_inds[1].space
-    new_outinds = it.siteinds(dim, N)
-    mpo_low::Vector{it.ITensor} = []
-    for i in 1:N
-        it.replaceind!(mpo[i], output_inds[i], new_outinds[i])
-        push!(mpo_low, it.delta(new_outinds[i], it.prime(siteinds[i], tau)))
-    end
-
-    # setup optimization stuff
-    arrU0 = Array(lightcone)
-    fg = arrU -> _fgGlobal(arrU, lightcone, mpo, mpo_low)
-
-    # Quasi-Newton method
-    m = 5
-    algorithm = LBFGS(m;maxiter = maxiter, gradtol = gradtol, verbosity = 1)
-
-    # optimize and store results
-    # note that arrUmin is already stored in current lightcone, ready to be applied to mps
-    arrUmin, neg_overlap, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport =true , inner = inner);
-    updateLightcone!(lightcone, arrUmin)
-
-    return lightcone, neg_overlap, gradmin, numfg, normgradhistory
-
-end
-
-
-"Calls invertBW for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
-function invertGlobal(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; overlap = 1, eps = 1E-6, start_tau = 2, kargs...)
-    obj = typeof(mpo)
-    println("Attempting inversion of $obj to overlap value = $overlap up to error $eps, starting from depth $start_tau")
-    tau = start_tau
-    found = false
-
-    while !found
-        println("Attempting depth $tau...")
-        lc, neg_overlap, rest... = invertGlobal(mpo, tau, input_inds, output_inds; kargs...)
-        err = abs(overlap + neg_overlap)
-        if err < eps
-            found = true
-            println("Convergence within desired error achieved with depth $tau\n")
-            return tau, lc, err, rest...
-        end
+    grad_j = [Array{ComplexF64}(undef, 0, 0) for _ in 1:lightcone.n_unitaries]
+    purity_k = [0.0 for _ in 1:N-1]
+    purity_j = [0.0 for _ in 1:lightcone.n_unitaries] #needed for gradient, less elements than pur_k
+    
+    oddstep = (lightcone.siteinds[1] == it.noprime(siteinds[1]))
+    for k in (isodd(counter[]) ? (N-1:-1:1) : (1:N-1))
+        it.orthogonalize!(reduced_mps, k)
+        twoblocks = reduced_mps[k:k+1]
+        block = twoblocks[1]*twoblocks[2]
         
-        if tau > 25
-            println("Attempt stopped at tau = $tau, ITensor cannot go above")
-            return tau, lc, err, rest...
+        tensor = block
+        indsL = it.uniqueinds(twoblocks[1], twoblocks[2])
+        indsR = it.uniqueinds(twoblocks[2], twoblocks[1])
+
+        theres_a_gate = (oddstep && isodd(k)) || (!oddstep && iseven(k))    # condition for which there's a unitary between site k and k+1
+        if theres_a_gate
+            j = (!oddstep && iseven(N)) ? k-1 : k   #need a map between the sites of reduced_mps and the lightcone, which is N-to-(N-2) if N even and step even
+            gate = lightcone.gates_by_site[j][1]
+            tensor_gate = lightcone.circuit[gate["pos"]]
+            tensor *= tensor_gate
+            upinds = gate["inds"][1:2]
+            indsL = it.replaceinds(indsL, upinds', upinds)
+            indsR = it.replaceinds(indsR, upinds', upinds)
         end
 
-        tau += 1
+        combL = it.combiner(indsL)
+        combR = it.combiner(indsR)
+        tensor2 = conj(combL*tensor)
+        tensor3 = combL*tensor*combR
+        tensor4 = conj(tensor*combR)
+        ddUk = block*tensor2*tensor3*tensor4
+
+        if theres_a_gate
+            ddUk_mat = 4*Array(ddUk, gate["inds"])
+            ddUk_mat = conj(reshape(ddUk_mat, (d^2, d^2)))
+            grad_j[gate["pos"]] = ddUk_mat
+            ddUk *= tensor_gate
+        end
+
+        purity = real(Array(ddUk)[1])
+        if theres_a_gate
+            purity_j[gate["pos"]] = purity
+        end
+        purity_k[k] = purity
     end
+
+    cost = -(sum(log.(purity_k)))
+    grad = -(grad_j ./ purity_j)
+
+    riem_grad = project(U_array, grad)
+    counter[] = counter[]+1
+    return cost, riem_grad
+
 end
 
 
-"Wrapper for ITensorsMPS.MPS input. Before calling invertGlobal, it conjugates mps (mps to invert must be above)
-and prepares a layer of zero bras to construct the mpo |0><psi|. Then calls invertGlobal with overlap 1 and error eps"
-function invertGlobal(mps::itmps.MPS; tau = 0, kargs...)
-    N = length(mps)
-    mps = conj(mps)
-    siteinds = it.siteinds(mps)
-    outinds = siteinds'
-
-    for i in 1:N
-        ind = siteinds[i]
-        vec = [1; [0 for _ in 1:ind.space-1]]
-        mps[i] *= it.ITensor(vec, ind')
+function disentangle!(mps::itmps.MPS, maxtau = 10; maxiter = 10000, gradtol = 1e-8, support_list = nothing)
+    if isnothing(support_list)
+        support_list = [(1, length(mps))]    # region of the mps we want to act on with the brickwork (in this case set to all)
     end
+    lc_list::Vector{Lightcone} = []
+    costs = []
+    
+    for support in support_list
+        cost_i = []
+        lcs::Vector{Lightcone} = []
+        local red_siteinds
+        for i in 1:maxtau
+            it.truncate!(mps, cutoff = 1e-16)
+            it.orthogonalize!(mps, support[end]-1)
+            reduced_mps = itmps.MPS(mps[support[1]:support[end]])
 
+            N = length(reduced_mps)
+            reduced_mps.llim = N-2
+            reduced_mps.rlim = N
+            red_siteinds = it.siteinds(reduced_mps)
 
-    if iszero(tau)
-        tau, lc, err, rest... = invertGlobal(mps, siteinds, outinds; overlap=1, kargs...)
-        return tau, lc, err, rest...
-    else
-        lc, neg_overlap, rest... = invertGlobal(mps, tau, siteinds, outinds; kargs...)
-        return lc, abs(1+neg_overlap), rest...
-    end
+            lc_support = (isodd(i) ? 1 : 2, iseven(i+N) ? N-1 : N)     # region the lightcone acts on - will be equal to support only if support is even and i is even, else it will be less
 
-end
+            lc_sites = red_siteinds[lc_support[1]:lc_support[end]]
+            lightcone = newLightcone(lc_sites, 1; lightbounds = (false, false))
+            
+            for j in 1:N
+                it.replaceind!(reduced_mps[j], red_siteinds[j], red_siteinds[j]')
+            end
 
+            # setup optimization stuff
+            arrU0 = Array(lightcone)
+            counter = Ref(1)
+            fg = arrU -> _fg_disentangle(arrU, lightcone, reduced_mps, counter)
 
-"Wrapper for ITensorsMPS.MPO input. Calls invertGlobal by first conjugating and extracting upper and lower indices"
-function invertGlobal(mpo::itmps.MPO; tau = 0, kargs...)
-    N = length(mpo)
-    mpo = conj(mpo)
-    allinds = reduce(vcat, it.siteinds(mpo))
-    # determine primelevel of inputinds, which will be the lowest found in allinds
-    first2inds = allinds[1:2]   
-    plev_in = 0
-    while true
-        ind = it.inds(first2inds, plev = plev_in)
-        if length(ind) > 0
-            break
+            # Quasi-Newton method
+            m = 5
+            algorithm = LBFGS(m;maxiter = maxiter, gradtol = gradtol, verbosity = 1)
+
+            # optimize and store results
+            # note that arrUmin is already stored in current lightcone, ready to be applied to mps
+            arrUmin, cost, gradmin, numfg, normgradhistory = optimize(fg, arrU0, algorithm; retract = retract, transport! = transport!, isometrictransport = true , inner = inner);
+            updateLightcone!(lightcone, arrUmin)
+
+            apply!(mps, lightcone)
+            push!(cost_i, abs(cost))
+            push!(lcs, lightcone)
+
+            if -1e-15 < cost < 1e-15
+                break
+            end
         end
-        plev_in += 1
+        layers = [Array(lc) for lc in lcs]
+        layers = [isodd(i) ? layers[i] : reverse(layers[i]) for i in 1:length(layers)]
+        lc_tot = newLightcone(red_siteinds, length(layers))
+        push!(lc_list, lc_tot)
+        push!(costs, cost_i)
     end
-    siteinds = it.inds(allinds, plev = plev_in)
-    outinds = it.uniqueinds(allinds, siteinds)
 
-    if iszero(tau)
-        tau, lc, err, rest... = invertGlobal(mpo, siteinds, outinds; overlap = 2^N, kargs...)
-        return tau, lc, err, rest...
-    else
-        lc, neg_overlap, rest... = invertGlobal(mpo, tau, siteinds, outinds; kargs...)
-        return lc, abs(2^N+neg_overlap), rest...
-    end
+    return Dict([("lc_list", lc_list), ("costs", costs)])
 
 end
