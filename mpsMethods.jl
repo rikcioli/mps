@@ -774,8 +774,12 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, k
 
     local mps_trunc, boundaries, rangesA, V_list, err_list, lc_list, err1
     tau = start_tau
+
+    lc_list_old = Array{Lightcone, 1}()
+    local ltg_map_old
     while true
         mps_copy = deepcopy(mps)
+        use_previous = (tau > 2 && !isempty(lc_list_old)) #use knowledge of previous inversions for initial start 
 
         # for a given tau, we already know that both the sizeAB and the spacing have to be chosen
         # so that the final state is a tensor product of pure states
@@ -785,6 +789,35 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, k
             sizeAB = 2
             spacing = 2
         end
+
+        # divide lattice into regions of spacing and sizeAB
+        regions = []
+        remaining = N
+        current_type = 'A'
+        a_count = 0
+        b_count = 0
+        while remaining > 0
+            if current_type == 'A'
+                a_count += 1
+                size = min(spacing, remaining)
+                push!(regions, ('A', a_count, size))
+            else
+                b_count += 1
+                size = min(sizeAB, remaining)
+                push!(regions, ('B', b_count, size))
+            end
+            remaining -= size
+            current_type = current_type == 'A' ? 'B' : 'A'
+        end
+
+        ltg_map = []
+        for region in regions
+            reg_type, k, size = region
+            for l in 1:size
+                push!(ltg_map, (reg_type, k, l))
+            end
+        end
+
         println("Attempting inversion of reduced density matrices with depth tau = $tau, imposing sizeAB = $sizeAB and spacing = $spacing for factorization")
 
         @assert tau > 0
@@ -816,13 +849,35 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, k
 
         println("Inverting reduced density matrices...")
         # all variables defined inside each thread have a _
-        Threads.@threads for l in 1:length(rangesAB)
+        Threads.@threads for l in eachindex(rangesAB)
             (_first_site, _last_site) = rangesAB[l]
             _reduced_mps = reduced_mps_list[l]
             _k_sites = k_sites_list[l]
             
             _lightbounds = (true, _last_site==N ? false : true)   # first region will always be left for step 2, last region could end up in step 1
-            _lightcone = newLightcone(_k_sites, tau; lightbounds = _lightbounds)
+            _lightcone = newLightcone(_k_sites, tau; lightbounds = _lightbounds, U_array = use_previous ? Matrix[] : nothing)
+
+            if use_previous #use knowledge of previous inversions for initial start 
+                for j in _first_site:_last_site
+                    _local_new = ltg_map[j]
+                    _local_old = ltg_map_old[j]
+                    if _local_old[1] == 'B'  # if it was in one of the previous step's lightcones
+                        # extract gates to reuse from old lightcone
+                        _lc = lc_list_old[_local_old[2]]  # which lightcone
+                        _gates_old = [gate for gate in _lc.gates_by_site[_local_old[3]] if gate["orientation"] == "R"] # gates touching that site, only those on the right
+                        _unitaries_old = [Matrix(_lc, gate["pos"]) for gate in _gates_old]
+
+                        _gates_new = [gate for gate in _lightcone.gates_by_site[_local_new[3]] if gate["orientation"] == "R"]
+                        _gates_newpos = [gate["pos"] for gate in _gates_new]
+
+                        for m in 1:min(length(_gates_old), length(_gates_new))
+                            _U = _unitaries_old[m]
+                            updateLightcone!(_lightcone, _U, _gates_newpos[m])
+                        end
+                    end
+                end
+            end
+
             _rangeA_rel = _lightcone.range[end]       # region which will be inverted to 0, relative to first site of lightcone
             _rangeA_abs = (_rangeA_rel[1]+_first_site-1, _last_site==N ? N : _rangeA_rel[2]+_first_site-1)      # same region relative to total mps sites
             rangesA[l] = _rangeA_abs
@@ -839,6 +894,7 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, k
             lc_list[l] = _lightcone
             err_list[l] = 1+_neg_overlap
         end
+
         
         # now that we inverted we apply the circuits, truncate and apply back to compute err1
         apply!(mps_copy, lc_list)
@@ -868,51 +924,65 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, k
         else
             println("Inversion and truncation to required error failed with initial depth tau = $tau, increasing inversion depth")
             tau += 1
+            lc_list_old = lc_list
+            ltg_map_old = ltg_map
         end
     end
 
     println("Inversion and truncation reached within requested eps_trunc, inverting local states with local error eps2/N_regions^2 = $(eps2/length(rangesA)^2)")
+    
+    # Now we proceed with inversion of all pure states
     epsinv2 = eps2/length(rangesA)^2
     trunc_siteinds = it.siteinds(mps_trunc)
     trunc_linkinds = it.linkinds(mps_trunc)
-
+    ranges = []
+    for l in 1:length(boundaries)-1
+        push!(ranges, (boundaries[l]+1, boundaries[l+1]))
+    end
+    @show ranges
+    
+    # prepare list of MPS to invert
+    reduced_mps_list = []
+    for l in eachindex(ranges)
+        range = ranges[l]
+        # extract reduced mps and remove external linkind (which will be 1-dim)
+        reduced_mps = mps_trunc[range[1]:range[2]]
+        
+        if range[1]>1
+            comb1 = it.combiner(trunc_linkinds[range[1]-1], trunc_siteinds[range[1]])
+            reduced_mps[1] *= comb1
+            cind = it.combinedind(comb1)
+            it.replaceind!(reduced_mps[1], cind, trunc_siteinds[range[1]])
+        end
+        if range[end]<N
+            comb2 = it.combiner(trunc_linkinds[range[2]], trunc_siteinds[range[2]])
+            reduced_mps[end] *= comb2
+            cind = it.combinedind(comb2)
+            it.replaceind!(reduced_mps[end], cind, trunc_siteinds[range[2]])
+        end
+        
+        reduced_mps = itmps.MPS(reduced_mps)
+        push!(reduced_mps_list, reduced_mps)
+    end
+    
     local lc_list2, tau_list2, err_list2, mps_final, err2, err_total
-    for attempt in 1:10
-        lc_list2::Vector{Lightcone} = []
-        tau_list2 = []
-        err_list2 = []
+    for attempt in 1:5
+        lc_list2 = Array{Lightcone, 1}(undef, length(ranges))
+        tau_list2 = Array{Integer, 1}(undef, length(ranges))
+        err_list2 = Array{Float64, 1}(undef, length(ranges))
 
-        ranges = []
-        for l in 1:length(boundaries)-1
-            push!(ranges, (boundaries[l]+1, boundaries[l+1]))
-        end
-        @show ranges
-
-        for range in ranges
-            # extract reduced mps and remove external linkind (which will be 1-dim)
-            reduced_mps = mps_trunc[range[1]:range[2]]
-            
-            if range[1]>1
-                comb1 = it.combiner(trunc_linkinds[range[1]-1], trunc_siteinds[range[1]])
-                reduced_mps[1] *= comb1
-                cind = it.combinedind(comb1)
-                it.replaceind!(reduced_mps[1], cind, trunc_siteinds[range[1]])
+        for l in eachindex(ranges)
+            _range = ranges[l]
+            _reduced_mps = reduced_mps_list[l]
+            start_tau2 = (_range in rangesA ? 1 : 2)
+            if iseven(_range[2]-_range[1])
+                start_tau2 = 2
             end
-            if range[end]<N
-                comb2 = it.combiner(trunc_linkinds[range[2]], trunc_siteinds[range[2]])
-                reduced_mps[end] *= comb2
-                cind = it.combinedind(comb2)
-                it.replaceind!(reduced_mps[end], cind, trunc_siteinds[range[2]])
-            end
-
-            reduced_mps = itmps.MPS(reduced_mps)
-            
-            results2 = invert(reduced_mps, invertMethod; start_tau = (range in rangesA ? 1 : 2), eps = epsinv2, kargs_inv...)
-            push!(lc_list2, results2["lightcone"])
-            push!(tau_list2, results2["tau"])
-            push!(err_list2, results2["err"])
+            results2 = invert(_reduced_mps, invertMethod; start_tau = start_tau2, eps = epsinv2, kargs_inv...)
+            lc_list2[l] = results2["lightcone"]
+            tau_list2[l] = results2["tau"]
+            err_list2[l] = results2["err"]
         end
-
 
         # finally create a 0 state and apply all the V to recreate the original state for final total error
         mps_final = initialize_vac(N, trunc_siteinds)

@@ -210,20 +210,67 @@ end
 
 #mps, reslist, entropy_mps, entropy_tau = test2(8,2)
 #true_ent, reconstr_entr, reconstr_errors = test3(10, 10, 4)
-test4(10:10:50, 8, 5)
+test4(100:100, 2, 5)
 
-#######plt = Plots.plot(title = L"D = 2", ylabel = L"\epsilon", xlabel = L"\tau")
-#######
-#######for N in 4:2:14
-#######    data = DataFrame(CSV.File("D:\\Julia\\MyProject\\Data\\$(N)Q_2D_randMPS_test3.csv"))
-#######    errs = data.Errors
-#######    @show errs
-#######    Plots.plot!(plt, 1:length(errs), errs, marker = (:circle,5), primary=true, label="N = $N")
-#######end
-#######
-#######plt
-#######Plots.plot!(plt, yscale=:log)
-#######Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\randMPS_exact_inv.pdf")
+#####plt = Plots.plot(title = L"\mathrm{Ising}\ h=2", ylabel = L"\tau", xlabel = L"N")
+#####eps_list = [0.1, 0.05, 0.025]
+#####
+#####Nlist = [10, 20, 50, 100, 200, 500, 1000]
+#####tau_N_err_array = []
+#####
+#####for N in Nlist
+#####    data = DataFrame(CSV.File("D:\\Julia\\MyProject\\Data\\isingLiu\\$(N)Q_EpsVsTau.csv"))
+#####    depths = data.tau_Liu
+#####    push!(tau_N_err_array, depths)
+#####end
+#####
+#####tau_err_N_arr = [getindex.(tau_N_err_array,i) for i=1:length(tau_N_err_array[1])]
+#####for i in eachindex(eps_list)
+#####    Plots.plot!(plt, Nlist, tau_err_N_arr[i], marker = (:circle,5), primary=true, label=L"\epsilon = "*"$(eps_list[i])")
+#####end
+#####plt
+#####Plots.plot!(plt, xscale=:log)
+#####Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\isingLiu\\tauVsN.pdf")
+#####
+#####
+#####for eps in eps_list
+#####    depths = []
+#####    for N in 10:10:50
+#####        data = DataFrame(CSV.File("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)Q_8D_.csv"))
+#####        errs = data.Errors
+#####        i = 1
+#####        local found = false
+#####        while !found
+#####            if errs[i] < eps
+#####                @show errs[i]
+#####                push!(depths, i)
+#####                found = true
+#####            else
+#####                i+=1
+#####            end
+#####        end
+#####    end
+#####    Plots.plot!(plt, 10:10:50, depths, marker = (:circle,5), primary=true, label=L"\epsilon = "*"$eps")
+#####end
+#####
+#####plt
+#####Plots.plot!(plt, yscale=:log)
+#####Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\randMPS\\D8_tauVsN.pdf")
+
+D = 3
+plt = Plots.plot(title = L"\mathrm{Depth} \ 3 \ \mathrm{FDQC}", ylabel = L"\epsilon", xlabel = L"\tau", legend=:bottomleft)
+for N in 10:10:50
+    data = DataFrame(CSV.File("D:\\Julia\\MyProject\\Data\\FDQC\\$(N)Q_$(D)D_.csv"))
+    errs = data.Errors
+    #if N == 10
+    #    Plots.plot!(plt, 1:length(errs)-1, errs[1:end-1], marker = (:circle,5), primary=true, label=L"N = "*"$N")
+    #else
+    Plots.plot!(plt, 1:length(errs), errs, marker = (:circle,5), primary=true, label=L"N = "*"$N")
+    #end
+end
+plt
+Plots.plot!(plt, yscale=:log)
+Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\FDQC\\D$(D)log.pdf")
 
 
 #hist = @df data histogram(cols(1:4); layout=4, bins = 100)

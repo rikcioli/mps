@@ -150,6 +150,13 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array::Union{Nothin
     return Lightcone(circuit, inds_arr, d, sizeAB, depth, n_unitaries, lightbounds, siteinds, range, gates_by_site, gates_by_layer, sites_by_gate)
 end
 
+"Update k-th unitary of lightcone in-place"
+function updateLightcone!(lightcone::Lightcone, U::AbstractMatrix, k::Integer)
+    inds = lightcone.inds_arr[k]
+    U_tensor = it.ITensor(U, inds)
+    lightcone.circuit[k] = U_tensor
+end
+
 "Update Lightcone in-place"
 function updateLightcone!(lightcone::Lightcone, U_array::Vector{<:Matrix})
     n_unitaries = length(U_array)
@@ -163,6 +170,13 @@ function updateLightcone!(lightcone::Lightcone, U_array::Vector{<:Matrix})
         U_tensor = it.ITensor(U, inds)
         lightcone.circuit[k] = U_tensor
     end
+end
+
+"Extract d by d Matrix corresponding to position k"
+function Base.Matrix(lightcone::Lightcone, k::Integer)
+    d = lightcone.d
+    U = reshape(Array(lightcone.circuit[k], lightcone.inds_arr[k]), (d^2,d^2))
+    return U
 end
 
 "Flatten Lightcone to 1D array, from bottom to top"

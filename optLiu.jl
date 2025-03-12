@@ -178,8 +178,8 @@ end
 #####Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\disentanglerD2chi_first2.pdf")
 
 function execute()
-    energy, psi = mt.initialize_ising(20, 1.5)
-    #psi = it.random_mps(it.siteinds(2, 50), linkdims = 2)
+    energy, psi = mt.initialize_ising(50, 1000)
+    #psi = it.random_mps(it.siteinds(2, 20), linkdims = 2)
     results = mt.invertMPSLiu(psi, mt.invertGlobalSweep, eps = 1e-3)
     #results = mt.invert(psi, mt.invertGlobalSweep, eps = 1e-3)
     return psi, results

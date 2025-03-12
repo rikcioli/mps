@@ -35,7 +35,7 @@ function execute(command, N, eps_array; D = 2, tau = 3)
     #    push!(err_malz, err_total)
     #end
 
-    mt.disentangle!(test, 3)
+    #mt.disentangle!(test, 3)
 
     start_tau = 1
     for eps in eps_array
@@ -50,16 +50,8 @@ function execute(command, N, eps_array; D = 2, tau = 3)
         end
 
         factor = 1
-        local results, err_total
-        for _ in 1:10
-            results = mt.invertMPSLiu(test, mt.invertGlobalSweep; start_tau = start_tau, eps = eps/factor, kargs_inv = (nruns = 10,))
-            err_total = results["err_total"]
-            if err_total < eps
-                break
-            else
-                factor*=2
-            end
-        end
+        results = mt.invertMPSLiu(test, mt.invertGlobalSweep; start_tau = start_tau, eps = eps, kargs_inv = (nruns = 8,))
+        err_total = results["err_total"]
         tau_total = maximum(results["tau2"]) + results["tau1"]
         push!(tau_liu, tau_total)
         push!(err_liu, err_total)
@@ -81,6 +73,47 @@ function execute(command, N, eps_array; D = 2, tau = 3)
 
     return data
 end
+
+function testLiu(psi, eps)
+    results = mt.invertMPSLiu(psi, mt.invertGlobalSweep, eps = eps)
+    err_total = results["err_total"]
+    tau_total = maximum(results["tau2"]) + results["tau1"]
+    return err_total, tau_total
+end
+
+function liu_tau_vs_N(Nrange, eps_array)
+    for N in Nrange
+        @show N
+        #energy, psi = mt.initialize_ising(N, 2)
+        psi = it.random_mps(it.siteinds("Qubit", N), linkdims = 2)
+        tau_liu = []
+        err_liu = []
+
+        for eps in eps_array
+            println("\nAssuming error threshold eps = $eps\n")
+    
+            if !isempty(err_liu)
+                if err_liu[end] < eps
+                    push!(err_liu, err_liu[end])
+                    push!(tau_liu, tau_liu[end])
+                    continue
+                end
+            end
+    
+            results = mt.invertMPSLiu(psi, mt.invertGlobalSweep; eps = eps, kargs_inv = (nruns = 8,))
+            err_total = results["err_total"]
+            tau_total = maximum(results["tau2"]) + results["tau1"]
+            push!(tau_liu, tau_total)
+            push!(err_liu, err_total)
+        end
+    
+        data = DataFrame(Error = eps_array, tau_Liu = tau_liu, err_Liu = err_liu)
+        CSV.write("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)Q_EpsVsTau.csv", data)
+    end
+end
+
+
+
 
 
 function create_invert(N, tau_list)
@@ -118,18 +151,10 @@ function create_invert(N, tau_list)
     return data
 end
 
-
-
-let N, eps_array
-
-    N = 60
-    #eps_array = [0.5*2.0^(-i) for i in 0:4]
-    eps_array = [0.01] 
-    data = execute("randMPS", N, eps_array)
-
+let
+    Nrange = [50, 100, 200, 500, 1000]
+    liu_tau_vs_N(Nrange, [0.1, 0.05, 0.025])
 end
-
-
 
 
 #@profview datas = create_invert(20, [2])
