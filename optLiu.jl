@@ -178,9 +178,15 @@ end
 #####Plots.savefig("D:\\Julia\\MyProject\\Plots\\inverter\\disentanglerD2chi_first2.pdf")
 
 function execute()
-    energy, psi = mt.initialize_ising(50, 1000)
-    #psi = it.random_mps(it.siteinds(2, 20), linkdims = 2)
-    results = mt.invertMPSLiu(psi, mt.invertGlobalSweep, eps = 1e-3)
+    #energy, psi = mt.initialize_ising(50, 1000)
+    Nqubit = 50
+    psi = it.random_mps(it.siteinds("Qubit", Nqubit), linkdims = 2)
+    psi_copy = deepcopy(psi)
+    for b in 1:Nqubit-1
+        mt.cut!(psi_copy, b)
+    end
+    @show abs(dot(psi, psi_copy))
+    #results = mt.invertMPSLiu(psi, mt.invertGlobalSweep, eps = 1e-3)
     #results = mt.invert(psi, mt.invertGlobalSweep, eps = 1e-3)
     return psi, results
 end

@@ -84,8 +84,8 @@ end
 function liu_tau_vs_N(Nrange, eps_array)
     for N in Nrange
         @show N
-        #energy, psi = mt.initialize_ising(N, 2)
-        psi = it.random_mps(it.siteinds("Qubit", N), linkdims = 2)
+        energy, psi = mt.initialize_ising(N, 2)
+        #psi = it.random_mps(it.siteinds("Qubit", N), linkdims = 2)
         tau_liu = []
         err_liu = []
 
@@ -108,7 +108,7 @@ function liu_tau_vs_N(Nrange, eps_array)
         end
     
         data = DataFrame(Error = eps_array, tau_Liu = tau_liu, err_Liu = err_liu)
-        CSV.write("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)Q_EpsVsTau.csv", data)
+        CSV.write("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)Q_final_EpsVsTau.csv", data)
     end
 end
 
@@ -151,9 +151,45 @@ function create_invert(N, tau_list)
     return data
 end
 
+
+function final_tau_vs_N(Nrange, eps_array)
+    for N in Nrange
+        @show N
+        #energy, psi = mt.initialize_ising(N, 2)
+        psi = it.random_mps(it.siteinds("Qubit", N), linkdims = 2)
+        tau_liu = []
+        err_liu = []
+
+        for eps in eps_array
+            println("\nAssuming error threshold eps = $eps\n")
+    
+            if !isempty(err_liu)
+                if err_liu[end] < eps
+                    push!(err_liu, err_liu[end])
+                    push!(tau_liu, tau_liu[end])
+                    continue
+                end
+            end
+    
+            results, results_final = mt.invertMPSfinal(psi, mt.invertGlobalSweep; eps = eps, kargs_inv = (nruns = 8,))
+            err1 = results["err_total"]
+            tau1 = maximum(results["tau2"]) + results["tau1"]
+            err_total = results_final["err"]
+            tau_total = results_final["tau"]
+            @show err1, tau1, err_total, tau_total
+            push!(tau_liu, tau_total)
+            push!(err_liu, err_total)
+        end
+    
+        data = DataFrame(Error = eps_array, tau_Liu = tau_liu, err_Liu = err_liu)
+        CSV.write("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)Q_final_EpsVsTau.csv", data)
+    end
+end
+
+
 let
-    Nrange = [50, 100, 200, 500, 1000]
-    liu_tau_vs_N(Nrange, [0.1, 0.05, 0.025])
+    Nrange = [1000]
+    final_tau_vs_N(Nrange, [1e-2])
 end
 
 

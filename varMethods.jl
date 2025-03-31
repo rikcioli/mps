@@ -2,7 +2,7 @@ import Distributed
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
+function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; site1_empty = false, d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
@@ -36,7 +36,7 @@ function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau
 
     # create random brickwork circuit
     # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    lightcone = newLightcone(siteinds, tau; U_array = init_array, lightbounds = (false, false))
+    lightcone = newLightcone(siteinds, tau; U_array = init_array, lightbounds = (false, false), site1_empty = site1_empty)
 
     L_blocks::Vector{it.ITensor} = []
     R_blocks::Vector{it.ITensor} = []
@@ -286,7 +286,7 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization
 end
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it"
-function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
+function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), site1_empty = false, maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
@@ -320,7 +320,7 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
 
     # create random brickwork circuit
     # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    lightcone = newLightcone(siteinds, tau; U_array = init_array, lightbounds = lightbounds)
+    lightcone = newLightcone(siteinds, tau; U_array = init_array, lightbounds = lightbounds, site1_empty = site1_empty)
 
 
     # setup optimization stuff
@@ -342,9 +342,9 @@ end
 
 
 "Calls invertSweepLC for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
-function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}, invertMethod; tau = 0, eps = 1e-12, nruns = 1, overlap = 1, start_tau = 1, return_all = false, kargs...)
+function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}, invertMethod; tau = 0, eps = 1e-12, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{<:Matrix}} = nothing, kargs...)
     obj = typeof(mpo)
-    print("Attempting inversion of $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\n")
+    print("Attempting inversion of size $(length(mpo)) $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\n")
 
     fixed_tau_mode = true
     if iszero(tau)
@@ -357,7 +357,8 @@ function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds
     end
 
     found = false
-    best_guess = nothing
+    besterr_history = []
+    best_guess = init_array
     while !found
         println("Attempting depth $tau...")
         # choose multiprocessing method
@@ -375,6 +376,7 @@ function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds
         errs = [abs(overlap - results["overlap"]) for results in results_array]
         err_min_pos = argmin(errs)
         err_min = errs[err_min_pos]
+        push!(besterr_history, err_min)
         if err_min < eps || tau > 24 || fixed_tau_mode
             found = true
             tau = results_array[err_min_pos]["lightcone"].depth
@@ -389,9 +391,13 @@ function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds
             elseif tau > 24
                 println("Inversion failed, algorithm stopped at tau = 25")
             end
+
+            resdict["err_history"] = besterr_history
             return resdict
         end
-        best_guess = Array(results_array[err_min_pos]["lightcone"])
+        if reuse_previous
+            best_guess = Array(results_array[err_min_pos]["lightcone"])
+        end
         tau += 1
     end
 end

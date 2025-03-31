@@ -7,6 +7,7 @@ struct Lightcone
     d::Int64                                # dimension of the physical space
     size::Int64                             # number of qubits the whole circuit acts on
     depth::Int64                            # circuit depth
+    site1_empty::Bool                       # if True the first unitary acts on sites 2-3 instead of 1-2
     n_unitaries::Int64                      # number of unitaries
     lightbounds::Tuple{Bool, Bool}          # (leftslope == 'light', rightslope == 'light')
     siteinds::Vector{it.Index}              # siteinds of AB region
@@ -17,15 +18,30 @@ struct Lightcone
 end
 
 
-function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array::Union{Nothing, Vector{<:Matrix}} = nothing, lightbounds = (true, true))
+function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array::Union{Nothing, Vector{<:Matrix}} = nothing, lightbounds = (true, true), site1_empty = false)
 
     # extract number of sites on which lightcone acts
     sizeAB = length(siteinds)
-    if isodd(sizeAB) 
-        lightbounds[2] == true && 
-            throw(DomainError(sizeAB, "Right lightbound can't be true for sizeAB odd"))
+
+    # mode where the first unitary acts on sites 2-3 instead of 1-2
+    shift = 0   
+    if site1_empty
         depth == 1 &&
-            throw(DomainError(depth, "Depth 1 lightcone for an odd number of sites leaves the last site empty and causes problems"))
+            throw(DomainError(depth, "Depth 1 lightcone for site1_empty mode leaves the first site with no unitaries at all and causes problems"))
+        if lightbounds[1] || lightbounds[2]
+            @warn("Lightbounds can't be true when site1_empty mode, setting them to false")
+        end
+        lightbounds = (false, false)
+        shift = 1 # in many cases leaving the first site empty is just shifting 
+        # the current depth by 1, so this can be inserted in a lot of places where
+        # there's a mod(i,2) kind of thing, with i in 1:depth
+    else
+        if isodd(sizeAB) 
+            lightbounds[2] &&
+                throw(DomainError(sizeAB, "Right lightbound can't be true for sizeAB odd"))
+            depth == 1 &&
+                throw(DomainError(depth, "Depth 1 lightcone for an odd number of sites leaves the last site empty and causes problems"))
+        end
     end
 
     # count the minimum sizeAB has to be to construct a circuit of depth 'depth'
@@ -45,7 +61,7 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array::Union{Nothin
     
     # if U_array is not given, construct an array of random d-by-d unitaries
     d = siteinds[1].space
-    n_unitaries = div(sizeAB-1,2)*depth + mod(sizeAB-1,2)*div(depth+1,2)
+    n_unitaries = div(sizeAB-1,2)*depth + mod(sizeAB-1,2)*div(depth+1-shift,2)
     if depth > 2
         dep_m2 = depth-2
         n_unitaries -= n_light*(div(dep_m2+1,2)^2 + mod(dep_m2+1,2)*div(dep_m2+1,2))
@@ -58,7 +74,7 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array::Union{Nothin
             throw(DomainError(n_insert, "Number of inserted unitaries is too large for this lightcone 
             structure\nInserted unitaries: $n_insert\nLightcone unitaries: $n_unitaries\n"))
         if n_insert < n_unitaries
-            #@warn "Number of inserted unitaries ($n_insert) is lower than maximum capacity ($n_unitaries), filling the missing spaces with identities"
+            @warn "Number of inserted unitaries ($n_insert) is lower than maximum capacity ($n_unitaries), filling the missing spaces with identities"
             Ids = [1.0*Id2 for _ in 1:n_unitaries-n_insert]
             U_array = [U_array; Ids]
         end
@@ -76,11 +92,12 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array::Union{Nothin
     for i in 1:depth
         # limits for circuit indices, left limit is always 1
         # right limit is sizeAB/2 for odd layers, sizeAB/2 or sizeAB/2-1 for even layers depending on the parity of sizeAB
-        llim, rlim = 1, div(sizeAB,2)-mod(sizeAB+1,2)*mod(i+1,2)
+        llim, rlim = 1, div(sizeAB,2)-mod(sizeAB+1,2)*mod(i+1-shift,2)
         lslope, rslope = llim, rlim
         # left range is 1 for odd layers, 2 for even layers
         # right range depends on sizeAB: if sizeAB even it's just sizeAB and sizeAB-1; if it's odd it's sizeAB-1 and sizeAB
-        lrange, rrange = 1+mod(i+1,2), (iseven(sizeAB) ? sizeAB-mod(i+1,2) : sizeAB-mod(i,2))
+        # ADDED: shift value which is 0 in normal mode, 1 when first site is empty, in which case the range is swapped
+        lrange, rrange = 1+mod(i+1-shift,2), (iseven(sizeAB) ? sizeAB-mod(i+1-shift,2) : sizeAB-mod(i+shift,2))
         if lightbounds[1]
             lslope += div(i-1,2)
             lrange += 2*div(i-1,2)
@@ -96,34 +113,63 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array::Union{Nothin
         # this will be helpful with the og center
         for j in (isodd(i) ? (lslope:rslope) : (rslope:-1:lslope))
             # prepare inds for current unitary
-            sites_involved = (2*j-mod(i,2), 2*j-mod(i,2)+1)
+            sites_involved = (2*j-mod(i+shift,2), 2*j-mod(i+shift,2)+1)
             inds = it.prime((siteinds[sites_involved[1]], siteinds[sites_involved[2]]), depth-i)
             fullinds = [inds[1], inds[2], inds[1]', inds[2]']
 
-            # add a clause for boundary terms: if sizeAB is even, for even layers, a delta should be placed at the extremities
-            # we simulate this by decreasing the prime level of the upper index of the first and last gate of the odd layers
-            # so that they are connected directly to the odd layer above
-            if i < depth
-                if j == lslope 
-                    if lightbounds[1]
-                        fullinds[1] = it.noprime(inds[1])
-                    elseif isodd(i)
-                        fullinds[1] = it.prime(inds[1],-1)
+            if !site1_empty
+                # add a clause for boundary terms: if sizeAB is even, for even layers, a delta should be placed at the extremities
+                # we simulate this by decreasing the prime level of the upper index of the first and last gate of the odd layers
+                # so that they are connected directly to the odd layer above
+                if i < depth
+                    if j == lslope 
+                        if lightbounds[1]
+                            fullinds[1] = it.noprime(inds[1])
+                        elseif isodd(i)
+                            fullinds[1] = it.prime(inds[1],-1)
+                        end
+                    end
+                    if j == rslope
+                        if lightbounds[2]
+                            fullinds[2] = it.noprime(inds[2])
+                        # else: if size even decrease the right index of the odd layers, if size odd decrease right index of even layers
+                        elseif (iseven(sizeAB) && isodd(i)) || (isodd(sizeAB) && iseven(i))
+                            fullinds[2] = it.prime(inds[2],-1)
+                        end
                     end
                 end
-                if j == rslope
-                    if lightbounds[2]
-                        fullinds[2] = it.noprime(inds[2])
-                    # else: if size even decrease the right index of the odd layers, if size odd decrease right index of even layers
-                    elseif (iseven(sizeAB) && isodd(i)) || (isodd(sizeAB) && iseven(i))
-                        fullinds[2] = it.prime(inds[2],-1)
+                # special case for i=2 and odd sizeAB since we have to connect the rightmost unitary to the max prime level
+                if i == 2 && isodd(sizeAB) && j == rlim
+                    fullinds[4] = inds[2]''
+                end
+
+            else
+                # add variation for site1_empty mode, which anyway will ALWAYS be with lightbound false
+                if i < depth
+                    if j == lslope 
+                        # decrease left index of even layers
+                        if iseven(i)
+                            fullinds[1] = it.prime(inds[1],-1)
+                        end
+                    end
+                    if j == rslope
+                        if (isodd(sizeAB) && isodd(i)) || (iseven(sizeAB) && iseven(i))
+                            fullinds[2] = it.prime(inds[2],-1)
+                        end
+                    end
+                end
+                # special case for i=2 since we have to connect the leftmost unitary to the max prime level
+                # if sizeAB even we also have to connect the rightmost unitary
+                if i == 2 
+                    if j == llim
+                        fullinds[3] = inds[1]''
+                    end
+                    if j == rlim && iseven(sizeAB)
+                        fullinds[4] = inds[2]''
                     end
                 end
             end
-            # special case for i=2 and odd sizeAB since we have to connect the rightmost unitary to the max prime level
-            if i == 2 && isodd(sizeAB) && j == rlim
-                fullinds[4] = inds[2]''
-            end
+
 
             fullinds = Tuple(ind for ind in fullinds)
 
@@ -132,8 +178,8 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array::Union{Nothin
             push!(circuit, brick)
             push!(inds_arr, fullinds)
             
-            push!(gates_by_site[sites_involved[1]], Dict([("inds", fullinds), ("pos", k), ("orientation", "R")]))
-            push!(gates_by_site[sites_involved[2]], Dict([("inds", fullinds), ("pos", k), ("orientation", "L")]))
+            push!(gates_by_site[sites_involved[1]], Dict([("inds", fullinds), ("pos", k), ("depth", i), ("orientation", "R")]))
+            push!(gates_by_site[sites_involved[2]], Dict([("inds", fullinds), ("pos", k), ("depth", i), ("orientation", "L")]))
             push!(sites_by_gate, sites_involved)
             push!(layer_i_pos, k)
 
@@ -147,7 +193,7 @@ function newLightcone(siteinds::Vector{<:it.Index}, depth; U_array::Union{Nothin
     end
 
 
-    return Lightcone(circuit, inds_arr, d, sizeAB, depth, n_unitaries, lightbounds, siteinds, range, gates_by_site, gates_by_layer, sites_by_gate)
+    return Lightcone(circuit, inds_arr, d, sizeAB, depth, site1_empty, n_unitaries, lightbounds, siteinds, range, gates_by_site, gates_by_layer, sites_by_gate)
 end
 
 "Update k-th unitary of lightcone in-place"
@@ -155,6 +201,25 @@ function updateLightcone!(lightcone::Lightcone, U::AbstractMatrix, k::Integer)
     inds = lightcone.inds_arr[k]
     U_tensor = it.ITensor(U, inds)
     lightcone.circuit[k] = U_tensor
+end
+
+"Update in-place unitary specified by position (site, depth)"
+function updateLightcone!(lightcone::Lightcone, U::AbstractMatrix, coords::Tuple{Integer, Integer})
+    (site, depth) = coords
+    N, site1_empty = lightcone.size, lightcone.site1_empty
+    shift = site1_empty ? 1 : 0
+    if site == 1 || (site == N && iseven(N))
+        iseven(depth+shift) && throw(DomainError(coords, "No gate at specified coords for this structure"))
+        gate = lightcone.gates_by_site[site][div(depth+2-shift,2)]
+    elseif site == N && isodd(N)
+        isodd(depth+shift) && throw(DomainError(coords, "No gate at specified coords for this structure"))
+        gate = lightcone.gates_by_site[site][div(depth+shift,2)]
+    else     
+        depth > length(lightcone.gates_by_site[site]) &&
+            throw(DomainError(coords, "No gate at specified coords for this structure"))
+        gate = lightcone.gates_by_site[site][depth]
+    end
+    updateLightcone!(lightcone, U, gate["pos"])
 end
 
 "Update Lightcone in-place"
