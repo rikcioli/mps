@@ -1,4 +1,4 @@
-test
+
 ### LIGHTCONE METHODS ###
 
 struct Lightcone
