@@ -171,7 +171,7 @@ function final_tau_vs_N(Nrange, eps_array)
                 end
             end
     
-            results, results_final = mt.invertMPSfinal(psi, mt.invertGlobalSweep; eps = eps, kargs_inv = (nruns = 8,))
+            results, results_final = mt.invertMPSfinal(psi, mt.invertGlobalSweep; eps = eps, kargs_inv = (nruns = 4,))
             err1 = results["err_total"]
             tau1 = maximum(results["tau2"]) + results["tau1"]
             err_total = results_final["err"]
@@ -188,8 +188,8 @@ end
 
 
 let
-    Nrange = [1000]
-    final_tau_vs_N(Nrange, [1e-2])
+    Nrange = [300]
+    final_tau_vs_N(Nrange, [1e-3])
 end
 
 

@@ -790,35 +790,6 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, k
             spacing = 2
         end
 
-        ## divide lattice into regions of spacing and sizeAB
-        #regions = []
-        #remaining = N
-        #current_type = "C"
-        #c_count = 0
-        #ab_count = 0
-        #while remaining > 0
-        #    if current_type == "C"
-        #        c_count += 1
-        #        size = min(spacing, remaining)
-#
-        #        push!(regions, ("C", c_count, size))
-        #    else
-        #        ab_count += 1
-        #        size = min(sizeAB, remaining)
-        #        push!(regions, ("AB", ab_count, size))
-        #    end
-        #    remaining -= size
-        #    current_type = current_type == "C" ? "AB" : "C"
-        #end
-#
-        #ltg_map = []
-        #for region in regions
-        #    reg_type, k, size = region
-        #    for l in 1:size
-        #        push!(ltg_map, (reg_type, k, l))
-        #    end
-        #end
-
         println("Attempting inversion of reduced density matrices with depth tau = $tau, imposing sizeAB = $sizeAB and spacing = $spacing for factorization")
 
         @assert tau > 0
@@ -1023,7 +994,7 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, k
                     site1_empty = true  
                 end
             end
-            results2 = invert(_reduced_mps, invertMethod; start_tau = start_tau2, eps = epsinv2, site1_empty = site1_empty, kargs_inv...)
+            results2 = invert(_reduced_mps, invertMethod; start_tau = start_tau2, eps = epsinv2, site1_empty = site1_empty, reuse_previous = false, kargs_inv...)
             if site1_empty
                 @show results2["lightcone"]
             end
@@ -1063,7 +1034,7 @@ end
 function invertMPSfinal(mps::itmps.MPS, invertMethod; eps = 1e-5, kargs_inv = NamedTuple())
     N = length(mps)
 
-    results = invertMPSLiu(mps, invertMethod; eps = 0.7, kargs_inv = kargs_inv)
+    results = invertMPSLiu(mps, invertMethod; eps = 0.1, kargs_inv = kargs_inv)
 
     tau1 = results["tau1"]
     tau2 = maximum(results["tau2"])
