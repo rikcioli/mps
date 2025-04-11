@@ -193,8 +193,9 @@ end
 
 psi, results = execute();
 
-#mps = mt.initialize_fdqc(N, 2)
-
+mps = it.random_mps(it.siteinds("Qubit", 20); linkdims = 2)
+@time results = mt.invert(mps, mt.invertGlobalSweep; eps = 1e-2, reuse_previous = false, start_tau = 5, nruns = 1)
+@profview results = mt.invert(mps, mt.invertGlobalSweep; eps = 1e-2, reuse_previous = false, start_tau = 5, nruns = 1)
 #results = invertMPSLiu(mps, mt.invertGlobalSweep)
 #mpsfinal, lclist, mps_trunc, second_part = results[3:6]
 #mps2 = mps[1:end]

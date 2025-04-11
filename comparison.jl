@@ -2,11 +2,10 @@ include("mpsMethods.jl")
 import .MPSMethods as mt
 import ITensorMPS as itmps
 import ITensors as it
-import Plots
+#import Plots
 using LaTeXStrings, LinearAlgebra, Statistics, Random
 using CSV
 using DataFrames, StatsPlots
-using JET, Profile
 
 it.set_warn_order(28)
 
@@ -171,7 +170,7 @@ function final_tau_vs_N(Nrange, eps_array)
                 end
             end
     
-            results, results_final = mt.invertMPSfinal(psi, mt.invertGlobalSweep; eps = eps, kargs_inv = (nruns = 4,))
+            results, results_final = mt.invertMPSfinal(psi, mt.invertGlobalSweep; eps = eps)
             err1 = results["err_total"]
             tau1 = maximum(results["tau2"]) + results["tau1"]
             err_total = results_final["err"]

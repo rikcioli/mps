@@ -342,7 +342,7 @@ end
 
 
 "Calls invertSweepLC for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
-function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}, invertMethod; tau = 0, eps = 1e-12, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{<:Matrix}} = nothing, kargs...)
+function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}, invertMethod; tau = 0, eps = 1e-3, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{<:Matrix}} = nothing, kargs...)
     obj = typeof(mpo)
     print("Attempting inversion of size $(length(mpo)) $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\n")
 

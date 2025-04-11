@@ -763,7 +763,7 @@ end
 
 
 
-function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, kargs_inv = NamedTuple())
+function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5)
 
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
@@ -928,7 +928,7 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, k
     println("Inversion and truncation reached within requested eps_trunc, inverting local states with local error eps2/N_regions^2 = $(eps2/length(rangesA)^2)")
     
     # Now we proceed with inversion of all pure states
-    epsinv2 = eps2/length(rangesA)^2
+    epsinv2 = 2*eps2/length(rangesA)^2     # heuristic, the scaling is 1/L^2
     trunc_siteinds = it.siteinds(mps_trunc)
     trunc_linkinds = it.linkinds(mps_trunc)
     ranges = []
@@ -981,23 +981,23 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, k
         tau_list2 = Array{Integer, 1}(undef, length(ranges))
         err_list2 = Array{Float64, 1}(undef, length(ranges))
 
-        for l in eachindex(ranges)
+        Threads.@threads for l in eachindex(ranges)
             _range = ranges[l]
             _reduced_mps = reduced_mps_list[l]
-            start_tau2 = (_range in rangesA ? 1 : 2)
-            site1_empty = false
+            _start_tau2 = (_range in rangesA ? 1 : 2)
+            _site1_empty = false
             if iseven(_range[2]-_range[1])
-                start_tau2 = 2
+                _start_tau2 = 2
                 # if the first region has odd number of sites we need to start the lightcone
                 # in the site1_empty mode, in order to have a coherent global brickwork structure at the end
                 if l == 1   
-                    site1_empty = true  
+                    _site1_empty = true
                 end
             end
-            results2 = invert(_reduced_mps, invertMethod; start_tau = start_tau2, eps = epsinv2, site1_empty = site1_empty, reuse_previous = false, kargs_inv...)
-            if site1_empty
-                @show results2["lightcone"]
-            end
+            results2 = invert(_reduced_mps, invertMethod; start_tau = _start_tau2, eps = epsinv2, site1_empty = _site1_empty, reuse_previous = false, nruns = 1)
+            #if _site1_empty
+            #    @show results2["lightcone"]
+            #end
             lc_list2[l] = results2["lightcone"]
             tau_list2[l] = results2["tau"]
             err_list2[l] = results2["err"]
@@ -1031,10 +1031,10 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5, k
 end
 
 
-function invertMPSfinal(mps::itmps.MPS, invertMethod; eps = 1e-5, kargs_inv = NamedTuple())
+function invertMPSfinal(mps::itmps.MPS, invertMethod; eps = 1e-5)
     N = length(mps)
 
-    results = invertMPSLiu(mps, invertMethod; eps = 0.1, kargs_inv = kargs_inv)
+    results = invertMPSLiu(mps, invertMethod; eps = 0.1)
 
     tau1 = results["tau1"]
     tau2 = maximum(results["tau2"])
@@ -1103,10 +1103,10 @@ function invertMPSfinal(mps::itmps.MPS, invertMethod; eps = 1e-5, kargs_inv = Na
     #apply!(zero2, lc_list2)
 
     fid = abs(dot(zero, mps_final))
-    @show fid
+    @assert isapprox(fid, 1)
 
     best_guess = Array(lightcone)
-    results_final = invert(mps, invertGlobalSweep; nruns = 4, site1_empty = site1_empty, eps = eps, start_tau = tau, init_array = best_guess)
+    results_final = invert(mps, invertGlobalSweep; nruns = 1, site1_empty = site1_empty, eps = eps, start_tau = tau, init_array = best_guess)
 
     return results, results_final
 end
