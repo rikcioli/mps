@@ -1031,7 +1031,7 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
 end
 
 
-function invertMPSfinal(mps::MPS, invertMethod; eps = 1e-5)
+function invertMPSfinal(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\")
     N = length(mps)
 
     results = invertMPSLiu(mps, invertMethod; eps = 0.1)
@@ -1107,20 +1107,20 @@ function invertMPSfinal(mps::MPS, invertMethod; eps = 1e-5)
 
     # save lightcone to file
     best_guess = Array(lightcone)
-    CSV.write("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)_$(eps)_ansatz.csv",  Tables.table(best_guess), writeheader=false)
+    CSV.write(pathname*"$(N)_$(eps)_ansatz.csv",  Tables.table(best_guess), writeheader=false)
 
     # save important info to file
     params = Dict([("N", N), ("eps", eps), ("site1_empty", site1_empty), ("start_tau", tau)])
-    CSV.write("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)_$(eps)_params.csv", params)
+    CSV.write(pathname*"$(N)_$(eps)_params.csv", params)
 
     # save original mps to file
-    f = h5open("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)_mps.h5","w")
+    f = h5open(pathname*"$(N)_mps.h5","w")
     write(f,"psi",mps)
     close(f)
     
-    Threads.@threads for start_tau in tau:tau+3
+    Threads.@threads for start_tau in tau:tau+5
         results_final = invert(mps, invertGlobalSweep; nruns = 1, site1_empty = site1_empty, eps = eps, start_tau = start_tau, init_array = best_guess)
-        CSV.write("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)_$(eps)_$(start_tau)ST_result.csv", results_final)
+        CSV.write(pathname*"$(N)_$(eps)_$(start_tau)ST_result.csv", results_final)
     end
 
     return

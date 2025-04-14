@@ -189,7 +189,7 @@ let
     N = 10
     eps = 1e-2
     psi = random_mps(siteinds("Qubit", N), linkdims = 2)
-    mt.invertMPSfinal(psi, mt.invertGlobalSweep; eps = eps)
+    mt.invertMPSfinal(psi, mt.invertGlobalSweep; eps = eps, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\")
 end
 
 
