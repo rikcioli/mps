@@ -2,33 +2,33 @@ import Distributed
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; site1_empty = false, d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
+function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; site1_empty = false, d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
     # noprime the input inds
     # change the output inds to a prime of the input inds to match the inds of the first layer of gates
-    siteinds = it.noprime(input_inds)
-    d = siteinds[1].space
-    tempinds = it.siteinds(d, N)
+    sites = noprime(input_inds)
+    d = sites[1].space
+    tempinds = siteinds(d, N)
     for i in 1:N
-        it.replaceind!(mpo[i], input_inds[i], tempinds[i])
-        it.replaceind!(mpo[i], output_inds[i], it.prime(siteinds[i], tau))
-        it.replaceind!(mpo[i], tempinds[i], siteinds[i])
+        replaceind!(mpo[i], input_inds[i], tempinds[i])
+        replaceind!(mpo[i], output_inds[i], prime(sites[i], tau))
+        replaceind!(mpo[i], tempinds[i], sites[i])
     end
 
     if N == 2   #solution is immediate via SVD
         env = conj(mpo[1]*mpo[2])
 
-        inds = siteinds
-        U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
-        u, v = it.commonind(U, S), it.commonind(Vdag, S)
+        inds = sites
+        U, S, Vdag = svd(env, inds, cutoff = 1E-15)
+        u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity
         newfid = real(tr(Array(S, (u, v))))/normalization
-        gate_ji_opt = U * it.replaceind(Vdag, v, u)
-        lightcone = newLightcone(siteinds, 1; lightbounds = (false, false))
-        lightcone.circuit[1] = it.replaceprime(gate_ji_opt, tau => 1)
+        gate_ji_opt = U * replaceind(Vdag, v, u)
+        lightcone = newLightcone(sites, 1; lightbounds = (false, false))
+        lightcone.circuit[1] = replaceprime(gate_ji_opt, tau => 1)
 
         println("Matrix is 2-local, converged to fidelity $newfid immediately")
         return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", 1)])
@@ -36,10 +36,10 @@ function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau
 
     # create random brickwork circuit
     # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    lightcone = newLightcone(siteinds, tau; U_array = init_array, lightbounds = (false, false), site1_empty = site1_empty)
+    lightcone = newLightcone(sites, tau; U_array = init_array, lightbounds = (false, false), site1_empty = site1_empty)
 
-    L_blocks::Vector{it.ITensor} = []
-    R_blocks::Vector{it.ITensor} = []
+    L_blocks::Vector{ITensor} = []
+    R_blocks::Vector{ITensor} = []
 
     # construct L_1
     # first item is zero projector, then there are the gates in ascending order, then the mpo site
@@ -117,14 +117,14 @@ function invertSweepLC(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau
             env = conj(env_left*env_right)
 
             inds = gate_ji["inds"][1:2]
-            U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
-            u, v = it.commonind(U, S), it.commonind(Vdag, S)
+            U, S, Vdag = svd(env, inds, cutoff = 1E-15)
+            u, v = commonind(U, S), commonind(Vdag, S)
 
             # evaluate fidelity as Tr(Env*Gate), i.e. the overlap (NOT SQUARED)
             newfid = real(tr(Array(S, (u, v))))/normalization
 
             #replace gate_ji with optimized one, both in gates_j (used in this loop) and in circuit
-            gate_ji_opt = U * it.replaceind(Vdag, v, u)
+            gate_ji_opt = U * replaceind(Vdag, v, u)
             tensors_j[i] = gate_ji_opt
             lightcone.circuit[gate_ji["pos"]] = gate_ji_opt
         end
@@ -203,7 +203,7 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization
     d = lightcone.d
     N = lightcone.size
 
-    R_blocks::Vector{it.ITensor} = []
+    R_blocks::Vector{ITensor} = []
 
     # construct L_1
     # first item is the delta, i.e. the first site of mpo_low which is composed of only deltas, then the mpo site
@@ -286,33 +286,33 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization
 end
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it"
-function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, tau, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}; lightbounds = (false, false), site1_empty = false, maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
+function invertGlobalSweep(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; lightbounds = (false, false), site1_empty = false, maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
     # noprime the input inds
     # change the output inds to a prime of the input inds to match the inds of the first layer of gates
-    siteinds = it.noprime(input_inds)
-    d = siteinds[1].space
-    tempinds = it.siteinds(d, N)
+    sites = noprime(input_inds)
+    d = sites[1].space
+    tempinds = siteinds(d, N)
     for i in 1:N
-        it.replaceind!(mpo[i], input_inds[i], tempinds[i])
-        it.replaceind!(mpo[i], output_inds[i], it.prime(siteinds[i], tau))
-        it.replaceind!(mpo[i], tempinds[i], siteinds[i])
+        replaceind!(mpo[i], input_inds[i], tempinds[i])
+        replaceind!(mpo[i], output_inds[i], prime(sites[i], tau))
+        replaceind!(mpo[i], tempinds[i], sites[i])
     end
 
     if N == 2   #solution is immediate via SVD
         env = conj(mpo[1]*mpo[2])
 
-        inds = siteinds
-        U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
-        u, v = it.commonind(U, S), it.commonind(Vdag, S)
+        inds = sites
+        U, S, Vdag = svd(env, inds, cutoff = 1E-15)
+        u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity
         newfid = real(tr(Array(S, (u, v))))/normalization
-        gate_ji_opt = U * it.replaceind(Vdag, v, u)
-        lightcone = newLightcone(siteinds, 1; lightbounds = (false, false))
-        lightcone.circuit[1] = it.replaceprime(gate_ji_opt, tau => 1)
+        gate_ji_opt = U * replaceind(Vdag, v, u)
+        lightcone = newLightcone(sites, 1; lightbounds = (false, false))
+        lightcone.circuit[1] = replaceprime(gate_ji_opt, tau => 1)
 
         println("Matrix is 2-local, converged to fidelity $newfid immediately")
         return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", 1)])
@@ -320,7 +320,7 @@ function invertGlobalSweep(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO},
 
     # create random brickwork circuit
     # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    lightcone = newLightcone(siteinds, tau; U_array = init_array, lightbounds = lightbounds, site1_empty = site1_empty)
+    lightcone = newLightcone(sites, tau; U_array = init_array, lightbounds = lightbounds, site1_empty = site1_empty)
 
 
     # setup optimization stuff
@@ -342,7 +342,7 @@ end
 
 
 "Calls invertSweepLC for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
-function invert(mpo::Union{Vector{it.ITensor}, itmps.MPS, itmps.MPO}, input_inds::Vector{<:it.Index}, output_inds::Vector{<:it.Index}, invertMethod; tau = 0, eps = 1e-3, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{<:Matrix}} = nothing, kargs...)
+function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}, invertMethod; tau = 0, eps = 1e-3, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{<:Matrix}} = nothing, kargs...)
     obj = typeof(mpo)
     print("Attempting inversion of size $(length(mpo)) $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\n")
 
@@ -405,47 +405,47 @@ end
 
 "Wrapper for ITensorsMPS.MPS input. Before calling invert, it conjugates mps (mps to invert must be above)
 and prepares a layer of zero bras to construct the mpo |0><psi|. Then calls invertMethod with overlap 1 and error eps"
-function invert(mps::itmps.MPS, invertMethod; kargs...)
+function invert(mps::MPS, invertMethod; kargs...)
     N = length(mps)
     mps = conj(mps)
-    siteinds = it.siteinds(mps)
-    outinds = siteinds'
+    sites = siteinds(mps)
+    outinds = sites'
 
     for i in 1:N
-        ind = siteinds[i]
+        ind = sites[i]
         vec = [1; [0 for _ in 1:ind.space-1]]
-        mps[i] *= it.ITensor(vec, ind')
+        mps[i] *= ITensor(vec, ind')
     end
 
-    results = invert(mps, siteinds, outinds, invertMethod; overlap=1, normalization=1, kargs...)
+    results = invert(mps, sites, outinds, invertMethod; overlap=1, normalization=1, kargs...)
     return results
 end
 
 
 "Wrapper for ITensorsMPS.MPO input. Calls invert by first taking the dagger and extracting upper and lower indices"
-function invert(mpo::itmps.MPO, invertMethod; kargs...)
+function invert(mpo::MPO, invertMethod; kargs...)
     N = length(mpo)
     mpo = conj(mpo)
-    allinds = reduce(vcat, it.siteinds(mpo))
+    allinds = reduce(vcat, siteinds(mpo))
     # determine primelevel of inputinds, which will be the lowest found in allinds
     first2inds = allinds[1:2]   
     plev_in = 0
     while true
-        ind = it.inds(first2inds, plev = plev_in)
+        ind = inds(first2inds, plev = plev_in)
         if length(ind) > 0
             break
         end
         plev_in += 1
     end
-    siteinds = it.inds(allinds, plev = plev_in)
-    outinds = it.uniqueinds(allinds, siteinds)
+    sites = inds(allinds, plev = plev_in)
+    outinds = uniqueinds(allinds, sites)
 
-    results = invert(mpo, outinds, siteinds, invertMethod; overlap = 1, normalization = 2^N, kargs...) #DO NOT CHANGE NORMALIZATION, WE NEED FIDELITY TO BE NORM. TO 1 OR THE RATIO WON'T WORK
+    results = invert(mpo, outinds, sites, invertMethod; overlap = 1, normalization = 2^N, kargs...) #DO NOT CHANGE NORMALIZATION, WE NEED FIDELITY TO BE NORM. TO 1 OR THE RATIO WON'T WORK
     return results
 end
 
 "Combines invertSweepLC with invertGlobalSweep for ITensorsMPS.MPS or ITensorsMPS.MPO objects"
-function invertCombined(object::Union{itmps.MPS, itmps.MPO}; kargs...)
+function invertCombined(object::Union{MPS, MPO}; kargs...)
     results_sweep = invert(object, invertSweepLC; kargs...)
     lc = results_sweep["lightcone"]
     arrU0 = Array(lc)
@@ -455,7 +455,7 @@ function invertCombined(object::Union{itmps.MPS, itmps.MPO}; kargs...)
 end
 
 "Combines invertSweepLC with invertGlobalSweep for Vector{ITensor} objects"
-function invertCombined(object::Vector{it.ITensor}, siteinds, outinds; kargs...)
+function invertCombined(object::Vector{ITensor}, sites, outinds; kargs...)
     results_sweep = invert(object, input_inds, output_inds, invertSweepLC; kargs...)
     lc = results_sweep["lightcone"]
     arrU0 = Array(lc)
@@ -468,38 +468,38 @@ end
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index}; d = 2, output_inds = nothing, conv_err = 1E-6, maxiter = 1E6)
+function invertSweep(mpo::Vector{ITensor}, tau, input_inds::Vector{<:Index}; d = 2, output_inds = nothing, conv_err = 1E-6, maxiter = 1E6)
     N = length(mpo)
-    siteinds = input_inds
+    sites = input_inds
     mpo_mode = !isnothing(output_inds)
 
-    L_blocks::Vector{it.ITensor} = []
-    R_blocks::Vector{it.ITensor} = []
+    L_blocks::Vector{ITensor} = []
+    R_blocks::Vector{ITensor} = []
 
     # create random brickwork circuit
     # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
-    circuit::Vector{Vector{it.ITensor}} = []
+    circuit::Vector{Vector{ITensor}} = []
     for i in 1:tau
-        layer_i = [it.prime(it.ITensor(random_unitary(d^2), siteinds[2*j-mod(i,2)], siteinds[2*j-mod(i,2)+1], siteinds[2*j-mod(i,2)]', siteinds[2*j-mod(i,2)+1]'), tau-i) for j in 1:(div(N,2)-mod(N+1,2)*mod(i+1,2))]
+        layer_i = [prime(ITensor(random_unitary(d^2), sites[2*j-mod(i,2)], sites[2*j-mod(i,2)+1], sites[2*j-mod(i,2)]', sites[2*j-mod(i,2)+1]'), tau-i) for j in 1:(div(N,2)-mod(N+1,2)*mod(i+1,2))]
         push!(circuit, layer_i)
     end
 
     # construct projectors for all sites
     # if state is mps, construct projectors onto |0>
     # if output_inds are given, construct deltas connecting output_inds to beginning of brickwork (trace)
-    zero_projs::Vector{it.ITensor} = []
+    zero_projs::Vector{ITensor} = []
 
     if mpo_mode
         dim = output_inds[1].space
-        new_outinds = it.siteinds(dim, N)
+        new_outinds = siteinds(dim, N)
         for i in 1:N
-            it.replaceind!(mpo[i], output_inds[i], new_outinds[i])
-            push!(zero_projs, it.delta(new_outinds[i], it.prime(siteinds[i], tau)))
+            replaceind!(mpo[i], output_inds[i], new_outinds[i])
+            push!(zero_projs, delta(new_outinds[i], prime(sites[i], tau)))
         end
     else
-        for ind in siteinds
+        for ind in sites
             vec = [1; [0 for _ in 1:ind.space-1]]
-            push!(zero_projs, it.ITensor(vec, it.prime(ind, tau)))
+            push!(zero_projs, ITensor(vec, prime(ind, tau)))
         end
     end
 
@@ -509,19 +509,19 @@ function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index
         right = zero_projs[2] * mpo[2]
         env = conj(left*right)
 
-        inds = siteinds
-        U, S, Vdag = it.svd(env, inds, cutoff = 1E-14)
-        u, v = it.commonind(U, S), it.commonind(Vdag, S)
+        inds = sites
+        U, S, Vdag = svd(env, inds, cutoff = 1E-14)
+        u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity
         newfid = real(tr(Array(S, (u, v))))
-        gate_ji_opt = U * it.replaceind(Vdag, v, u)
+        gate_ji_opt = U * replaceind(Vdag, v, u)
         circuit[1][1] = gate_ji_opt
 
         if mpo_mode
             newfid /= 2^N # normalize if mpo mode
             for i in 1:N
-                it.replaceind!(mpo[i], new_outinds[i], output_inds[i])
+                replaceind!(mpo[i], new_outinds[i], output_inds[i])
             end
         end
 
@@ -531,8 +531,8 @@ function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index
             
 
     # prepare gates on the edges, which are just identities
-    left_deltas = [it.prime(it.delta(siteinds[1], siteinds[1]'), tau-i) for i in 2:2:tau]
-    right_deltas = [it.prime(it.delta(siteinds[N], siteinds[N]'), tau-i) for i in 2-mod(N,2):2:tau]
+    left_deltas = [prime(delta(sites[1], sites[1]'), tau-i) for i in 2:2:tau]
+    right_deltas = [prime(delta(sites[N], sites[N]'), tau-i) for i in 2-mod(N,2):2:tau]
 
     # construct L_1
     # first item is zero projector, then there are the gates in ascending order, then the mpo site
@@ -612,9 +612,9 @@ function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index
 
             env = conj(env_left*env_right)
 
-            inds = it.commoninds(it.prime(siteinds, tau-i), gate_ji)
-            U, S, Vdag = it.svd(env, inds, cutoff = 1E-15)
-            u, v = it.commonind(U, S), it.commonind(Vdag, S)
+            inds = commoninds(prime(sites, tau-i), gate_ji)
+            U, S, Vdag = svd(env, inds, cutoff = 1E-15)
+            u, v = commonind(U, S), commonind(Vdag, S)
 
             # evaluate fidelity as Tr(Env*Gate), i.e. the overlap (NOT SQUARED)
             newfid = real(tr(Array(S, (u, v))))
@@ -624,7 +624,7 @@ function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index
             #println("Step $j: ", newfid)
 
             #replace gate_ji with optimized one, both in gates_j (used in this loop) and in circuit
-            gate_ji_opt = U * it.replaceind(Vdag, v, u)
+            gate_ji_opt = U * replaceind(Vdag, v, u)
             gates_j[i] = gate_ji_opt    
             circuit[i][div(j,2) + mod(i,2)*mod(j,2)] = gate_ji_opt
         end
@@ -692,7 +692,7 @@ function invertSweep(mpo::Vector{it.ITensor}, tau, input_inds::Vector{<:it.Index
 
     if mpo_mode
         for i in 1:N
-            it.replaceind!(mpo[i], new_outinds[i], output_inds[i])
+            replaceind!(mpo[i], new_outinds[i], output_inds[i])
         end
     end
 
@@ -704,7 +704,7 @@ end
 
 
 "Calls invertSweep for Vector{ITensor} mpo input with increasing inversion depth tau until it converges with fidelity F = 1-eps"
-function invertSweep(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}; eps = 1E-6, start_tau = 1, n_runs = 10, kargs...)
+function invertSweep(mpo::Vector{ITensor}, input_inds::Vector{<:Index}; eps = 1E-6, start_tau = 1, n_runs = 10, kargs...)
     println("Tolerance $eps, starting from depth $start_tau")
     tau = start_tau
     found = false
@@ -742,53 +742,53 @@ function invertSweep(mpo::Vector{it.ITensor}, input_inds::Vector{<:it.Index}; ep
 end
 
 "Wrapper for ITensorsMPS.MPS input. Calls invertSweep by first conjugating mps (mps to invert must be above)"
-function invertSweep(mps::itmps.MPS; tau = 0, kargs...)
+function invertSweep(mps::MPS; tau = 0, kargs...)
     obj = typeof(mps)
     println("Attempting inversion of $obj")
     mps = conj(mps)
-    siteinds = it.siteinds(mps)
+    sites = siteinds(mps)
 
     if iszero(tau)
-        results = invertSweep(mps[1:end], siteinds; kargs...)
+        results = invertSweep(mps[1:end], sites; kargs...)
     else
-        results = invertSweep(mps[1:end], tau, siteinds; kargs...)
+        results = invertSweep(mps[1:end], tau, sites; kargs...)
     end
     return results
 end
 
 "Wrapper for ITensorsMPS.MPO input. Calls invertSweep by first conjugating and extracting upper and lower indices"
-function invertSweep(mpo::itmps.MPO; tau = 0, kargs...)
+function invertSweep(mpo::MPO; tau = 0, kargs...)
     obj = typeof(mpo)
     println("Attempting inversion of $obj")
     mpo = conj(mpo)
-    allinds = reduce(vcat, it.siteinds(mpo))
+    allinds = reduce(vcat, siteinds(mpo))
     # determine primelevel of inputinds, which will be the lowest found in allinds
     first2inds = allinds[1:2]   
     plev_in = 0
     while true
-        ind = it.inds(first2inds, plev = plev_in)
+        ind = inds(first2inds, plev = plev_in)
         if length(ind) > 0
             break
         end
         plev_in += 1
     end
-    siteinds = it.inds(allinds, plev = plev_in)
-    outinds = it.uniqueinds(allinds, siteinds)
+    sites = inds(allinds, plev = plev_in)
+    outinds = uniqueinds(allinds, sites)
 
     if iszero(tau)
-        results = invertSweep(mpo[1:end], siteinds; output_inds = outinds, kargs...)
+        results = invertSweep(mpo[1:end], sites; output_inds = outinds, kargs...)
     else
-        results = invertSweep(mpo[1:end], tau, siteinds; output_inds = outinds, kargs...)
+        results = invertSweep(mpo[1:end], tau, sites; output_inds = outinds, kargs...)
     end
     return results
 end
 
 "Wrapper for ITensors.ITensor input. Calls invertSweep on isometry V by first promoting it to a unitary matrix U"
-function invertSweep(V::it.ITensor, input_ind::it.Index; tau = 0, kargs...)
+function invertSweep(V::ITensor, input_ind::Index; tau = 0, kargs...)
     obj = typeof(V)
     println("Attempting inversion of $obj")
     input_dim = input_ind.space
-    output_inds = it.uniqueinds(V, input_ind)
+    output_inds = uniqueinds(V, input_ind)
     output_dim = reduce(*, [ind.space for ind in output_inds])
 
     Vmat = Array(V, output_inds, input_ind)
@@ -810,21 +810,21 @@ function _fg_disentangle(U_array::Vector{<:Matrix}, lightcone, reduced_mps, coun
     updateLightcone!(lightcone, U_array)
     d = lightcone.d
     N = length(reduced_mps)
-    siteinds = it.siteinds(reduced_mps)
+    sites = siteinds(reduced_mps)
 
     grad_j = [Array{ComplexF64}(undef, 0, 0) for _ in 1:lightcone.n_unitaries]
     purity_k = [0.0 for _ in 1:N-1]
     purity_j = [0.0 for _ in 1:lightcone.n_unitaries] #needed for gradient, less elements than pur_k
     
-    oddstep = (lightcone.siteinds[1] == it.noprime(siteinds[1]))
+    oddstep = (lightcone.siteinds[1] == noprime(sites[1]))
     for k in (isodd(counter[]) ? (N-1:-1:1) : (1:N-1))
-        it.orthogonalize!(reduced_mps, k)
+        orthogonalize!(reduced_mps, k)
         twoblocks = reduced_mps[k:k+1]
         block = twoblocks[1]*twoblocks[2]
         
         tensor = block
-        indsL = it.uniqueinds(twoblocks[1], twoblocks[2])
-        indsR = it.uniqueinds(twoblocks[2], twoblocks[1])
+        indsL = uniqueinds(twoblocks[1], twoblocks[2])
+        indsR = uniqueinds(twoblocks[2], twoblocks[1])
 
         theres_a_gate = (oddstep && isodd(k)) || (!oddstep && iseven(k))    # condition for which there's a unitary between site k and k+1
         if theres_a_gate
@@ -833,12 +833,12 @@ function _fg_disentangle(U_array::Vector{<:Matrix}, lightcone, reduced_mps, coun
             tensor_gate = lightcone.circuit[gate["pos"]]
             tensor *= tensor_gate
             upinds = gate["inds"][1:2]
-            indsL = it.replaceinds(indsL, upinds', upinds)
-            indsR = it.replaceinds(indsR, upinds', upinds)
+            indsL = replaceinds(indsL, upinds', upinds)
+            indsR = replaceinds(indsR, upinds', upinds)
         end
 
-        combL = it.combiner(indsL)
-        combR = it.combiner(indsR)
+        combL = combiner(indsL)
+        combR = combiner(indsR)
         tensor2 = conj(combL*tensor)
         tensor3 = combL*tensor*combR
         tensor4 = conj(tensor*combR)
@@ -868,7 +868,7 @@ function _fg_disentangle(U_array::Vector{<:Matrix}, lightcone, reduced_mps, coun
 end
 
 
-function disentangle!(mps::itmps.MPS, maxtau = 10; maxiter = 10000, gradtol = 1e-8, support_list = nothing)
+function disentangle!(mps::MPS, maxtau = 10; maxiter = 10000, gradtol = 1e-8, support_list = nothing)
     if isnothing(support_list)
         support_list = [(1, length(mps))]    # region of the mps we want to act on with the brickwork (in this case set to all)
     end
@@ -880,14 +880,14 @@ function disentangle!(mps::itmps.MPS, maxtau = 10; maxiter = 10000, gradtol = 1e
         lcs::Vector{Lightcone} = []
         local red_siteinds
         for i in 1:maxtau
-            it.truncate!(mps, cutoff = 1e-16)
-            it.orthogonalize!(mps, support[end]-1)
-            reduced_mps = itmps.MPS(mps[support[1]:support[end]])
+            truncate!(mps, cutoff = 1e-16)
+            orthogonalize!(mps, support[end]-1)
+            reduced_mps = MPS(mps[support[1]:support[end]])
 
             N = length(reduced_mps)
             reduced_mps.llim = N-2
             reduced_mps.rlim = N
-            red_siteinds = it.siteinds(reduced_mps)
+            red_siteinds = siteinds(reduced_mps)
 
             lc_support = (isodd(i) ? 1 : 2, iseven(i+N) ? N-1 : N)     # region the lightcone acts on - will be equal to support only if support is even and i is even, else it will be less
 
@@ -895,7 +895,7 @@ function disentangle!(mps::itmps.MPS, maxtau = 10; maxiter = 10000, gradtol = 1e
             lightcone = newLightcone(lc_sites, 1; lightbounds = (false, false))
             
             for j in 1:N
-                it.replaceind!(reduced_mps[j], red_siteinds[j], red_siteinds[j]')
+                replaceind!(reduced_mps[j], red_siteinds[j], red_siteinds[j]')
             end
 
             # setup optimization stuff

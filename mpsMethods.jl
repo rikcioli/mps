@@ -1,11 +1,10 @@
 module MPSMethods
 
-import ITensorMPS as itmps
-import ITensors as it
+using ITensors, ITensorMPS
 using LinearAlgebra, Statistics, Random, OptimKit
 using CSV, HDF5, Tables
 
-it.set_warn_order(28)
+ITensors.set_warn_order(28)
 
 
 const H = [1 1
@@ -49,26 +48,26 @@ include("ITMethods.jl")
 include("varMethods.jl")
 
 
-function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, eps_V = 1E-2, kargs...)
+function invertMPSMalz(mps::MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, eps_V = 1E-2, kargs...)
     N = length(mps)
-    siteinds = it.siteinds(mps)
-    linkinds = it.linkinds(mps)
-    linkdims = [ind.space for ind in linkinds]
+    sites = siteinds(mps)
+    links = linkinds(mps)
+    linkdims = [ind.space for ind in links]
     D = maximum(linkdims)
-    d = siteinds[div(N,2)].space
+    d = sites[div(N,2)].space
     bitlength = length(digits(D-1, base=d))     # how many qudits of dim d to represent bond dim D
 
     # adjust bond dimension so that it's the same everywhere (except boundaries)
     for j in bitlength : N-bitlength
-        link = linkinds[j]
+        link = links[j]
         if link.space < D
-            it.orthogonalize!(mps, j+1)
+            orthogonalize!(mps, j+1)
             block = mps[j]*mps[j+1]
-            U, S, Vdag = it.svd(block, (siteinds[j], linkinds[j-1]), cutoff=1e-15)
-            Sinds = (it.commonind(S, U), it.commonind(S, Vdag))
+            U, S, Vdag = svd(block, (sites[j], links[j-1]), cutoff=1e-15)
+            Sinds = (commonind(S, U), commonind(S, Vdag))
             Svec = diag(Array(S, Sinds))
             Svec_ext = [Svec; [0 for _ in 1:(D-link.space)]]
-            S = it.ITensor(diagm(Svec_ext), Sinds)
+            S = ITensor(diagm(Svec_ext), Sinds)
             mps[j] = U
             mps[j+1] = S*Vdag
         end
@@ -108,24 +107,24 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
         blockMPS = [polar_P(blocked_mps[i], blocked_siteinds[i]) for i in 1:newN]
 
         # save linkinds and create new siteinds
-        block_linkinds = it.linkinds(mps)[q:q:end]
+        block_linkinds = linkinds(mps)[q:q:end]
         block_linkinds_dims = [ind.space for ind in block_linkinds]
         
-        new_siteinds = it.siteinds(D, 2*(newN-1))
+        new_siteinds = siteinds(D, 2*(newN-1))
 
         # replace primed linkinds with new siteinds
-        it.replaceind!(blockMPS[1], block_linkinds[1]', new_siteinds[1])
-        it.replaceind!(blockMPS[end], block_linkinds[end]', new_siteinds[end])
+        replaceind!(blockMPS[1], block_linkinds[1]', new_siteinds[1])
+        replaceind!(blockMPS[end], block_linkinds[end]', new_siteinds[end])
         for i in 2:(newN-1)
-            it.replaceind!(blockMPS[i], block_linkinds[i-1]', new_siteinds[2*i-2])
-            it.replaceind!(blockMPS[i], block_linkinds[i]', new_siteinds[2*i-1])
+            replaceind!(blockMPS[i], block_linkinds[i-1]', new_siteinds[2*i-2])
+            replaceind!(blockMPS[i], block_linkinds[i]', new_siteinds[2*i-1])
         end
 
         # separate each block into 2 different sites for optimization
-        sep_mps::Vector{it.ITensor} = [blockMPS[1]]
+        sep_mps::Vector{ITensor} = [blockMPS[1]]
         for i in 2:newN-1
             iL, nL = block_linkinds[i-1], new_siteinds[2*i-2]
-            bL, S, bR = it.svd(blockMPS[i], iL, nL)
+            bL, S, bR = svd(blockMPS[i], iL, nL)
             push!(sep_mps, bL, S*bR)
         end
         push!(sep_mps, blockMPS[end])
@@ -143,7 +142,7 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
 
     ## Extract unitary matrices that must be applied on bell pairs
     # here we follow the sequential rg procedure
-    V_list::Vector{Vector{it.ITensor}} = []
+    V_list::Vector{Vector{ITensor}} = []
     V_tau_list = []
     
     for i in 1:newN
@@ -154,7 +153,7 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
         if i == 1
 
             iR = block_linkinds[1]
-            block_i[end] = it.replaceind(block_i[end], iR, new_siteinds[1])
+            block_i[end] = replaceind(block_i[end], iR, new_siteinds[1])
             block_i_Ulist = block_i
             push!(V_list, block_i_Ulist)
 
@@ -168,9 +167,9 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
 
             for j in 1:q-1
                 A = block_i[j]                              # j-th tensor in block_i
-                iR = it.commoninds(A, linkinds)[2]    # right link index
+                iR = commoninds(A, links)[2]    # right link index
                 Aprime = j > 1 ? prev_SV*A : A              # contract SV from previous svd (of the block on the left)
-                Uprime, S, V = it.svd(Aprime, it.uniqueinds(Aprime, iR, iL))
+                Uprime, S, V = svd(Aprime, uniqueinds(Aprime, iR, iL))
                 push!(block_i_Ulist, Uprime)
                 prev_SV = S*V
             end
@@ -188,8 +187,8 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
             
                 # convert back to tensor with inds ready to contract with Ctilde = prev_SV * C   
                 # and with blockMPS[i] siteinds       
-                CindR = it.commoninds(C, linkinds)[2]
-                Pinv = it.ITensor(Pinv, [iL, CindR, PnL, PnR])
+                CindR = commoninds(C, links)[2]
+                Pinv = ITensor(Pinv, [iL, CindR, PnL, PnR])
             else    #same here, only different indices
                 PiL = block_linkinds[i-1]
                 PnL = new_siteinds[2*i-2]
@@ -197,7 +196,7 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
                 P_matrix = reshape(Array(P, [PnL, PiL]), (dim, dim))
                 Pinv = inv(P_matrix)
 
-                Pinv = it.ITensor(Pinv, [iL, PnL])
+                Pinv = ITensor(Pinv, [iL, PnL])
             end
 
             Ctilde = prev_SV * C * Pinv
@@ -208,34 +207,34 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
 
         # Approximate total V_i unitary with bw circuit
         # contract isometries in block_i_Ulist as long as dimension <= d^2bitlength (efficient for D low, independent from q)
-        upinds = siteinds[q*(i-1)+1 : q*i]
+        upinds = sites[q*(i-1)+1 : q*i]
         V = reduce(*, block_i_Ulist[1:2*bitlength])
         V_upinds = upinds[1:2*bitlength]
-        V_downinds = it.uniqueinds(V, V_upinds)
+        V_downinds = uniqueinds(V, V_upinds)
         down_d = reduce(*, [ind.space for ind in V_downinds])  # will be D for i=1, D^2 elsewhere
         V_matrix = reshape(Array(V, V_upinds, V_downinds), (d^(2*bitlength), down_d))      # MUST BE MODIFIED WHEN i=1 or newN THE OUTPUT LEG IS ONLY D
         # @show typeof(V_matrix)
         # @show typeof(iso_to_unitary(V_matrix))
-        V_mpo = unitary_to_mpo(iso_to_unitary(V_matrix), siteinds = upinds)
-        it.prime!(V_mpo, q - 2*bitlength)
+        V_mpo = unitary_to_mpo(iso_to_unitary(V_matrix), sites = upinds)
+        prime!(V_mpo, q - 2*bitlength)
         
         # transform next isometries to mpo and contract with previous ones
         for k in 2*bitlength+1:q
             uk = block_i_Ulist[k]
             prev_u = block_i_Ulist[k-1]
-            uk_upinds = [it.commoninds(uk, prev_u); upinds[k]]
-            uk_downinds = it.uniqueinds(uk, uk_upinds)
+            uk_upinds = [commoninds(uk, prev_u); upinds[k]]
+            uk_downinds = uniqueinds(uk, uk_upinds)
             up_d = reduce(*, [ind.space for ind in uk_upinds])
             down_d = reduce(*, [ind.space for ind in uk_downinds])
             uk_matrix = reshape(Array(uk, uk_upinds, uk_downinds), (up_d, down_d))
             # need to decide how many identities to put to the left of uk unitaries based on up_d
             nskips = k - length(digits(up_d-1, base=d))
-            uk_mpo = unitary_to_mpo(iso_to_unitary(uk_matrix), siteinds = upinds, skip_qudits = nskips)
-            it.prime!(uk_mpo, q-k)
+            uk_mpo = unitary_to_mpo(iso_to_unitary(uk_matrix), sites = upinds, skip_qudits = nskips)
+            prime!(uk_mpo, q-k)
             V_mpo = V_mpo*uk_mpo
         end
 
-        it.replaceprime!(V_mpo, q-2*bitlength+1 => 1)
+        replaceprime!(V_mpo, q-2*bitlength+1 => 1)
         # invert final V
         _, _, _, tau = invertSweep(V_mpo; d = d, eps = eps_V/((newN^2)*d^q), kargs...)
         
@@ -247,10 +246,10 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
 
     end
 
-    zero_projs::Vector{it.ITensor} = []
+    zero_projs::Vector{ITensor} = []
     for ind in new_siteinds
         vec = [1; [0 for _ in 1:ind.space-1]]
-        push!(zero_projs, it.ITensor(vec, ind'))
+        push!(zero_projs, ITensor(vec, ind'))
     end
 
     # act with W on zeros
@@ -261,18 +260,18 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
     # just a check, can be disabled
 
     # # group blocks together
-    # block_list::Vector{it.ITensor} = []
+    # block_list::Vector{ITensor} = []
     # mps_primed = conj(mps)'''''
-    # siteinds = it.siteinds(mps_primed)
+    # sites = siteinds(mps_primed)
     # local left_tensor
     # for i in 1:newN
     #     block_i = i < newN ? mps_primed[q*(i-1)+1 : q*i] : mps_primed[q*(i-1)+1 : end]
-    #     i_siteinds = i < newN ? siteinds[q*(i-1)+1 : q*i] : siteinds[q*(i-1)+1 : end]
+    #     i_siteinds = i < newN ? sites[q*(i-1)+1 : q*i] : sites[q*(i-1)+1 : end]
     #     left_tensor = (i == 1 ? block_i[1] : block_i[1]*left_tensor)
-    #     left_tensor *= it.replaceinds(V_list[i][1], it.noprime(i_siteinds), i_siteinds)
+    #     left_tensor *= replaceinds(V_list[i][1], noprime(i_siteinds), i_siteinds)
 
     #     for j in 2:q
-    #         left_tensor *= block_i[j] * it.replaceinds(V_list[i][j], it.noprime(i_siteinds), i_siteinds)
+    #         left_tensor *= block_i[j] * replaceinds(V_list[i][j], noprime(i_siteinds), i_siteinds)
     #     end
     #     if i < newN
     #         left_tensor *= Wlayer[i]
@@ -290,11 +289,11 @@ function invertMPSMalz(mps::itmps.MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, 
     for i in 1:npairs
         W_ext = zeros(ComplexF64, (2^bitlength, 2^bitlength))   # embed W in n = bitlength qudits
         W = Wlayer[i]
-        W = reshape(Array(W, it.inds(W)), (D, D))
+        W = reshape(Array(W, inds(W)), (D, D))
         W_ext[1:D, 1:D] = W
         W_ext = reshape(W_ext, 2^(2*bitlength))
-        sites = it.siteinds(d, 2*bitlength)
-        W_mps = itmps.MPS(W_ext, sites)
+        sites = siteinds(d, 2*bitlength)
+        W_mps = MPS(W_ext, sites)
         push!(Wmps_list, W_mps)
     end
 
@@ -308,13 +307,13 @@ end
 
 
 # ONLY WORKS FOR d=2
-function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps = 1e-3, kargsP = NamedTuple(), kargsV = NamedTuple(), kargsW = NamedTuple())
+function invertMPSMalz(mps::MPS, invertMethod; q = 0, eps = 1e-3, kargsP = NamedTuple(), kargsV = NamedTuple(), kargsW = NamedTuple())
     N = length(mps)
-    siteinds = it.siteinds(mps)
-    linkinds = it.linkinds(mps)
-    linkdims = [ind.space for ind in linkinds]
+    sites = siteinds(mps)
+    links = linkinds(mps)
+    linkdims = [ind.space for ind in links]
     D = maximum(linkdims)
-    d = siteinds[div(N,2)].space
+    d = sites[div(N,2)].space
     @assert d == 2
     bitlength = length(digits(D-1, base=d))     # how many qudits of dim d to represent bond dim D
 
@@ -362,24 +361,24 @@ function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps = 1e-3, kargsP =
         blockMPS = [polar_P(blocked_mps[i], blocked_siteinds[i]) for i in 1:newN]
 
         # save linkinds and create new siteinds
-        block_linkinds = it.linkinds(mps)[q:q:end]
+        block_linkinds = linkinds(mps)[q:q:end]
         block_linkinds_dims = [ind.space for ind in block_linkinds]
         
-        new_siteinds = it.siteinds(D, 2*(newN-1))
+        new_siteinds = siteinds(D, 2*(newN-1))
 
         # replace primed linkinds with new siteinds
-        it.replaceind!(blockMPS[1], block_linkinds[1]', new_siteinds[1])
-        it.replaceind!(blockMPS[end], block_linkinds[end]', new_siteinds[end])
+        replaceind!(blockMPS[1], block_linkinds[1]', new_siteinds[1])
+        replaceind!(blockMPS[end], block_linkinds[end]', new_siteinds[end])
         for i in 2:(newN-1)
-            it.replaceind!(blockMPS[i], block_linkinds[i-1]', new_siteinds[2*i-2])
-            it.replaceind!(blockMPS[i], block_linkinds[i]', new_siteinds[2*i-1])
+            replaceind!(blockMPS[i], block_linkinds[i-1]', new_siteinds[2*i-2])
+            replaceind!(blockMPS[i], block_linkinds[i]', new_siteinds[2*i-1])
         end
 
         # separate each block into 2 different sites for optimization
-        sep_mps::Vector{it.ITensor} = [blockMPS[1]]
+        sep_mps::Vector{ITensor} = [blockMPS[1]]
         for i in 2:newN-1
             iL, nL = block_linkinds[i-1], new_siteinds[2*i-2]
-            bL, S, bR = it.svd(blockMPS[i], iL, nL)
+            bL, S, bR = svd(blockMPS[i], iL, nL)
             push!(sep_mps, bL, S*bR)
         end
         push!(sep_mps, blockMPS[end])
@@ -398,18 +397,18 @@ function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps = 1e-3, kargsP =
 
     ## Extract unitary matrices that must be applied on bell pairs
     # here we follow the sequential rg procedure
-    V_list::Vector{Vector{it.ITensor}} = []
+    V_list::Vector{Vector{ITensor}} = []
     V_mpo_list = []
 
     for i in 1:newN
 
         block_i = i < newN ? mps[q*(i-1)+1 : q*i] : mps[q*(i-1)+1 : end]
-        block_i_Ulist::Vector{it.ITensor} = []
+        block_i_Ulist::Vector{ITensor} = []
 
         # if i=1 no svd must be done, entire block 1 is already a series of isometries
         if i == 1
             iR = block_linkinds[1]
-            block_i[end] = it.replaceind(block_i[end], iR, new_siteinds[1])
+            block_i[end] = replaceind(block_i[end], iR, new_siteinds[1])
             block_i_Ulist = block_i
             push!(V_list, block_i_Ulist)
 
@@ -419,9 +418,9 @@ function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps = 1e-3, kargsP =
             local prev_SV
             for j in 1:q-1
                 A = block_i[j]                              # j-th tensor in block_i
-                iR = it.commoninds(A, linkinds)[2]    # right link index
+                iR = commoninds(A, links)[2]    # right link index
                 Aprime = j > 1 ? prev_SV*A : A              # contract SV from previous svd (of the block on the left)
-                Uprime, S, V = it.svd(Aprime, it.uniqueinds(Aprime, iR, iL))
+                Uprime, S, V = svd(Aprime, uniqueinds(Aprime, iR, iL))
                 push!(block_i_Ulist, Uprime)
                 prev_SV = S*V
             end
@@ -434,15 +433,15 @@ function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps = 1e-3, kargsP =
                 PiL, PiR = block_linkinds[i-1:i]
                 PnL, PnR = new_siteinds[2*i-2:2*i-1]
                 dim = reduce(*, block_linkinds_dims[i-1:i])
-                cup, clow = it.combiner(PnL, PnR), it.combiner(PiL, PiR)
+                cup, clow = combiner(PnL, PnR), combiner(PiL, PiR)
                 P = (P*cup)*clow
-                P_matrix = Array(P, (it.combinedind(cup), it.combinedind(clow)))
+                P_matrix = Array(P, (combinedind(cup), combinedind(clow)))
                 Pinv = inv(P_matrix)
             
                 # convert back to tensor with inds ready to contract with Ctilde = prev_SV * C   
                 # and with blockMPS[i] siteinds       
-                CindR = it.commoninds(C, linkinds)[2]
-                Pinv = it.ITensor(Pinv, (iL, CindR, PnL, PnR))
+                CindR = commoninds(C, links)[2]
+                Pinv = ITensor(Pinv, (iL, CindR, PnL, PnR))
             else    #same here, only different indices
                 PiL = block_linkinds[i-1]
                 PnL = new_siteinds[2*i-2]
@@ -450,7 +449,7 @@ function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps = 1e-3, kargsP =
                 P_matrix = reshape(Array(P, [PnL, PiL]), (dim, dim))
                 Pinv = inv(P_matrix)
 
-                Pinv = it.ITensor(Pinv, [iL, PnL])
+                Pinv = ITensor(Pinv, [iL, PnL])
             end
 
             Ctilde = prev_SV * C * Pinv
@@ -461,10 +460,10 @@ function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps = 1e-3, kargsP =
 
         # Convert total V_i unitary to MPO efficiently
         # contract isometries in block_i_Ulist as long as dimension <= d^2bitlength (efficient for D low, independent from q)
-        upinds = siteinds[q*(i-1)+1 : q*i]
+        upinds = sites[q*(i-1)+1 : q*i]
         V = reduce(*, block_i_Ulist[1:2*bitlength])
         V_upinds = upinds[1:2*bitlength]
-        V_downinds = it.uniqueinds(V, V_upinds)
+        V_downinds = uniqueinds(V, V_upinds)
         down_d = reduce(*, [ind.space for ind in V_downinds])  # will be D for i=1, D^2 elsewhere
         V_matrix = reshape(Array(V, V_upinds, V_downinds), (d^(2*bitlength), down_d))      # MUST BE MODIFIED WHEN i=1 or newN THE OUTPUT LEG IS ONLY D
         sizeV = size(V_matrix)
@@ -486,15 +485,15 @@ function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps = 1e-3, kargsP =
             end
         end
         
-        V_mpo = unitary_to_mpo(V_matrix, siteinds = upinds)
-        it.prime!(V_mpo, q - 2*bitlength)   # we prime to contract with the next MPOs
+        V_mpo = unitary_to_mpo(V_matrix, sites = upinds)
+        prime!(V_mpo, q - 2*bitlength)   # we prime to contract with the next MPOs
         
         # transform next isometries to mpo and contract with previous ones
         for k in 2*bitlength+1:q
             uk = block_i_Ulist[k]
             prev_u = block_i_Ulist[k-1]
-            uk_upinds = [it.commoninds(uk, prev_u); upinds[k]]
-            uk_downinds = it.uniqueinds(uk, uk_upinds)
+            uk_upinds = [commoninds(uk, prev_u); upinds[k]]
+            uk_downinds = uniqueinds(uk, uk_upinds)
             up_d = reduce(*, [ind.space for ind in uk_upinds])
             down_d = reduce(*, [ind.space for ind in uk_downinds])
             uk_matrix = reshape(Array(uk, uk_upinds, uk_downinds), (up_d, down_d))
@@ -516,37 +515,37 @@ function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps = 1e-3, kargsP =
 
             # need to decide how many identities to put to the left of uk unitaries based on up_d
             nskips = k - length(digits(up_d-1, base=d))
-            uk_mpo = unitary_to_mpo(uk_matrix, siteinds = upinds, skip_qudits = nskips)
-            it.prime!(uk_mpo, q-k)
+            uk_mpo = unitary_to_mpo(uk_matrix, sites = upinds, skip_qudits = nskips)
+            prime!(uk_mpo, q-k)
             V_mpo = V_mpo*uk_mpo
         end
 
-        it.replaceprime!(V_mpo, q-2*bitlength+1 => 1)
+        replaceprime!(V_mpo, q-2*bitlength+1 => 1)
         push!(V_mpo_list, V_mpo)
     end
     
 
     # BELL PAIRS PREPARATION
     # prepare |0> state and act with W
-    zero_projs::Vector{it.ITensor} = []
+    zero_projs::Vector{ITensor} = []
     for ind in new_siteinds
         vec = [1; [0 for _ in 1:ind.space-1]]
-        push!(zero_projs, it.ITensor(vec, ind'))
+        push!(zero_projs, ITensor(vec, ind'))
     end
     Wlayer = [W_list[i] * zero_projs[2*i-1] * zero_projs[2*i] for i in 1:npairs]
 
     # turn W|0> states into MPSs
     Wmps_list = []
     for i in 1:npairs
-        sitesL = siteinds[q*i-bitlength+1 : q*i]
-        sitesR = siteinds[q*i+1 : q*i+bitlength]
-        cL = it.combiner(sitesL)
-        it.replaceind!(cL, it.combinedind(cL), new_siteinds[2*i-1])
-        cR = it.combiner(sitesR)
-        it.replaceind!(cR, it.combinedind(cR), new_siteinds[2*i])
+        sitesL = sites[q*i-bitlength+1 : q*i]
+        sitesR = sites[q*i+1 : q*i+bitlength]
+        cL = combiner(sitesL)
+        replaceind!(cL, combinedind(cL), new_siteinds[2*i-1])
+        cR = combiner(sitesR)
+        replaceind!(cR, combinedind(cR), new_siteinds[2*i])
 
         Wi = (Wlayer[i]*cL)*cR
-        W_mps = itmps.MPS(Wi, [sitesL; sitesR])
+        W_mps = MPS(Wi, [sitesL; sitesR])
         push!(Wmps_list, W_mps)
     end
 
@@ -558,18 +557,18 @@ function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps = 1e-3, kargsP =
 
 
     # compute numerically total error by creating a 0 state and applying everything in sequence
-    mps_final = initialize_vac(N, siteinds)
+    mps_final = initialize_vac(N, sites)
     apply!(mps_final, W_lc_list)
 
     # compare with exact W|0>
-    Wexact = [it.ITensor([1; 0], siteinds[i]) for i in 1:N]
+    Wexact = [ITensor([1; 0], sites[i]) for i in 1:N]
     for i in 1:npairs
         for j in q*i-bitlength+1 : q*i+bitlength
             jshift = j-(q*i-bitlength)
             Wexact[j] = Wmps_list[i][jshift]
         end
     end
-    Wstep_mps = itmps.MPS(Wexact)
+    Wstep_mps = MPS(Wexact)
     err_W = 1-abs(Array(contract(conj(Wstep_mps), mps_final))[1])
     @show err_W 
 
@@ -585,8 +584,8 @@ function invertMPSMalz(mps::itmps.MPS, invertMethod; q = 0, eps = 1e-3, kargsP =
     end
 
     # apply V_mpo on Wstep_mps to check that conversion to mpo worked - must be equal to the fidelity obtained in the blocking part
-    V_mpo_final = itmps.MPO(reduce(vcat, [mpo[1:end] for mpo in V_mpo_list]))
-    res = it.apply(V_mpo_final, Wstep_mps)
+    V_mpo_final = MPO(reduce(vcat, [mpo[1:end] for mpo in V_mpo_list]))
+    res = apply(V_mpo_final, Wstep_mps)
     fidelity = abs(Array(contract(conj(mps), res))[1])
     @show fidelity
 
@@ -637,19 +636,19 @@ end
 
 
 "Cost function and gradient for invertGlobalSweep optimization"
-function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITensor})
+function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{ITensor})
     updateLightcone!(lightcone, U_array)
     d = lightcone.d
     N = lightcone.size
     plevconj = lightcone.depth+1    #inds of conj mps are primed to depth+1
     interval = lightcone.range[end]
 
-    siteinds = it.prime(lightcone.siteinds, lightcone.depth)
-    reduced_mps = [it.prime(tensor, lightcone.depth) for tensor in reduced_mps]
-    reduced_mps_conj = [conj(it.prime(tensor, plevconj)) for tensor in reduced_mps]   
+    sites = prime(lightcone.siteinds, lightcone.depth)
+    reduced_mps = [prime(tensor, lightcone.depth) for tensor in reduced_mps]
+    reduced_mps_conj = [conj(prime(tensor, plevconj)) for tensor in reduced_mps]   
 
     # prepare right blocks to save contractions
-    R_blocks::Vector{it.ITensor} = []
+    R_blocks::Vector{ITensor} = []
 
     # prepare zero matrices for middle qubits
     d = lightcone.d
@@ -660,20 +659,20 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITe
     # first item is the contraction of first tensor of reduced_mps, first tensor of reduced_mps_conj, 
     # a delta/zero projector connecting their siteind, a delta connecting their left link (if any).
     # insert a zero proj if we are in region A, else insert identity
-    ind = it.noprime(siteinds[1])
-    middle_op = (interval[1] <= 1 <= interval[2]) ? it.ITensor(zero_mat, ind, it.prime(ind, plevconj)) : it.delta(ind, it.prime(ind, plevconj))
+    ind = noprime(sites[1])
+    middle_op = (interval[1] <= 1 <= interval[2]) ? ITensor(zero_mat, ind, prime(ind, plevconj)) : delta(ind, prime(ind, plevconj))
     leftmost_block = reduced_mps[1]*middle_op*reduced_mps_conj[1]
     # connect left links if any
-    l1 = it.uniqueind(reduced_mps[1], siteinds[1], reduced_mps[2])
+    l1 = uniqueind(reduced_mps[1], sites[1], reduced_mps[2])
     if !isnothing(l1)
-        leftmost_block *= it.delta(l1, it.prime(l1, plevconj))
+        leftmost_block *= delta(l1, prime(l1, plevconj))
     end
 
     # prepare R_N by multipliying the tensors of the last site
-    lN = it.uniqueind(reduced_mps[N], siteinds[N], reduced_mps[N-1])
+    lN = uniqueind(reduced_mps[N], sites[N], reduced_mps[N-1])
     rightmost_block = reduced_mps[N]*reduced_mps_conj[N]
     if !isnothing(lN)
-        rightmost_block *= it.delta(lN, it.prime(lN, plevconj))
+        rightmost_block *= delta(lN, prime(lN, plevconj))
     end
 
     # contract everything on the left and save rightmost_block at each intermediate step
@@ -683,11 +682,11 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITe
         tensors_left = [lightcone.circuit[gate["pos"]] for gate in gates_k if gate["orientation"]=="L"]
 
         # insert a zero proj if we are in region A, else insert identity
-        ind = it.noprime(siteinds[k])
-        middle_op = (interval[1] <= k <= interval[2]) ? it.ITensor(zero_mat, ind, it.prime(ind, plevconj)) : it.delta(ind, it.prime(ind, plevconj))
+        ind = noprime(sites[k])
+        middle_op = (interval[1] <= k <= interval[2]) ? ITensor(zero_mat, ind, prime(ind, plevconj)) : delta(ind, prime(ind, plevconj))
 
         # put left tensors and middle op together with conj reversed left tensors
-        tensors_left = [tensors_left; middle_op; reverse([conj(it.prime(tensor, plevconj)) for tensor in tensors_left])]
+        tensors_left = [tensors_left; middle_op; reverse([conj(prime(tensor, plevconj)) for tensor in tensors_left])]
 
         all_blocks = (k==N ? tensors_left : [reduced_mps[k]; tensors_left; reduced_mps_conj[k]]) # add sites
         for block in all_blocks
@@ -705,21 +704,21 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{it.ITe
         tensors_left = [lightcone.circuit[gate["pos"]] for gate in gates_j if gate["orientation"]=="L"]
 
         # insert a zero proj if we are in region A, else insert identity
-        ind = it.noprime(siteinds[j])
-        middle_op = (interval[1] <= j <= interval[2]) ? it.ITensor(zero_mat, ind, it.prime(ind, plevconj)) : it.delta(ind, it.prime(ind, plevconj))
+        ind = noprime(sites[j])
+        middle_op = (interval[1] <= j <= interval[2]) ? ITensor(zero_mat, ind, prime(ind, plevconj)) : delta(ind, prime(ind, plevconj))
 
         # evaluate gradient by removing each gate
         # prepare contraction of conj gates since they are the same for each lower gate
         # the order of contractions is chosen so that the number of indices does not increase
         # except for the last two terms: on j odds the index number will increase by 1, but we need to store the site tensors
         # on the leftmost_block anyway to proceed with the sweep
-        contract_left_upper = [reverse([conj(it.prime(tensor, plevconj)) for tensor in tensors_left]); middle_op; reduced_mps_conj[j]; reduced_mps[j]]
+        contract_left_upper = [reverse([conj(prime(tensor, plevconj)) for tensor in tensors_left]); middle_op; reduced_mps_conj[j]; reduced_mps[j]]
         for gate in contract_left_upper
             leftmost_block *= gate
         end
 
         if j == N && !isnothing(lN)     # check whether the reduced mps has a link on the right or not and in case complete the contraction 
-            leftmost_block *= it.delta(lN, it.prime(lN, plevconj))
+            leftmost_block *= delta(lN, prime(lN, plevconj))
         end
 
         upper_env = j<N ? leftmost_block*rightmost_block : leftmost_block
@@ -764,11 +763,11 @@ end
 
 
 
-function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5)
+function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
 
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
-    siteinds = it.siteinds(mps)
+    sites = siteinds(mps)
     eps1 = eps # error of the whole first part, that is inversion of reduced dm + truncation
     eps2 = eps # error of the second part, that is inversion of the pure states
     println("Attempting inversion of MPS with invertMPSLiu and errors:\neps1 = $eps1\neps2 = $eps2")
@@ -839,9 +838,9 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5)
         reduced_mps_list = []
         k_sites_list = []
         for (first_site, last_site) in rangesAB
-            it.orthogonalize!(mps_copy, div(first_site+last_site, 2))
+            orthogonalize!(mps_copy, div(first_site+last_site, 2))
             push!(reduced_mps_list, mps_copy[first_site:last_site])
-            push!(k_sites_list, siteinds[first_site:last_site])
+            push!(k_sites_list, sites[first_site:last_site])
         end
 
         println("Inverting reduced density matrices...")
@@ -930,8 +929,8 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5)
     
     # Now we proceed with inversion of all pure states
     epsinv2 = 2*eps2/length(rangesA)^2     # heuristic, the scaling is 1/L^2
-    trunc_siteinds = it.siteinds(mps_trunc)
-    trunc_linkinds = it.linkinds(mps_trunc)
+    trunc_siteinds = siteinds(mps_trunc)
+    trunc_linkinds = linkinds(mps_trunc)
     ranges = []
     for l in 1:length(boundaries)-1
         push!(ranges, (boundaries[l]+1, boundaries[l+1]))
@@ -960,19 +959,19 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5)
         reduced_mps = mps_trunc[range[1]:range[2]]
         
         if range[1]>1
-            comb1 = it.combiner(trunc_linkinds[range[1]-1], trunc_siteinds[range[1]])
+            comb1 = combiner(trunc_linkinds[range[1]-1], trunc_siteinds[range[1]])
             reduced_mps[1] *= comb1
-            cind = it.combinedind(comb1)
-            it.replaceind!(reduced_mps[1], cind, trunc_siteinds[range[1]])
+            cind = combinedind(comb1)
+            replaceind!(reduced_mps[1], cind, trunc_siteinds[range[1]])
         end
         if range[end]<N
-            comb2 = it.combiner(trunc_linkinds[range[2]], trunc_siteinds[range[2]])
+            comb2 = combiner(trunc_linkinds[range[2]], trunc_siteinds[range[2]])
             reduced_mps[end] *= comb2
-            cind = it.combinedind(comb2)
-            it.replaceind!(reduced_mps[end], cind, trunc_siteinds[range[2]])
+            cind = combinedind(comb2)
+            replaceind!(reduced_mps[end], cind, trunc_siteinds[range[2]])
         end
         
-        reduced_mps = itmps.MPS(reduced_mps)
+        reduced_mps = MPS(reduced_mps)
         push!(reduced_mps_list, reduced_mps)
     end
     
@@ -1010,7 +1009,7 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5)
         err2 = 1-abs(dot(mps_final, mps_trunc))
         @show err2
 
-        it.replace_siteinds!(mps_final, siteinds)
+        replace_siteinds!(mps_final, sites)
         apply!(mps_final, lc_list, dagger=true)
         
         err_total = 1-abs(dot(mps_final, mps))
@@ -1032,7 +1031,7 @@ function invertMPSLiu(mps::itmps.MPS, invertMethod; start_tau = 1, eps = 1e-5)
 end
 
 
-function invertMPSfinal(mps::itmps.MPS, invertMethod; eps = 1e-5)
+function invertMPSfinal(mps::MPS, invertMethod; eps = 1e-5)
     N = length(mps)
 
     results = invertMPSLiu(mps, invertMethod; eps = 0.1)
@@ -1048,7 +1047,7 @@ function invertMPSfinal(mps::itmps.MPS, invertMethod; eps = 1e-5)
     @show ltg_map, ltg_map2, tau1, tau2
 
     mps_final = results["mps_final"]
-    siteinds = it.siteinds(mps_final)
+    sites = siteinds(mps_final)
     
     reg1_size = lc_list2[1].size
     reduced = isodd(tau2)    # WILL ONLY WORK AS LONG AS SPACING OF THE LC_LIST1 IS EVEN, WHICH IS THE DEFAULT IN OPTLIU AND CANNOT BE MODIFIED
@@ -1058,7 +1057,7 @@ function invertMPSfinal(mps::itmps.MPS, invertMethod; eps = 1e-5)
     end
 
     site1_empty = isodd(reg1_size)
-    lightcone = newLightcone(siteinds, tau; U_array = Matrix[], lightbounds = (false, false), site1_empty = site1_empty)
+    lightcone = newLightcone(sites, tau; U_array = Matrix[], lightbounds = (false, false), site1_empty = site1_empty)
 
     for j in 1:N
         # extract gates from second part (i.e. those that need to act first on 0)
@@ -1097,10 +1096,10 @@ function invertMPSfinal(mps::itmps.MPS, invertMethod; eps = 1e-5)
         end
     end
 
-    zero = initialize_vac(N, siteinds)
+    zero = initialize_vac(N, sites)
     apply!(zero, lightcone)
 
-    #zero2 = initialize_vac(N, siteinds)
+    #zero2 = initialize_vac(N, sites)
     #apply!(zero2, lc_list2)
 
     fid = abs(dot(zero, mps_final))
@@ -1130,7 +1129,7 @@ end
 
 
 
-function invertMPSculo(mps::itmps.MPS; kargs...)
+function invertMPSculo(mps::MPS; kargs...)
     N = length(mps)
     mps_trunc = deepcopy(mps)
     for i in 1:N-1
@@ -1138,16 +1137,16 @@ function invertMPSculo(mps::itmps.MPS; kargs...)
     end
     @show abs(dot(mps, mps_trunc))
 
-    it.orthogonalize!(mps_trunc, N)
-    siteinds = it.siteinds(mps_trunc)
-    linkinds = it.linkinds(mps_trunc)
+    orthogonalize!(mps_trunc, N)
+    sites = siteinds(mps_trunc)
+    links = linkinds(mps_trunc)
 
-    combiners1 = [it.combiner((siteinds[1], linkinds[1]))]
-    combiners = [it.combiner([siteinds[i]; linkinds[i-1:i]]) for i in 2:N-1]
-    combinersN = [it.combiner((siteinds[N], linkinds[N-1]))]
+    combiners1 = [combiner((sites[1], links[1]))]
+    combiners = [combiner([sites[i]; links[i-1:i]]) for i in 2:N-1]
+    combinersN = [combiner((sites[N], links[N-1]))]
     combiners = [combiners1; combiners; combinersN]
 
-    combinedinds = [it.combinedind(comb) for comb in combiners]
+    combinedinds = [combinedind(comb) for comb in combiners]
     tensor_list = [combiners[i]*mps_trunc[i] for i in 1:N]
 
     Vlist = [Array(tensor_list[i], combinedinds[i]) for i in 1:N]

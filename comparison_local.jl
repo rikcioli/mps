@@ -1,14 +1,13 @@
 include("mpsMethods.jl")
 import .MPSMethods as mt
-import ITensorMPS as itmps
-import ITensors as it
 import Plots
+using ITensors, ITensorMPS
 using LaTeXStrings, LinearAlgebra, Statistics, Random
 using CSV
 using DataFrames, StatsPlots
 using DelimitedFiles
 
-it.set_warn_order(28)
+ITensors.set_warn_order(28)
 
 @show Threads.nthreads()
 
@@ -25,8 +24,8 @@ function execute(command, N, eps_array; D = 2, tau = 3)
     elseif command == "FDQC"
         test = mt.initialize_fdqc(N, tau)
     elseif command == "FDMPO"
-        siteinds = it.siteinds("Qubit", N)
-        test = mt.MPO(mt.newLightcone(siteinds, tau))
+        sites = siteinds("Qubit", N)
+        test = mt.MPO(mt.newLightcone(sites, tau))
     end
 
     tau_sweep = []
@@ -122,7 +121,7 @@ end
 "Constructs a random MPS of N qubits and bond dimension D and inverts up to maxtau, saving errors at each step"
 function test(N::Integer, D::Integer, maxtau::Integer)
     #mps = mt.initialize_fdqc(N, D)
-    mps = it.random_mps(it.siteinds("Qubit", N); linkdims = D)
+    mps = random_mps(siteinds("Qubit", N); linkdims = D)
     reslist = []
     best_guess = nothing
     for tau in 1:maxtau
@@ -148,7 +147,7 @@ saving the half-chain entanglement entropy at each step"
 function test2(N::Integer, D::Integer)
     N2 = div(N,2)
     #mps = mt.initialize_fdqc(N, N2+mod(N2+1,2))
-    mps = it.random_mps(it.siteinds("Qubit", N); linkdims = D)
+    mps = random_mps(siteinds("Qubit", N); linkdims = D)
     maxtau = N+1
     tau_list = 1:maxtau
     reslist = []
@@ -163,7 +162,7 @@ function test2(N::Integer, D::Integer)
     
     entropy_tau = []
     for tau in 1:maxtau
-        zero = mt.initialize_vac(N, it.siteinds(mps))
+        zero = mt.initialize_vac(N, siteinds(mps))
         entropy_arr = []
         mt.apply!(zero, reslist[tau]["lightcone"]; entropy_arr = entropy_arr)
         push!(entropy_tau, entropy_arr)
@@ -214,7 +213,7 @@ end
 
 let
     N = 100
-    mps = it.random_mps(it.siteinds("Qubit", N); linkdims = 2)
+    mps = random_mps(siteinds("Qubit", N); linkdims = 2)
     results = mt.invertMPSculo(mps; eps = 0.01, nruns = 1, maxiter = 30000)
     #results = mt.invert(mps, mt.invertGlobalSweep; eps = 0.01, nruns = 4, gradtol = 1e-8, maxiter = 50000)
     data = DataFrame(err = results["err"], tau = results["tau"])

@@ -2,8 +2,8 @@
 ### CUSTOM ITENSOR METHODS
 
 "Converts order-4 ITensor to N x N matrix following the order of indices in 'order'"
-function tensor_to_matrix(T::it.ITensor, order = [1,2,3,4])
-    inds = it.inds(T)
+function tensor_to_matrix(T::ITensor, order = [1,2,3,4])
+    inds = inds(T)
     ord_inds = [inds[i] for i in order]
     M = reshape(Array(T, ord_inds), (ord_inds[1].space^2, ord_inds[1].space^2))
     return M
@@ -38,38 +38,38 @@ end
 
 
 "Computes full polar decomposition"
-function polar(block::it.ITensor, inds::Vector{it.Index{Int64}})
+function polar(block::ITensor, inds::Vector{Index{Int64}})
     spaceU = reduce(*, [ind.space for ind in inds])
-    spaceV = reduce(*, [ind.space for ind in it.uniqueinds(block, inds)])
+    spaceV = reduce(*, [ind.space for ind in uniqueinds(block, inds)])
     #if spaceU > spaceV
     #    throw("Polar decomposition of block failed: make sure link space is bigger than physical space")
     #end
-    U, S, V = it.svd(block, inds)
-    u, v = it.inds(S)
+    U, S, V = svd(block, inds)
+    u, v = inds(S)
     
-    Vdag = it.replaceind(conj(V)', v', u)
+    Vdag = replaceind(conj(V)', v', u)
     P = Vdag * S * V
 
-    V = it.replaceind(V', v', u)
+    V = replaceind(V', v', u)
     W = U * V
 
     return W, P
 end
 
 "Computes polar decomposition but only returning P (efficient)"
-function polar_P(block::Vector{it.ITensor}, inds::Vector{it.Index{Int64}})
+function polar_P(block::Vector{ITensor}, inds::Vector{Index{Int64}})
     q = length(block)
     block_conj = [conj(tens)' for tens in block]
-    left_tensor = block[1] * block_conj[1] * it.delta(inds[1], inds[1]')
+    left_tensor = block[1] * block_conj[1] * delta(inds[1], inds[1]')
     for j in 2:q
-        left_tensor *= block[j] * block_conj[j] * it.delta(inds[j], inds[j]')
+        left_tensor *= block[j] * block_conj[j] * delta(inds[j], inds[j]')
     end
 
-    low_inds = reduce(it.noncommoninds, [block; inds])
+    low_inds = reduce(noncommoninds, [block; inds])
     dim = reduce(*, [ind.space for ind in low_inds])
     mat = reshape(Array(left_tensor, (low_inds', low_inds)), (dim, dim))
     P = sqrt(mat)
-    P = it.ITensor(P, (low_inds', low_inds))
+    P = ITensor(P, (low_inds', low_inds))
     return P
 end
 
@@ -80,47 +80,47 @@ end
 ### CUSTOM MPS METHODS ###
 
 "Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
-function apply(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-14)
+function apply(U::Matrix, psi::MPS, b::Integer; cutoff = 1E-14)
     psi = deepcopy(psi)
-    it.orthogonalize!(psi, b)
-    s = it.siteinds(psi)
-    op = it.op(U, s[b+1], s[b])
+    orthogonalize!(psi, b)
+    s = siteinds(psi)
+    op = op(U, s[b+1], s[b])
 
-    wf = it.noprime((psi[b]*psi[b+1])*op)
-    indsb = it.uniqueinds(psi[b], psi[b+1])
-    U, S, V = it.svd(wf, indsb, cutoff = cutoff)
+    wf = noprime((psi[b]*psi[b+1])*op)
+    indsb = uniqueinds(psi[b], psi[b+1])
+    U, S, V = svd(wf, indsb, cutoff = cutoff)
     psi[b] = U
     psi[b+1] = S*V
     return psi
 end
 
 "Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
-function apply!(U::Matrix, psi::itmps.MPS, b::Integer; cutoff = 1E-15)
-    it.orthogonalize!(psi, b)
-    s = it.siteinds(psi)
-    op = it.op(U, s[b+1], s[b])
+function apply!(U::Matrix, psi::MPS, b::Integer; cutoff = 1E-15)
+    orthogonalize!(psi, b)
+    s = siteinds(psi)
+    op = op(U, s[b+1], s[b])
 
-    wf = it.noprime((psi[b]*psi[b+1])*op)
-    indsb = it.uniqueinds(psi[b], psi[b+1])
-    U, S, V = it.svd(wf, indsb, cutoff = cutoff)
+    wf = noprime((psi[b]*psi[b+1])*op)
+    indsb = uniqueinds(psi[b], psi[b+1])
+    U, S, V = svd(wf, indsb, cutoff = cutoff)
     psi[b] = U
     psi[b+1] = S*V
 end
 
 "Apply 2-qubit ITensors.ITensor U to sites b and b+1 of Vector{ITensors.ITensor} psi"
-function contract!(psi::Vector{it.ITensor}, U::it.ITensor, b; cutoff = 1E-15)
-    summed_inds = it.commoninds(U, it.unioninds(psi[b], psi[b+1]))
-    outinds = it.uniqueinds(U, summed_inds)
+function contract!(psi::Vector{ITensor}, U::ITensor, b; cutoff = 1E-15)
+    summed_inds = commoninds(U, unioninds(psi[b], psi[b+1]))
+    outinds = uniqueinds(U, summed_inds)
     W = U*psi[b]*psi[b+1]
-    it.replaceinds!(W, outinds, summed_inds)
-    indsb = it.uniqueinds(psi[b], psi[b+1])
-    U, S, V = it.svd(W, indsb, cutoff = cutoff)
-    psi[b] = it.replaceinds(U, summed_inds, outinds)
-    psi[b+1] = it.replaceinds(S*V, summed_inds, outinds)
+    replaceinds!(W, outinds, summed_inds)
+    indsb = uniqueinds(psi[b], psi[b+1])
+    U, S, V = svd(W, indsb, cutoff = cutoff)
+    psi[b] = replaceinds(U, summed_inds, outinds)
+    psi[b+1] = replaceinds(S*V, summed_inds, outinds)
 end
 
 "Multiply two mps/mpo respecting their indices"
-function contract(psi1::Union{itmps.MPS, itmps.MPO, Vector{it.ITensor}}, psi2::Union{itmps.MPS, itmps.MPO, Vector{it.ITensor}})
+function contract(psi1::Union{MPS, MPO, Vector{ITensor}}, psi2::Union{MPS, MPO, Vector{ITensor}})
     left_tensor = psi1[1] * psi2[1]
     for i in 2:length(psi1)
         left_tensor *= psi1[i]
@@ -130,12 +130,12 @@ function contract(psi1::Union{itmps.MPS, itmps.MPO, Vector{it.ITensor}}, psi2::U
 end
 
 
-function entropy(psi::itmps.MPS, b::Integer)  
-    it.orthogonalize!(psi, b)
-    indsb = it.uniqueinds(psi[b], psi[b+1])
-    U, S, V = it.svd(psi[b], indsb, cutoff = 1E-15)
+function entropy(psi::MPS, b::Integer)  
+    orthogonalize!(psi, b)
+    indsb = uniqueinds(psi[b], psi[b+1])
+    U, S, V = svd(psi[b], indsb, cutoff = 1E-15)
     SvN = 0.0
-    for n in 1:it.dim(S, 1)
+    for n in 1:dim(S, 1)
       p = S[n,n]^2
       SvN -= p * log(p)
     end
@@ -143,51 +143,51 @@ function entropy(psi::itmps.MPS, b::Integer)
 end
 
 "Truncate mps at position b until bond dimension of link (b, b+1) becomes 1"
-function cut!(psi::itmps.MPS, b::Integer)
-    it.orthogonalize!(psi, b)
-    indsb = it.uniqueinds(psi[b], psi[b+1])
-    U, S, V = it.svd(psi[b]*psi[b+1], indsb, cutoff = 1E-18)
+function cut!(psi::MPS, b::Integer)
+    orthogonalize!(psi, b)
+    indsb = uniqueinds(psi[b], psi[b+1])
+    U, S, V = svd(psi[b]*psi[b+1], indsb, cutoff = 1E-18)
 
-    u, v = it.inds(S)
-    w = it.Index(1)
-    projU = it.ITensor([1; [0 for _ in 1:u.space-1]], (u,w))
-    projV = it.ITensor([1; [0 for _ in 1:v.space-1]], (w,v))
+    u, v = inds(S)
+    w = Index(1)
+    projU = ITensor([1; [0 for _ in 1:u.space-1]], (u,w))
+    projV = ITensor([1; [0 for _ in 1:v.space-1]], (w,v))
     psi[b] = U*projU
     psi[b+1] = projV*V
 end
 
 
-function brickwork(psi::itmps.MPS, brick_odd::Matrix, brick_even::Matrix, t::Integer; cutoff = 1E-15)
+function brickwork(psi::MPS, brick_odd::Matrix, brick_even::Matrix, t::Integer; cutoff = 1E-15)
     N = length(psi)
-    sites = it.siteinds(psi)
-    layerOdd = [it.op(brick_odd, sites[b+1], sites[b]) for b in 1:2:(N-1)]
-    layerEven = [it.op(brick_even, sites[b+1], sites[b]) for b in 2:2:(N-1)]
+    sites = siteinds(psi)
+    layerOdd = [op(brick_odd, sites[b+1], sites[b]) for b in 1:2:(N-1)]
+    layerEven = [op(brick_even, sites[b+1], sites[b]) for b in 2:2:(N-1)]
     for i in 1:t
         layer = isodd(i) ? layerOdd : layerEven
-        psi = it.apply(layer, psi, cutoff = cutoff)
+        psi = apply(layer, psi, cutoff = cutoff)
     end
     return psi
 end
 
 
 "Apply depth-t brickwork of 2-local random unitaries"
-function brickwork(psi::itmps.MPS, t::Integer; cutoff = 1E-15)
+function brickwork(psi::MPS, t::Integer; cutoff = 1E-15)
     N = length(psi)
-    sites = it.siteinds(psi)
+    sites = siteinds(psi)
     d = sites[1].space
     for i in 1:t
-        layer = [it.op(random_unitary(d^2), sites[b+1], sites[b]) for b in (isodd(i) ? 1 : 2):2:(N-1)]
-        psi = it.apply(layer, psi, cutoff = cutoff)
+        layer = [op(random_unitary(d^2), sites[b+1], sites[b]) for b in (isodd(i) ? 1 : 2):2:(N-1)]
+        psi = apply(layer, psi, cutoff = cutoff)
     end
     return psi
 end
 
-function initialize_vac(N::Integer, siteinds = nothing)
-    if isnothing(siteinds)
-        siteinds = it.siteinds("Qubit", N)
+function initialize_vac(N::Integer, sites = nothing)
+    if isnothing(sites)
+        sites = siteinds("Qubit", N)
     end
     states = ["0" for _ in 1:N]
-    vac = itmps.MPS(siteinds, states)
+    vac = MPS(sites, states)
     return vac
 end
 
@@ -214,21 +214,21 @@ function initialize_fdqc(N::Integer, tau::Integer, brick_odd::Matrix, brick_even
 end
 
 function initialize_ising(N::Integer, h::Real; nsweeps = 10)
-    sites = it.siteinds("Qubit",N)
+    sites = siteinds("Qubit",N)
 
-    os = it.OpSum()
+    os = OpSum()
     for j=1:N-1
       os += -1.,"Z",j,"Z",j+1
       os += -h,"X",j
     end
     os += -h,"X",N
-    H = it.MPO(os,sites)
+    H = MPO(os,sites)
 
-    psi0 = it.random_mps(sites; linkdims=2)
+    psi0 = random_mps(sites; linkdims=2)
     maxdim = 200
     cutoff = 1E-12
 
-    energy, psi = it.dmrg(H,psi0;nsweeps,maxdim,cutoff)
+    energy, psi = dmrg(H,psi0;nsweeps,maxdim,cutoff)
 
     return energy, psi
 end
@@ -236,55 +236,55 @@ end
 function initialize_2Dheisenberg(Nx::Integer, Ny::Integer, Jx::Real, Jy::Real, Jz::Real; nsweeps = 10)
 
     N = Nx*Ny
-    sites = it.siteinds("Qubit",N)
+    sites = siteinds("Qubit",N)
 
     # Obtain an array of LatticeBond structs
     # which define nearest-neighbor site pairs
     # on the 2D square lattice
-    lattice = it.square_lattice(Nx, Ny)
+    lattice = square_lattice(Nx, Ny)
 
-    os = it.OpSum()
+    os = OpSum()
     for b in lattice
         os += -Jz, "Z", b.s1, "Z", b.s2
         os += -Jx, "X", b.s1, "X", b.s2
         os += -Jy, "Y", b.s1, "Y", b.s2
     end
-    H = it.MPO(os,sites)
+    H = MPO(os,sites)
 
-    psi0 = it.random_mps(sites; linkdims=2)
+    psi0 = random_mps(sites; linkdims=2)
     maxdim = [64]
     cutoff = [1E-15]
 
-    energy, psi = it.dmrg(H,psi0;nsweeps,maxdim,cutoff)
+    energy, psi = dmrg(H,psi0;nsweeps,maxdim,cutoff)
 
     return energy, psi
 end
 
 # function initialize_fdqc(N::Integer, tau::Integer, lightbounds, gate = nothing, d = 2)
 #     mps = initialize_vac(N)
-#     siteinds = it.siteinds(mps)
-#     lc = newLightcone(siteinds, tau, U_array = U_array, lightbounds = lightbounds)
-#     it.prime!(mps, tau)
+#     sites = siteinds(mps)
+#     lc = newLightcone(sites, tau, U_array = U_array, lightbounds = lightbounds)
+#     prime!(mps, tau)
 #     contract!(mps, lc)
-#     mps = it.noprime(mps)
+#     mps = noprime(mps)
 #     return mps
 # end
 
 "Returns mps of Haar random isometries with bond dimension D"
-function randMPS(sites::Vector{<:it.Index}, D::Integer)
+function randMPS(sites::Vector{<:Index}, D::Integer)
     N = length(sites)
     d = sites[1].space
 
-    mps = itmps.MPS(sites, linkdims = D)
-    links = it.linkinds(mps)
+    mps = MPS(sites, linkdims = D)
+    links = linkinds(mps)
 
-    U0 = it.ITensor(random_unitary(d*D), (sites[1], links[1]', links[1], sites[1]'))
-    U_list = [it.ITensor(random_unitary(d*D), (sites[i], links[i-1], links[i], sites[i]')) for i in 2:N-1]
-    UN = it.ITensor(random_unitary(d*D), (sites[N], links[N-1], links[N-1]', sites[N]'))
+    U0 = ITensor(random_unitary(d*D), (sites[1], links[1]', links[1], sites[1]'))
+    U_list = [ITensor(random_unitary(d*D), (sites[i], links[i-1], links[i], sites[i]')) for i in 2:N-1]
+    UN = ITensor(random_unitary(d*D), (sites[N], links[N-1], links[N-1]', sites[N]'))
 
-    zero_projs::Vector{it.ITensor} = [it.ITensor([1; [0 for _ in 2:d]], site') for site in sites]
-    zero_L = it.ITensor([1; [0 for _ in 2:D]], links[1]')
-    zero_R = it.ITensor([1; [0 for _ in 2:D]], links[N-1]')
+    zero_projs::Vector{ITensor} = [ITensor([1; [0 for _ in 2:d]], site') for site in sites]
+    zero_L = ITensor([1; [0 for _ in 2:D]], links[1]')
+    zero_R = ITensor([1; [0 for _ in 2:D]], links[N-1]')
 
     U0 *= zero_L
     UN *= zero_R
@@ -295,46 +295,46 @@ function randMPS(sites::Vector{<:it.Index}, D::Integer)
     for i in 1:N
         mps[i] = tensors[i]
     end
-    it.orthogonalize!(mps, div(N,2))
-    it.normalize!(mps)
-    it.orthogonalize!(mps, N)   # never touch again
+    orthogonalize!(mps, div(N,2))
+    normalize!(mps)
+    orthogonalize!(mps, N)   # never touch again
     return mps
 end
 
 "Returns N-qubit random MPS with bond dimension D"
 function randMPS(N::Integer, D::Integer)
-    return randMPS(it.siteinds("Qubit", N), D)
+    return randMPS(siteinds("Qubit", N), D)
 end
 
 
 "Project sites indexed by 'positions' array to zero. Normalizes at the end"
-function project_tozero(psi::itmps.MPS, positions::Vector{Int64})
+function project_tozero(psi::MPS, positions::Vector{Int64})
     psi = deepcopy(psi)
-    sites = it.siteinds(psi)
+    sites = siteinds(psi)
     for b in positions
-        it.orthogonalize!(psi, b)
+        orthogonalize!(psi, b)
         ind = sites[b]
         zero_vec = [1; [0 for _ in 1:ind.space-1]]
-        zero_proj = it.ITensor(kron(zero_vec, zero_vec'), ind, ind')
+        zero_proj = ITensor(kron(zero_vec, zero_vec'), ind, ind')
         new_psib = psi[b]*zero_proj
         norm_psi = real(Array(new_psib * conj(new_psib))[1])
-        psi[b] = it.noprime(new_psib/sqrt(norm_psi))
+        psi[b] = noprime(new_psib/sqrt(norm_psi))
     end
     return psi
 end
 
 
 "Project sites indexed by 'positions' array to zero. Normalizes at the end"
-function project_tozero!(psi::itmps.MPS, positions::Vector{Int64})
-    sites = it.siteinds(psi)
+function project_tozero!(psi::MPS, positions::Vector{Int64})
+    sites = siteinds(psi)
     for b in positions
-        it.orthogonalize!(psi, b)
+        orthogonalize!(psi, b)
         ind = sites[b]
         zero_vec = [1; [0 for _ in 1:ind.space-1]]
-        zero_proj = it.ITensor(kron(zero_vec, zero_vec'), ind, ind')
+        zero_proj = ITensor(kron(zero_vec, zero_vec'), ind, ind')
         new_psib = psi[b]*zero_proj
         norm_psi = real(Array(new_psib * conj(new_psib))[1])
-        psi[b] = it.noprime(new_psib/sqrt(norm_psi))
+        psi[b] = noprime(new_psib/sqrt(norm_psi))
     end
 end
 
@@ -343,48 +343,48 @@ end
 
 ### CUSTOM MPO METHODS ###
 "Convert unitary to MPO via repeated SVD"
-function unitary_to_mpo(U::Union{Matrix, Vector{AbstractFloat}}; d = 2, siteinds = nothing, skip_qudits = 0, orthogonalize = true)
+function unitary_to_mpo(U::Union{Matrix, Vector{AbstractFloat}}; d = 2, sites = nothing, skip_qudits = 0, orthogonalize = true)
     D = size(U, 1)
     N = length(digits(D-1, base=d))     # N = logd(D)
 
-    if isnothing(siteinds)
-        siteinds = it.siteinds(d, N)
+    if isnothing(sites)
+        sites = siteinds(d, N)
         skip_qudits = 0
     else # check that you're not skipping too many qubit
-        N + skip_qudits > length(siteinds) &&
+        N + skip_qudits > length(sites) &&
             throw(DomainError(skip_qudits, "Skipping too many qubits for the siteinds given."))
     end
 
 
-    sites = siteinds[1+skip_qudits:N+skip_qudits]
-    mpo::Vector{it.ITensor} = []
+    sites_active = sites[1+skip_qudits:N+skip_qudits]
+    mpo::Vector{ITensor} = []
 
-    block = it.ITensor(U, sites', sites)
+    block = ITensor(U, sites_active', sites_active)
     local link
     for i in 1:N-1
-        Uinds = (i==1 ? (sites[i]', sites[i]) : (link, sites[i]', sites[i]))
-        Us, Ss, Vsdag = it.svd(block, Uinds, cutoff = 1e-16)
+        Uinds = (i==1 ? (sites_active[i]', sites_active[i]) : (link, sites_active[i]', sites_active[i]))
+        Us, Ss, Vsdag = svd(block, Uinds, cutoff = 1e-16)
         push!(mpo, Us)
-        link = it.commonind(Us, Ss)
+        link = commonind(Us, Ss)
         block = Ss*Vsdag
     end
     push!(mpo, block)
     
 
-    # add identities left and right for every siteind that is not in sites
-    left_deltas::Vector{it.ITensor} = []
-    right_deltas::Vector{it.ITensor} = []
-    for left_site in siteinds[1:skip_qudits]
-        push!(left_deltas, it.delta(left_site', left_site))
+    # add identities left and right for every siteind that is not in sites_active
+    left_deltas::Vector{ITensor} = []
+    right_deltas::Vector{ITensor} = []
+    for left_site in sites[1:skip_qudits]
+        push!(left_deltas, delta(left_site', left_site))
     end
-    for right_site in siteinds[N+1+skip_qudits:end]
-        push!(right_deltas, it.delta(right_site', right_site))
+    for right_site in sites[N+1+skip_qudits:end]
+        push!(right_deltas, delta(right_site', right_site))
     end
 
     mpo = [left_deltas; mpo; right_deltas]
-    mpo_final = itmps.MPO(mpo)
+    mpo_final = MPO(mpo)
     if orthogonalize
-        it.orthogonalize!(mpo_final, length(siteinds))
+        orthogonalize!(mpo_final, length(sites))
     end
 
     return mpo_final
@@ -394,16 +394,16 @@ end
 
 
 "multiply Vector{ITensors.ITensor} object together. Indices have to match in advance." 
-function Base.:*(mpo1::Vector{it.ITensor}, mpo2::Vector{it.ITensor})
+function Base.:*(mpo1::Vector{ITensor}, mpo2::Vector{ITensor})
     if length(mpo1) != length(mpo2)
         throw(DomainError, "The two objects have different length")
     end
     N = length(mpo1)
     mpo = [mpo1[i]*mpo2[i] for i in 1:N]
     for j in 1:N-1
-        linkinds = it.commoninds(mpo[j], mpo[j+1])
+        linkinds = commoninds(mpo[j], mpo[j+1])
         if length(linkinds) > 1
-            combiner = it.combiner(linkinds)
+            combiner = combiner(linkinds)
             mpo[j] *= combiner
             mpo[j+1] *= combiner
         end
@@ -416,7 +416,7 @@ end
 ### RG METHODS ###
 
 "Performs blocking on an MPS, q sites at a time. Returns the blocked MPS as an array of it, together with the siteinds."
-function blocking(mps::Union{Vector{it.ITensor},itmps.MPS}, q::Integer)
+function blocking(mps::Union{Vector{ITensor},MPS}, q::Integer)
     N = length(mps)
     newN = div(N, q)
     r = mod(N, q)
@@ -426,10 +426,10 @@ function blocking(mps::Union{Vector{it.ITensor},itmps.MPS}, q::Integer)
         push!(block_mps, r > 1 ? mps[q * newN : end] : [mps[end]])
     end
 
-    siteinds = reduce(it.noncommoninds, mps[1:end])
-    sitegroups = [siteinds[q*(i-1)+1 : q*i] for i in 1:newN]
+    sites = reduce(noncommoninds, mps[1:end])
+    sitegroups = [sites[q*(i-1)+1 : q*i] for i in 1:newN]
     if r != 0
-        push!(sitegroups, r > 1 ? siteinds[q * newN : end] : [siteinds[end]])
+        push!(sitegroups, r > 1 ? sites[q * newN : end] : [sites[end]])
         newN += 1
     end
 
@@ -440,10 +440,10 @@ end
 "Given a block B and a 3-Tuple containing the left, central and right indices,
 computes the right eigenstate of the transfer matrix B otimes B^*, and returns
 the square root of its matrix form"
-function extract_rho(block::it.ITensor, inds::NTuple{3, it.Index{Int64}})
+function extract_rho(block::ITensor, inds::NTuple{3, Index{Int64}})
     iL, i, iR = inds[1:3]
     block_star = conj(block)'
-    delta_i = it.delta(i, i')
+    delta_i = delta(i, i')
 
     # Combine into transfer matrix
     T = delta_i * block * block_star

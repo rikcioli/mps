@@ -1,20 +1,19 @@
 include("mpsMethods.jl")
 import .MPSMethods as mt
-import ITensorMPS as itmps
-import ITensors as it
+using ITensors, ITensorMPS
 #import Plots
-#using LaTeXStrings, LinearAlgebra, Statistics, Random
+using LaTeXStrings, LinearAlgebra, Statistics, Random
 using CSV
 #using DataFrames, StatsPlots
 
-it.set_warn_order(28)
+ITensors.set_warn_order(28)
 
 
 function execute(command, N, eps_array; D = 2, tau = 3)
 # Choose object to invert
     if command == "randMPS"
-        test = it.random_mps(it.siteinds(2, N), linkdims = D)
-        it.orthogonalize!(test, 3)
+        test = random_mps(siteinds(2, N), linkdims = D)
+        orthogonalize!(test, 3)
     elseif command == "FDQC"
         test = mt.initialize_fdqc(N, tau)
     end
@@ -84,7 +83,7 @@ function liu_tau_vs_N(Nrange, eps_array)
     for N in Nrange
         @show N
         energy, psi = mt.initialize_ising(N, 2)
-        #psi = it.random_mps(it.siteinds("Qubit", N), linkdims = 2)
+        #psi = random_mps(siteinds("Qubit", N), linkdims = 2)
         tau_liu = []
         err_liu = []
 
@@ -155,7 +154,7 @@ function final_tau_vs_N(Nrange, eps_array)
     for N in Nrange
         @show N
         #energy, psi = mt.initialize_ising(N, 2)
-        psi = it.random_mps(it.siteinds("Qubit", N), linkdims = 2)
+        psi = random_mps(siteinds("Qubit", N), linkdims = 2)
         tau_liu = []
         err_liu = []
 
@@ -187,10 +186,10 @@ end
 
 
 let
-    N = 300
-    eps = 1e-3
-    psi = it.random_mps(it.siteinds("Qubit", N), linkdims = 2)
-    mt.invertMPSfinal(psi, eps)
+    N = 10
+    eps = 1e-2
+    psi = random_mps(siteinds("Qubit", N), linkdims = 2)
+    mt.invertMPSfinal(psi, mt.invertGlobalSweep; eps = eps)
 end
 
 

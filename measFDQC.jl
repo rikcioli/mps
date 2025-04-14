@@ -1,7 +1,6 @@
 include("mpsMethods.jl")
 import .MPSMethods as mt
-import ITensorMPS as itmps
-import ITensors as it
+using ITensors, ITensorMPS
 #import Plots
 #using LaTeXStrings
 using LinearAlgebra, Statistics
@@ -190,7 +189,7 @@ end
 
 
 
-#unitaries = [reshape(Array(circ[i,j], it.inds(circ[i,j])), (4, 4)) for i in 1:tau, j in 1:div(N,2)]
+#unitaries = [reshape(Array(circ[i,j], inds(circ[i,j])), (4, 4)) for i in 1:tau, j in 1:div(N,2)]
 
 ## function execute(N::Int64; state_depth = 2, n_sweeps = 100, n_runs = 1000)
 ## 
@@ -210,7 +209,7 @@ end
 ##             end
 ##             # create random FDQC of depth 2
 ##             testMPS = initialize_vac(N)
-##             siteinds = it.siteinds(testMPS)
+##             sites = siteinds(testMPS)
 ##             testMPS = brickwork(testMPS, state_depth)
 ## 
 ##             # try to invert it
@@ -220,14 +219,14 @@ end
 ## 
 ##             # measure middle qubit
 ##             pos = div(N,2)
-##             zero_projs::Vector{it.ITensor} = []
-##             for ind in siteinds
+##             zero_projs::Vector{ITensor} = []
+##             for ind in sites
 ##                 vec = [1; [0 for _ in 1:ind.space-1]]
-##                 push!(zero_projs, it.ITensor(kron(vec, vec'), ind, ind'))
+##                 push!(zero_projs, ITensor(kron(vec, vec'), ind, ind'))
 ##             end
 ##             proj = zero_projs[pos]
-##             testMPS[pos] = it.noprime(testMPS[pos]*proj)
-##             it.normalize!(testMPS)
+##             testMPS[pos] = noprime(testMPS[pos]*proj)
+##             normalize!(testMPS)
 ## 
 ##             # try to invert measured one
 ##             fid2, sweep2 = invertMPS(testMPS, depth, 100)
