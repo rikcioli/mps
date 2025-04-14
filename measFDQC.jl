@@ -2,8 +2,9 @@ include("mpsMethods.jl")
 import .MPSMethods as mt
 import ITensorMPS as itmps
 import ITensors as it
-import Plots
-using LaTeXStrings, LinearAlgebra, Statistics, Random
+#import Plots
+#using LaTeXStrings
+using LinearAlgebra, Statistics
 using CSV
 using DataFrames
 #using Colors

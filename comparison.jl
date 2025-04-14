@@ -3,9 +3,9 @@ import .MPSMethods as mt
 import ITensorMPS as itmps
 import ITensors as it
 #import Plots
-using LaTeXStrings, LinearAlgebra, Statistics, Random
+#using LaTeXStrings, LinearAlgebra, Statistics, Random
 using CSV
-using DataFrames, StatsPlots
+#using DataFrames, StatsPlots
 
 it.set_warn_order(28)
 
@@ -187,8 +187,10 @@ end
 
 
 let
-    Nrange = [300]
-    final_tau_vs_N(Nrange, [1e-3])
+    N = 300
+    eps = 1e-3
+    psi = it.random_mps(it.siteinds("Qubit", N), linkdims = 2)
+    mt.invertMPSfinal(psi, eps)
 end
 
 
