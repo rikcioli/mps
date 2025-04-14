@@ -34,7 +34,7 @@ function execute(Nrange, eps_list, gate)
 end
 
 
-function meas_invert(Nrange, eps_list)
+function meas_invert(Nrange, eps_list; pathname = "D:\\Julia\\MyProject\\Data\\measFDQC\\")
 
     for N in Nrange
         @show N
@@ -60,7 +60,7 @@ function meas_invert(Nrange, eps_list)
             tau_hist = [i for i in start_tau:results["tau"]]
 
             data = DataFrame(depths = [i+start_tau-1 for i in eachindex(err_hist)], errs = err_hist)
-            CSV.write("D:\\Julia\\MyProject\\Data\\measFDQC\\$(N)Q_$(t).csv", data)
+            CSV.write(pathname*"$(N)Q_$(t).csv", data)
         end
     end
 end

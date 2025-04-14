@@ -164,7 +164,7 @@ function brickwork(psi::MPS, brick_odd::Matrix, brick_even::Matrix, t::Integer; 
     layerEven = [op(brick_even, sites[b+1], sites[b]) for b in 2:2:(N-1)]
     for i in 1:t
         layer = isodd(i) ? layerOdd : layerEven
-        psi = apply(layer, psi, cutoff = cutoff)
+        psi = ITensors.apply(layer, psi, cutoff = cutoff)
     end
     return psi
 end
@@ -177,7 +177,7 @@ function brickwork(psi::MPS, t::Integer; cutoff = 1E-15)
     d = sites[1].space
     for i in 1:t
         layer = [op(random_unitary(d^2), sites[b+1], sites[b]) for b in (isodd(i) ? 1 : 2):2:(N-1)]
-        psi = apply(layer, psi, cutoff = cutoff)
+        psi = ITensors.apply(layer, psi, cutoff = cutoff)
     end
     return psi
 end
