@@ -2,7 +2,7 @@ module MPSMethods
 
 using ITensors, ITensorMPS
 using LinearAlgebra, Statistics, Random, OptimKit
-using CSV, HDF5, Tables
+using CSV, HDF5, JLD2, DataFrames
 
 ITensors.set_warn_order(28)
 
@@ -1031,7 +1031,7 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
 end
 
 
-function invertMPSfinal(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\")
+function invertMPS1(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\")
     N = length(mps)
 
     results = invertMPSLiu(mps, invertMethod; eps = 0.1)
@@ -1107,26 +1107,50 @@ function invertMPSfinal(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Juli
 
     # save lightcone to file
     best_guess = Array(lightcone)
-    CSV.write(pathname*"$(N)_$(eps)_ansatz.csv",  Tables.table(best_guess), writeheader=false)
+    jldsave(pathname*"$(N)_$(eps)_ansatz.jld2"; best_guess)
 
     # save important info to file
     params = Dict([("N", N), ("eps", eps), ("site1_empty", site1_empty), ("start_tau", tau)])
-    CSV.write(pathname*"$(N)_$(eps)_params.csv", params)
+    jldsave(pathname*"$(N)_$(eps)_params.jld2"; params)
 
     # save original mps to file
     f = h5open(pathname*"$(N)_mps.h5","w")
     write(f,"psi",mps)
     close(f)
     
-    Threads.@threads for start_tau in tau:tau+5
-        results_final = invert(mps, invertGlobalSweep; nruns = 1, site1_empty = site1_empty, eps = eps, start_tau = start_tau, init_array = best_guess)
-        CSV.write(pathname*"$(N)_$(eps)_$(start_tau)ST_result.csv", results_final)
+    return
+end
+
+
+function invertMPS2(pathname, N, eps; nthreads = 4)
+
+    params = load_object(pathname*"$(N)_$(eps)_params.jld2")
+    @show params
+    best_guess = load_object(pathname*"$(N)_$(eps)_ansatz.jld2")
+    f = h5open(pathname*"$(N)_mps.h5","r")
+    mps = read(f,"psi",MPS)
+    close(f)
+    tau = params["start_tau"]
+
+    Threads.@threads for start_tau in tau : tau+nthreads-1
+        results_final = invert(mps, invertGlobalSweep; 
+                                    nruns = 1, 
+                                    site1_empty = params["site1_empty"], 
+                                    eps = eps, 
+                                    start_tau = start_tau, 
+                                    init_array = best_guess)
+        jldsave(pathname*"$(N)_$(eps)_$(start_tau)ST_result.jld2"; results_final)
     end
 
     return
-    #return results, results_final
 end
 
+function invertMPSfinal(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\", nthreads = 4)
+    N = length(mps)
+    invertMPS1(mps, invertMethod; eps = eps, pathname = pathname)
+    invertMPS2(pathname, N, eps; nthreads = nthreads)
+    return
+end
 
 
 function invertMPSculo(mps::MPS; kargs...)

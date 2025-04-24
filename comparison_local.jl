@@ -144,7 +144,7 @@ end
 
 "Constructs a random MPS of N qubits and bond dimension D and checks how many steps to invert exactly,
 saving the half-chain entanglement entropy at each step"
-function test2(N::Integer, D::Integer)
+function test2old(N::Integer, D::Integer)
     N2 = div(N,2)
     #mps = mt.initialize_fdqc(N, N2+mod(N2+1,2))
     mps = random_mps(siteinds("Qubit", N); linkdims = D)
@@ -172,8 +172,9 @@ function test2(N::Integer, D::Integer)
     return mps, reslist, entropy_mps, entropy_tau
 end
 
+
 "Applies test2 for N in [Nmin, Nmax]"
-function test3(Nmin::Integer, Nmax::Integer, D::Integer)
+function test3old(Nmin::Integer, Nmax::Integer, D::Integer)
     Nlist = Nmin:2:Nmax
     true_ent = []
     reconstr_entr = []
@@ -182,7 +183,7 @@ function test3(Nmin::Integer, Nmax::Integer, D::Integer)
         _, reslist, entropy_mps, entropy_tau = test2(N, D)
         push!(true_ent, entropy_mps)
         push!(reconstr_errors, [res["err"] for res in reslist])
-
+        
         completed_entropy_tau = []
         for i in 1:length(entropy_tau)
             array = entropy_tau[i]
@@ -194,31 +195,54 @@ function test3(Nmin::Integer, Nmax::Integer, D::Integer)
             temp = temp[1:i]
             push!(completed_entropy_tau, temp)
         end
-
+        
         push!(reconstr_entr, completed_entropy_tau)
-
+        
         data = DataFrame(Errors = reconstr_errors[end], Entropy = reconstr_entr[end], TrueEnt = entropy_mps)
         N2 = div(N,2)
         CSV.write("D:\\Julia\\MyProject\\Data\\$(N)Q_$(D)D_randMPS_test3.csv", data)
     end
-
+    
     return true_ent, reconstr_entr, reconstr_errors
 end
 
+"Constructs a random MPS of N qubits and bond dimension D and checks how many steps to invert exactly"
+function test2(N::Integer, D::Integer)
+    mps = random_mps(siteinds("Qubit", N); linkdims = D)
+    results = mt.invert(mps, mt.invertGlobalSweep; eps = 1e-10, nruns = 4, gradtol = 1e-8, maxiter = 10000*N, reuse_previous = false)
+    return results
+end
 
+"Applies test2 on haar random states of N in [Nmin, Nmax]"
+function test3(Nmin::Integer, Nmax::Integer)
+    Nlist = Nmin:2:Nmax
+    for N in Nlist
+        N2 = div(N,2)
+        D = 2^N2
+        results = test2(N, D)
+        err_hist = results["err_history"]
+        data = DataFrame(err_hist = err_hist)
+        CSV.write("D:\\Julia\\MyProject\\Data\\randHaar\\$(N)Q_test3.csv", data)
+    end
+    return
+end
+
+let
+    test3(4, 12)
+end
 
 #mps, reslist, entropy_mps, entropy_tau = test2(8,2)
 #true_ent, reconstr_entr, reconstr_errors = test3(10, 10, 4)
 #test4(100:100, 2, 5)
 
-let
-    N = 100
-    mps = random_mps(siteinds("Qubit", N); linkdims = 2)
-    results = mt.invertMPSculo(mps; eps = 0.01, nruns = 1, maxiter = 30000)
-    #results = mt.invert(mps, mt.invertGlobalSweep; eps = 0.01, nruns = 4, gradtol = 1e-8, maxiter = 50000)
-    data = DataFrame(err = results["err"], tau = results["tau"])
-    CSV.write("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)Q_2D_culo.csv", data)
-end
+#let
+#    N = 100
+#    mps = random_mps(siteinds("Qubit", N); linkdims = 2)
+#    results = mt.invertMPSculo(mps; eps = 0.01, nruns = 1, maxiter = 30000)
+#    #results = mt.invert(mps, mt.invertGlobalSweep; eps = 0.01, nruns = 4, gradtol = 1e-8, maxiter = 50000)
+#    data = DataFrame(err = results["err"], tau = results["tau"])
+#    CSV.write("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)Q_2D_culo.csv", data)
+#end
 
 ##plt = Plots.plot(title = L"\mathrm{Random \ MPS}, \ D = 2", ylabel = L"\tau", xlabel = L"N")
 ##eps_list = [0.1, 0.05, 0.025]

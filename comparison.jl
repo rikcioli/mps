@@ -187,9 +187,10 @@ end
 
 let
     N = 10
-    eps = 1e-2
-    psi = random_mps(siteinds("Qubit", N), linkdims = 2)
-    mt.invertMPSfinal(psi, mt.invertGlobalSweep; eps = eps, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\")
+    eps = 1e-1
+    #psi = random_mps(siteinds("Qubit", N), linkdims = 2)
+    #mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\")
+    mt.invertMPS2("D:\\Julia\\MyProject\\Data\\randMPS\\", N, eps; nthreads = 1)
 end
 
 
