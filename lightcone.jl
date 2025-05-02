@@ -301,6 +301,7 @@ function contract!(psi::Union{MPS, Vector{ITensor}}, lightcone::Lightcone; cutof
     end
 end
 
+# IMPORTANT: IT ASSUMES THE INDICES OF THE UNITARIES INSIDE LIGHTCONE ARE ALWAYS (N, N+1) AND THEIR PRIMES
 "Apply lightcone to MPS/MPO, from base to top. Lightcones' siteinds must match mps siteinds only in id, not in primelevel.
 If dagger is true, all the unitaries are conjugated and the order of application is inverted
 If an empty list is passed as entropy_arr karg it will be filled with half-subsystem entropies at each timestep"

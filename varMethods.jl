@@ -2,7 +2,7 @@ import Distributed
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; site1_empty = false, d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}
+function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; site1_empty = false, d = 2, conv_err = 1E-8, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
@@ -25,7 +25,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
         u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity
-        newfid = real(tr(Array(S, (u, v))))/normalization
+        newfid = real(tr(Array{ComplexF64}(S, (u, v))))/normalization
         gate_ji_opt = U * replaceind(Vdag, v, u)
         lightcone = newLightcone(sites, 1; lightbounds = (false, false))
         lightcone.circuit[1] = replaceprime(gate_ji_opt, tau => 1)
@@ -38,8 +38,8 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
     # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
     lightcone = newLightcone(sites, tau; U_array = init_array, lightbounds = (false, false), site1_empty = site1_empty)
 
-    L_blocks::Vector{ITensor} = []
-    R_blocks::Vector{ITensor} = []
+    L_blocks = ITensor[]
+    R_blocks = ITensor[]
 
     # construct L_1
     # first item is zero projector, then there are the gates in ascending order, then the mpo site
@@ -84,8 +84,8 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
         for i in 1:tau
             gate_ji = gates_j[i]    # extract gate ji
             
-            left_tensors = []
-            right_tensors = []
+            left_tensors = ITensor[]
+            right_tensors = ITensor[]
             for l in [1:i-1; i+1:tau]
                 gate_jl = gates_j[l]
                 if gate_jl[:orientation] == "L"
@@ -95,8 +95,8 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
                 end
             end
 
-            contract_left = []
-            contract_right = []
+            contract_left = ITensor[]
+            contract_right = ITensor[]
             if isodd(tau+j)
                 push!(contract_left, mpo[j])
             else
@@ -114,14 +114,14 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
                 env_right *= gate
             end
 
-            env = conj(env_left*env_right)
+            env = permute(conj(env_left*env_right), gate_ji[:inds]; allow_alias = true)
 
             inds = gate_ji[:inds][1:2]
-            U, S, Vdag = svd(env, inds, cutoff = 1E-15)
+            U, S, Vdag = svd(env, inds; cutoff = 1E-15)
             u, v = commonind(U, S), commonind(Vdag, S)
 
             # evaluate fidelity as Tr(Env*Gate), i.e. the overlap (NOT SQUARED)
-            newfid = real(tr(Array(S, (u, v))))/normalization
+            newfid = real(tr(Array{ComplexF64}(S, (u, v))))/normalization
 
             #replace gate_ji with optimized one, both in gates_j (used in this loop) and in circuit
             gate_ji_opt = U * replaceind(Vdag, v, u)
@@ -191,7 +191,9 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
     end
 
     println("Converged to fidelity $newfid with $sweep sweeps\n")
-
+    if tau > 1
+        @show lightcone.circuit
+    end
     return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", sweep)])
 
 end
