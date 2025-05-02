@@ -4,9 +4,36 @@ using ITensors, ITensorMPS
 #import Plots
 using LaTeXStrings, LinearAlgebra, Statistics, Random
 using CSV
+using JET
 #using DataFrames, StatsPlots
 
 ITensors.set_warn_order(28)
+
+#let
+#    sites = siteinds("Qubit", 10)
+#    mpo = random_mpo(sites)
+#
+#    input_inds = sites
+#    output_inds = sites'
+#    tau = 2
+#    N = length(mpo)
+#
+#    # noprime the input inds
+#    # change the output inds to a prime of the input inds to match the inds of the first layer of gates
+#    sites = noprime(input_inds)
+#    d = sites[1].space
+#    tempinds = siteinds(d, N)
+#    for i in 1:N
+#        replaceind!(mpo[i], input_inds[i], tempinds[i])
+#        replaceind!(mpo[i], output_inds[i], prime(sites[i], tau))
+#        replaceind!(mpo[i], tempinds[i], sites[i])
+#    end
+#
+#    lc = mt.newLightcone(sites, tau)
+#    U_array = Array(lc)
+#    @profview mt._fgGlobalSweep(U_array, lc, mpo)
+#end
+
 
 
 function execute(command, N, eps_array; D = 2, tau = 3)

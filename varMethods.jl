@@ -55,7 +55,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
     for k in (N-1):-1:3
         # extract right gates associated with site k
         gates_k = lightcone.gates_by_site[k]
-        right_gates_k = [lightcone.circuit[gate["pos"]] for gate in gates_k if gate["orientation"]=="R"]
+        right_gates_k = [lightcone.circuit[gate[:pos]] for gate in gates_k if gate[:orientation]=="R"]
         all_blocks = [right_gates_k; mpo[k]]
 
         # if k even contract in descending order, else ascending
@@ -78,7 +78,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
 
         # extract all gates touching site j
         gates_j = lightcone.gates_by_site[j]
-        tensors_j = [lightcone.circuit[gate["pos"]] for gate in gates_j]
+        tensors_j = [lightcone.circuit[gate[:pos]] for gate in gates_j]
 
         # optimize each gate
         for i in 1:tau
@@ -88,7 +88,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
             right_tensors = []
             for l in [1:i-1; i+1:tau]
                 gate_jl = gates_j[l]
-                if gate_jl["orientation"] == "L"
+                if gate_jl[:orientation] == "L"
                     push!(left_tensors, tensors_j[l])
                 else
                     push!(right_tensors, tensors_j[l])
@@ -116,7 +116,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
 
             env = conj(env_left*env_right)
 
-            inds = gate_ji["inds"][1:2]
+            inds = gate_ji[:inds][1:2]
             U, S, Vdag = svd(env, inds, cutoff = 1E-15)
             u, v = commonind(U, S), commonind(Vdag, S)
 
@@ -126,7 +126,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
             #replace gate_ji with optimized one, both in gates_j (used in this loop) and in circuit
             gate_ji_opt = U * replaceind(Vdag, v, u)
             tensors_j[i] = gate_ji_opt
-            lightcone.circuit[gate_ji["pos"]] = gate_ji_opt
+            lightcone.circuit[gate_ji[:pos]] = gate_ji_opt
         end
 
         # while loop end conditions
@@ -198,12 +198,12 @@ end
 
 
 "Cost function and gradient for invertGlobalSweep optimization"
-function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization = 1)
+function _fgGlobalSweep(U_array::Vector{Matrix{T}}, lightcone::Lightcone, mpo::Union{Vector{ITensor}, MPS, MPO}; normalization::Real = 1.0) where {T}
     updateLightcone!(lightcone, U_array)
     d = lightcone.d
     N = lightcone.size
 
-    R_blocks::Vector{ITensor} = []
+    R_blocks = ITensor[]
 
     # construct L_1
     # first item is the delta, i.e. the first site of mpo_low which is composed of only deltas, then the mpo site
@@ -217,7 +217,7 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization
     for k in N:-1:3
         # extract left gates associated with site k
         gates_k = lightcone.gates_by_site[k]
-        tensors_left = [lightcone.circuit[gate["pos"]] for gate in gates_k if gate["orientation"]=="L"]
+        tensors_left = [lightcone.circuit[gate[:pos]] for gate in gates_k if gate[:orientation]=="L"]
 
         all_blocks = (k==N ? tensors_left : [tensors_left; mpo[k]])
         for block in all_blocks
@@ -228,15 +228,15 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization
     reverse!(R_blocks)
 
     # start the sweep
-    grad = [Array{ComplexF64}(undef, 0, 0) for _ in 1:lightcone.n_unitaries]
+    grad = Vector{Matrix{T}}(undef, 0)
 
     for j in 2:N
         # extract all gates on the left of site j
         gates_j = lightcone.gates_by_site[j]
-        tensors_left = [lightcone.circuit[gate["pos"]] for gate in gates_j if gate["orientation"]=="L"]
+        tensors_left = [lightcone.circuit[gate[:pos]] for gate in gates_j if gate[:orientation]=="L"]
 
         # evaluate gradient by removing each gate
-        for l in 1:length(tensors_left)
+        for l in eachindex(tensors_left)
             not_l_tensors = [tensors_left[1:l-1]; tensors_left[l+1:end]]
             contract_left = [mpo[j]; not_l_tensors]
             
@@ -247,11 +247,11 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization
 
             env = (j<N ? env_left*rightmost_block : env_left)
 
-            gate_jl = filter(gate -> gate["orientation"] == "L", gates_j)[l]
-            gate_jl_inds, gate_jl_pos = gate_jl["inds"], gate_jl["pos"]
-            ddUjl = Array(env, gate_jl_inds)
-            ddUjl = conj(reshape(ddUjl, (d^2, d^2)))
-            grad[gate_jl_pos] = ddUjl
+            gate_jl = filter(gate -> gate[:orientation] == "L", gates_j)[l]
+            gate_jl_inds, gate_jl_pos = gate_jl[:inds], gate_jl[:pos]
+            ddUjl_arr = Array{T}(env, gate_jl_inds)
+            ddUjl = conj(reshape(ddUjl_arr, (d^2, d^2)))/normalization #include rescaling if needed (for mpos)
+            push!(grad, ddUjl)
         end
 
         # update leftmost_block for next j and add it to L_blocks list
@@ -267,14 +267,13 @@ function _fgGlobalSweep(U_array::Vector{<:Matrix}, lightcone, mpo; normalization
     end
 
     # compute environment now that we contracted all blocks, so that we are effectively computing the overlap
-    overlap = Array(leftmost_block)[1]
+    overlap = Array{T}(leftmost_block)[1]
 
     # we use the real part of the overlap as a cost function
     abs_ov = real(overlap)/normalization
 
     # correct gradient to account for the cost function being the absolute value of the overlap, not the abs squared
     #grad *= overlap/abs_ov
-    grad = grad/normalization
     riem_grad = project(U_array, grad)
 
     # put a - sign so that it minimizes
@@ -830,9 +829,9 @@ function _fg_disentangle(U_array::Vector{<:Matrix}, lightcone, reduced_mps, coun
         if theres_a_gate
             j = (!oddstep && iseven(N)) ? k-1 : k   #need a map between the sites of reduced_mps and the lightcone, which is N-to-(N-2) if N even and step even
             gate = lightcone.gates_by_site[j][1]
-            tensor_gate = lightcone.circuit[gate["pos"]]
+            tensor_gate = lightcone.circuit[gate[:pos]]
             tensor *= tensor_gate
-            upinds = gate["inds"][1:2]
+            upinds = gate[:inds][1:2]
             indsL = replaceinds(indsL, upinds', upinds)
             indsR = replaceinds(indsR, upinds', upinds)
         end
@@ -845,15 +844,15 @@ function _fg_disentangle(U_array::Vector{<:Matrix}, lightcone, reduced_mps, coun
         ddUk = block*tensor2*tensor3*tensor4
 
         if theres_a_gate
-            ddUk_mat = 4*Array(ddUk, gate["inds"])
+            ddUk_mat = 4*Array(ddUk, gate[:inds])
             ddUk_mat = conj(reshape(ddUk_mat, (d^2, d^2)))
-            grad_j[gate["pos"]] = ddUk_mat
+            grad_j[gate[:pos]] = ddUk_mat
             ddUk *= tensor_gate
         end
 
         purity = real(Array(ddUk)[1])
         if theres_a_gate
-            purity_j[gate["pos"]] = purity
+            purity_j[gate[:pos]] = purity
         end
         purity_k[k] = purity
     end

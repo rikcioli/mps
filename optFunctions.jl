@@ -12,12 +12,12 @@ function fix_phase(U)
     return U*diagm(exp.(-1im*ϕs))
 end
 
-function dist_un(U1::AbstractMatrix, U2::AbstractMatrix)
+function dist_un(U1::Matrix{T}, U2::Matrix{T}) where {T}
     return dist_un([U1], [U2])
 end
 
 "Geodesic distance between two arrays of unitaries"
-function dist_un(arrU1::Vector{<:AbstractMatrix}, arrU2::Vector{<:AbstractMatrix})
+function dist_un(arrU1::Vector{<:Matrix}, arrU2::Vector{<:Matrix})
     distances_sq = []
     for k in 1:length(arrU1)
         U1, U2 = arrU1[k], arrU2[k]
@@ -28,37 +28,35 @@ function dist_un(arrU1::Vector{<:AbstractMatrix}, arrU2::Vector{<:AbstractMatrix
     return sqrt(sum(distances_sq)) 
 end
 
-function skew(X::AbstractMatrix)
+function skew(X::Matrix{T}) where {T}
     return (X - X')/2
 end
 
-function skew(arrX::Vector{<:AbstractMatrix})
-    arrXinv = [X' for X in arrX]
-    return (arrX .- arrXinv)/2
+function skew(arrX::Vector{<:Matrix})
+    return map(skew, arrX)
 end
 
 "Project arbitrary array of unitaries arrD onto the tangent space at arrU"
-function project(arrU::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix})
+function project(arrU::Vector{<:Matrix}, arrD::Vector{<:Matrix})
     #return (arrD .- (arrU .* [D' for D in arrD] .* arrU))/2
     return arrU .* skew([U' for U in arrU] .* arrD)
 end
 
-function polar(M::AbstractMatrix)
+function polar(M::Matrix{T}) where {T}
     U, S, V = svd(M)
     P = V*diagm(S)*V'
     W = U*V'
     return P, W
 end
 
-function extractU(M::AbstractMatrix)
+function extractU(M::Matrix{T}) where {T}
     U, S, V = svd(M)
     W = U*V'
     return W
 end
 
-function extractU(arrM::Vector{<:AbstractMatrix})
-    arrU = [extractU(M) for M in arrM]
-    return arrU
+function extractU(arrM::Vector{<:Matrix})
+    return map(extractU, arrM)
 end
 
 
@@ -66,7 +64,7 @@ end
 #X is the gradient obtained using projection.
 #return both the "retracted" unitary as well as the tangent vector at the retracted point
 # always stabilize unitarity and skewness, it could leave tangent space due to numerical errors
-function retract(arrU::Vector{<:AbstractMatrix}, arrX::Vector{<:AbstractMatrix}, t::AbstractFloat)
+function retract(arrU::Vector{<:Matrix}, arrX::Vector{<:Matrix}, t::Float64)
 
     # ensure unitarity of arrU
     arrU_unitary = extractU(arrU)
@@ -92,17 +90,17 @@ function retract(arrU::Vector{<:AbstractMatrix}, arrX::Vector{<:AbstractMatrix},
 
     # construct the geodesic at the tangent space at unity
     # then move it to the correct point by multiplying by arrU
-    arrU_new = arrU .* exp.(t*arrX_id)
+    arrU_new = arrU .* map(X -> exp(t*X), arrX_id)
 
     # move arrX to the new tangent space arrU_new
     arrX_new = arrU_new .* arrX_id #move first to the tangent space at unity, then to the new point
     return arrU_new, arrX_new
 end
 
-function inner(arrU::Vector{<:AbstractMatrix}, arrX::Vector{<:AbstractMatrix}, arrY::Vector{<:AbstractMatrix})
+function inner(arrU::Vector{<:Matrix}, arrX::Vector{<:Matrix}, arrY::Vector{<:Matrix})
     return real(tr(arrX'*arrY))
 end
-function inner(arrX::Vector{<:AbstractMatrix}, arrY::Vector{<:AbstractMatrix})
+function inner(arrX::Vector{<:Matrix}, arrY::Vector{<:Matrix})
     return real(tr(arrX'*arrY))
 end
 
@@ -111,7 +109,7 @@ end
 with step length α, can be in place but the return value is used. 
 Transport also receives x′ = retract(x, η, α)[1] as final argument, 
 which has been computed before and can contain useful data that does not need to be recomputed"""
-function transport!(ξ, arrU::Vector{<:AbstractMatrix}, η, α, arrU_new::Vector{<:AbstractMatrix})
+function transport!(ξ, arrU::Vector{<:Matrix}, η, α, arrU_new::Vector{<:Matrix})
     arrUinv = [U' for U in arrU]
     ξ = arrU_new .* arrUinv .* ξ
     return ξ

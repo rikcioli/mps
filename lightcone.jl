@@ -12,13 +12,19 @@ struct Lightcone
     lightbounds::Tuple{Bool, Bool}          # (leftslope == 'light', rightslope == 'light')
     siteinds::Vector{Index}              # siteinds of AB region
     range::Vector{Tuple{Int64, Int64}}      # leftmost and rightmost sites on which each layer acts non-trivially
-    gates_by_site::Vector{Vector{Dict{String,Any}}}    # positions, inds and orientations of all the gates touching each qubit
+    gates_by_site::Vector{Vector{@NamedTuple{
+                        inds::NTuple{4, Index{Int64}},
+                        pos::Int64,
+                        depth::Int64,
+                        orientation::String
+                    }}}
+    # positions, inds and orientations of all the gates touching each qubit
     gates_by_layer::Vector{Vector{Int64}}     # positions of all gates sorted by depth
     sites_by_gate::Vector{Tuple{Int64, Int64}}  # vector contaning all the sites each gate is acting on
 end
 
 
-function newLightcone(sites::Vector{<:Index}, depth; U_array::Union{Nothing, Vector{<:Matrix}} = nothing, lightbounds = (true, true), site1_empty = false)
+function newLightcone(sites::Vector{<:Index}, depth::Int64; U_array::Union{Nothing, Vector{<:Matrix}} = nothing, lightbounds::Tuple{Bool, Bool} = (true, true), site1_empty::Bool = false)
 
     # extract number of sites on which lightcone acts
     sizeAB = length(sites)
@@ -85,7 +91,14 @@ function newLightcone(sites::Vector{<:Index}, depth; U_array::Union{Nothing, Vec
     inds_arr::Vector{NTuple{4, Index{Int64}}} = []
 
     range::Vector{Tuple{Int64, Int64}} = []
-    gates_by_site::Vector{Vector{Dict{String,Any}}} = [[] for _ in 1:sizeAB]
+    gates_by_site::Vector{Vector{
+                    @NamedTuple{
+                        inds::NTuple{4, Index{Int64}},
+                        pos::Int64,
+                        depth::Int64,
+                        orientation::String
+                    }
+    }} = [[] for _ in 1:sizeAB]
     gates_by_layer::Vector{Vector{Int64}} = []
     sites_by_gate::Vector{Tuple{Int64, Int64}} = []
     k = 1
@@ -171,15 +184,15 @@ function newLightcone(sites::Vector{<:Index}, depth; U_array::Union{Nothing, Vec
             end
 
 
-            fullinds = Tuple(ind for ind in fullinds)
+            fullinds = (fullinds[1], fullinds[2], fullinds[3], fullinds[4])
 
             # insert unitary 
             brick = ITensor(U_array[k], fullinds)
             push!(circuit, brick)
             push!(inds_arr, fullinds)
             
-            push!(gates_by_site[sites_involved[1]], Dict([("inds", fullinds), ("pos", k), ("depth", i), ("orientation", "R")]))
-            push!(gates_by_site[sites_involved[2]], Dict([("inds", fullinds), ("pos", k), ("depth", i), ("orientation", "L")]))
+            push!(gates_by_site[sites_involved[1]], (inds=fullinds, pos=k, depth=i, orientation="R"))
+            push!(gates_by_site[sites_involved[2]], (inds=fullinds, pos=k, depth=i, orientation="L"))
             push!(sites_by_gate, sites_involved)
             push!(layer_i_pos, k)
 
@@ -219,7 +232,7 @@ function updateLightcone!(lightcone::Lightcone, U::AbstractMatrix, coords::Tuple
             throw(DomainError(coords, "No gate at specified coords for this structure"))
         gate = lightcone.gates_by_site[site][depth]
     end
-    updateLightcone!(lightcone, U, gate["pos"])
+    updateLightcone!(lightcone, U, gate[:pos])
 end
 
 "Update Lightcone in-place"
