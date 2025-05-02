@@ -9,30 +9,30 @@ using JET
 
 ITensors.set_warn_order(28)
 
-#let
-#    sites = siteinds("Qubit", 10)
-#    mpo = random_mpo(sites)
+
+#sites = siteinds("Qubit", 10)
+#mpo = random_mpo(sites)
 #
-#    input_inds = sites
-#    output_inds = sites'
-#    tau = 2
-#    N = length(mpo)
+#input_inds = sites
+#output_inds = sites'
+#tau = 2
+#N = length(mpo)
 #
-#    # noprime the input inds
-#    # change the output inds to a prime of the input inds to match the inds of the first layer of gates
-#    sites = noprime(input_inds)
-#    d = sites[1].space
-#    tempinds = siteinds(d, N)
-#    for i in 1:N
-#        replaceind!(mpo[i], input_inds[i], tempinds[i])
-#        replaceind!(mpo[i], output_inds[i], prime(sites[i], tau))
-#        replaceind!(mpo[i], tempinds[i], sites[i])
-#    end
-#
-#    lc = mt.newLightcone(sites, tau)
-#    U_array = Array(lc)
-#    @profview mt._fgGlobalSweep(U_array, lc, mpo)
+## noprime the input inds
+## change the output inds to a prime of the input inds to match the inds of the first layer of gates
+#sites = noprime(input_inds)
+#d = sites[1].space
+#tempinds = siteinds(d, N)
+#for i in 1:N
+#    replaceind!(mpo[i], input_inds[i], tempinds[i])
+#    replaceind!(mpo[i], output_inds[i], prime(sites[i], tau))
+#    replaceind!(mpo[i], tempinds[i], sites[i])
 #end
+#
+#lc = mt.newLightcone(sites, tau)
+#U_array = Array(lc)
+#@report_opt mt.updateLightcone!(lc, U_array)
+
 
 
 
@@ -215,8 +215,8 @@ end
 let
     N = 10
     eps = 1e-1
-    #psi = random_mps(siteinds("Qubit", N), linkdims = 2)
-    #mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\")
+    psi = random_mps(siteinds("Qubit", N), linkdims = 2)
+    mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\")
     mt.invertMPS2("D:\\Julia\\MyProject\\Data\\randMPS\\", N, eps; nthreads = 1)
 end
 

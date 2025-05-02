@@ -26,7 +26,7 @@ end
 
 psi, results = execute();
 
-mps = random_mps(siteinds("Qubit", 20); linkdims = 2)
+mps = random_mps(siteinds("Qubit", 10); linkdims = 2)
 @time results = mt.invert(mps, mt.invertGlobalSweep; eps = 1e-2, reuse_previous = false, start_tau = 5, nruns = 1)
 @profview results = mt.invert(mps, mt.invertGlobalSweep; eps = 1e-2, reuse_previous = false, start_tau = 5, nruns = 1)
 #results = invertMPSLiu(mps, mt.invertGlobalSweep)

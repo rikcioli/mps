@@ -81,7 +81,7 @@ function newLightcone(sites::Vector{<:Index}, depth::Int64; U_array::Union{Nothi
             structure\nInserted unitaries: $n_insert\nLightcone unitaries: $n_unitaries\n"))
         if n_insert < n_unitaries
             @warn "Number of inserted unitaries ($n_insert) is lower than maximum capacity ($n_unitaries), filling the missing spaces with identities"
-            Ids = [1.0*Id2 for _ in 1:n_unitaries-n_insert]
+            Ids = [(1.0 + 0.0im)*Id2 for _ in 1:n_unitaries-n_insert]
             U_array = [U_array; Ids]
         end
     end

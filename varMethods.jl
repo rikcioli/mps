@@ -2,7 +2,7 @@ import Distributed
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; site1_empty = false, d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
+function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; site1_empty = false, d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
@@ -228,7 +228,7 @@ function _fgGlobalSweep(U_array::Vector{Matrix{T}}, lightcone::Lightcone, mpo::U
     reverse!(R_blocks)
 
     # start the sweep
-    grad = Vector{Matrix{T}}(undef, 0)
+    grad = Vector{Matrix{T}}(undef, lightcone.n_unitaries)
 
     for j in 2:N
         # extract all gates on the left of site j
@@ -251,7 +251,7 @@ function _fgGlobalSweep(U_array::Vector{Matrix{T}}, lightcone::Lightcone, mpo::U
             gate_jl_inds, gate_jl_pos = gate_jl[:inds], gate_jl[:pos]
             ddUjl_arr = Array{T}(env, gate_jl_inds)
             ddUjl = conj(reshape(ddUjl_arr, (d^2, d^2)))/normalization #include rescaling if needed (for mpos)
-            push!(grad, ddUjl)
+            grad[gate_jl_pos] = ddUjl
         end
 
         # update leftmost_block for next j and add it to L_blocks list
@@ -285,7 +285,7 @@ function _fgGlobalSweep(U_array::Vector{Matrix{T}}, lightcone::Lightcone, mpo::U
 end
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it"
-function invertGlobalSweep(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; lightbounds = (false, false), site1_empty = false, maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array::Union{Nothing, Vector{<:Matrix}} = nothing)::Dict{String, Any}
+function invertGlobalSweep(mpo::Union{Vector{ITensor}, MPS, MPO}, tau::Integer, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; lightbounds = (false, false), site1_empty = false, maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
@@ -341,7 +341,7 @@ end
 
 
 "Calls invertSweepLC for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
-function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}, invertMethod; tau = 0, eps = 1e-3, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{<:Matrix}} = nothing, kargs...)
+function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}, invertMethod; tau = 0, eps = 1e-3, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing, kargs...) where {T}
     obj = typeof(mpo)
     print("Attempting inversion of size $(length(mpo)) $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\n")
 

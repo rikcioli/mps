@@ -636,7 +636,7 @@ end
 
 
 "Cost function and gradient for invertGlobalSweep optimization"
-function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{ITensor})
+function _fgLiu(U_array::Vector{Matrix{T}}, lightcone::Lightcone, reduced_mps::Vector{ITensor}) where {T}
     updateLightcone!(lightcone, U_array)
     d = lightcone.d
     N = lightcone.size
@@ -648,7 +648,7 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{ITenso
     reduced_mps_conj = [conj(prime(tensor, plevconj)) for tensor in reduced_mps]   
 
     # prepare right blocks to save contractions
-    R_blocks::Vector{ITensor} = []
+    R_blocks = ITensor[]
 
     # prepare zero matrices for middle qubits
     d = lightcone.d
@@ -679,7 +679,7 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{ITenso
     for k in N:-1:3
         # extract left gates associated with site k
         gates_k = lightcone.gates_by_site[k]
-        tensors_left = [lightcone.circuit[gate["pos"]] for gate in gates_k if gate["orientation"]=="L"]
+        tensors_left = [lightcone.circuit[gate[:pos]] for gate in gates_k if gate[:orientation]=="L"]
 
         # insert a zero proj if we are in region A, else insert identity
         ind = noprime(sites[k])
@@ -697,11 +697,11 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{ITenso
     reverse!(R_blocks)
 
     # now sweep from left to right by removing each unitary at a time to compute gradient
-    grad = [Array{ComplexF64}(undef, 0, 0) for _ in 1:lightcone.n_unitaries]
+    grad = Vector{Matrix{T}}(undef, lightcone.n_unitaries)
     for j in 2:N
         # extract all gates on the left of site j
         gates_j = lightcone.gates_by_site[j]
-        tensors_left = [lightcone.circuit[gate["pos"]] for gate in gates_j if gate["orientation"]=="L"]
+        tensors_left = [lightcone.circuit[gate[:pos]] for gate in gates_j if gate[:orientation]=="L"]
 
         # insert a zero proj if we are in region A, else insert identity
         ind = noprime(sites[j])
@@ -730,9 +730,9 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{ITenso
                 env *= gate
             end
 
-            gate_jl = filter(gate -> gate["orientation"] == "L", gates_j)[l]
-            gate_jl_inds, gate_jl_pos = gate_jl["inds"], gate_jl["pos"]
-            ddUjl = Array(env, gate_jl_inds)
+            gate_jl = filter(gate -> gate[:orientation] == "L", gates_j)[l]
+            gate_jl_inds, gate_jl_pos = gate_jl[:inds], gate_jl[:pos]
+            ddUjl = Array{T}(env, gate_jl_inds)
             ddUjl = 2*conj(reshape(ddUjl, (d^2, d^2)))
             grad[gate_jl_pos] = ddUjl
         end
@@ -750,7 +750,7 @@ function _fgLiu(U_array::Vector{<:Matrix}, lightcone, reduced_mps::Vector{ITenso
 
     # compute environment now that we contracted all blocks, so that we are effectively computing the overlap
     # we use the absolute value as a cost function
-    overlap = abs(Array(leftmost_block)[1])
+    overlap = abs(Array{T}(leftmost_block)[1])
     riem_grad = project(U_array, grad)
 
     # put a - sign so that it minimizes
@@ -851,7 +851,7 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
             _k_sites = k_sites_list[l]
             
             _lightbounds = (true, _last_site==N ? false : true)   # first region will always be left for step 2, last region could end up in step 1
-            _lightcone = newLightcone(_k_sites, tau; lightbounds = _lightbounds, U_array = use_previous ? Matrix[] : nothing)
+            _lightcone = newLightcone(_k_sites, tau; lightbounds = _lightbounds, U_array = use_previous ? Vector{Matrix{ComplexF64}}(undef, 0) : nothing)
 
             if use_previous #use knowledge of previous inversions for initial start 
                 for j in _first_site:_last_site
@@ -860,11 +860,11 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
                     if _local_old[1] == "AB"  # if it was in one of the previous step's lightcones
                         # extract gates to reuse from old lightcone
                         _lc = lc_list_old[_local_old[2]]  # which lightcone
-                        _gates_old = [gate for gate in _lc.gates_by_site[_local_old[3]] if gate["orientation"] == "R"] # gates touching that site, only those on the right
-                        _unitaries_old = [Matrix(_lc, gate["pos"]) for gate in _gates_old]
+                        _gates_old = [gate for gate in _lc.gates_by_site[_local_old[3]] if gate[:orientation] == "R"] # gates touching that site, only those on the right
+                        _unitaries_old = [Matrix(_lc, gate[:pos]) for gate in _gates_old]
 
-                        _gates_new = [gate for gate in _lightcone.gates_by_site[_local_new[3]] if gate["orientation"] == "R"]
-                        _gates_newpos = [gate["pos"] for gate in _gates_new]
+                        _gates_new = [gate for gate in _lightcone.gates_by_site[_local_new[3]] if gate[:orientation] == "R"]
+                        _gates_newpos = [gate[:pos] for gate in _gates_new]
 
                         for m in 1:min(length(_gates_old), length(_gates_new))
                             _U = _unitaries_old[m]
@@ -1057,23 +1057,23 @@ function invertMPS1(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Julia\\M
     end
 
     site1_empty = isodd(reg1_size)
-    lightcone = newLightcone(sites, tau; U_array = Matrix[], lightbounds = (false, false), site1_empty = site1_empty)
+    lightcone = newLightcone(sites, tau; U_array = Vector{Matrix{ComplexF64}}(undef, 0), lightbounds = (false, false), site1_empty = site1_empty)
 
     for j in 1:N
         # extract gates from second part (i.e. those that need to act first on 0)
         reg_type2, pos2, local_site2 = ltg_map2[j]
         lc_local2 = lc_list2[pos2]
-        gates2 = [gate for gate in lc_local2.gates_by_site[local_site2] if gate["orientation"] == "R"]
-        unitaries = [Matrix(lc_local2, gate["pos"]) for gate in gates2]   #take the unitaries from lc_list2
-        depths = [gate["depth"] for gate in gates2]
+        gates2 = [gate for gate in lc_local2.gates_by_site[local_site2] if gate[:orientation] == "R"]
+        unitaries = [Matrix(lc_local2, gate[:pos]) for gate in gates2]   #take the unitaries from lc_list2
+        depths = [gate[:depth] for gate in gates2]
 
         reg_type, pos, local_site = ltg_map[j]
         if reg_type == "AB"
             lc_local = lc_list[pos]
-            gates = [gate for gate in lc_local.gates_by_site[local_site] if gate["orientation"] == "R"]
+            gates = [gate for gate in lc_local.gates_by_site[local_site] if gate[:orientation] == "R"]
             if !isempty(gates)
-                unitaries1 = [copy((Matrix(lc_local, gate["pos"]))') for gate in gates]   #take the unitaries from lc_list
-                depths1 = [tau1+1-gate["depth"]+tau2 for gate in gates]
+                unitaries1 = [copy((Matrix(lc_local, gate[:pos]))') for gate in gates]   #take the unitaries from lc_list
+                depths1 = [tau1+1-gate[:depth]+tau2 for gate in gates]
 
                 if !isempty(depths)
                     if depths[end] == depths1[end]  # we can remove the last gate of lc2 by multipliying it with the one from lc1 above
