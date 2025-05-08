@@ -35,7 +35,7 @@ function newLightcone(sites::Vector{<:Index}, depth::Int64; U_array::Union{Nothi
         depth == 1 &&
             throw(DomainError(depth, "Depth 1 lightcone for site1_empty mode leaves the first site with no unitaries at all and causes problems"))
         if lightbounds[1] || lightbounds[2]
-            @warn("Lightbounds can't be true when site1_empty mode, setting them to false")
+            @warn("Lightbounds mode with site1_empty mode has yet to be implemented, setting lightbounds to (false, false)")
         end
         lightbounds = (false, false)
         shift = 1 # in many cases leaving the first site empty is just shifting 
@@ -54,7 +54,7 @@ function newLightcone(sites::Vector{<:Index}, depth::Int64; U_array::Union{Nothi
     n_light = count(lightbounds)    # count how many boundaries have 'light' type structure
     min_size = n_light*(depth+1) - 2*div(n_light,2)
     if sizeAB < min_size
-        @warn "Cannot construct a depth $depth lightcone with lightbounds $lightbounds with only $sizeAB sites. Attempting to change lightbounds..."
+        @warn "Cannot construct a depth $depth lightcone with lightbounds $lightbounds with only $sizeAB sites. Attempting to change lightbounds to (true, false)"
         lightbounds = (true, false)
         n_light = count(lightbounds)    
         min_size = n_light*(depth+1) - 2*div(n_light,2)
@@ -80,25 +80,18 @@ function newLightcone(sites::Vector{<:Index}, depth::Int64; U_array::Union{Nothi
             throw(DomainError(n_insert, "Number of inserted unitaries is too large for this lightcone 
             structure\nInserted unitaries: $n_insert\nLightcone unitaries: $n_unitaries\n"))
         if n_insert < n_unitaries
-            @warn "Number of inserted unitaries ($n_insert) is lower than maximum capacity ($n_unitaries), filling the missing spaces with identities"
+            @warn "Number of inserted unitaries ($n_insert) is lower than maximum capacity ($n_unitaries), filling the missing spaces with identities; this is the intended behaviour when reuse_previous == true"
             Ids = [(1.0 + 0.0im)*Id2 for _ in 1:n_unitaries-n_insert]
             U_array = [U_array; Ids]
         end
     end
 
     # finally convert the U_array 
-    circuit::Vector{ITensor} = []
-    inds_arr::Vector{NTuple{4, Index{Int64}}} = []
+    circuit = ITensor[]
+    inds_arr = NTuple{4, Index{Int64}}[] 
 
-    range::Vector{Tuple{Int64, Int64}} = []
-    gates_by_site::Vector{Vector{
-                    @NamedTuple{
-                        inds::NTuple{4, Index{Int64}},
-                        pos::Int64,
-                        depth::Int64,
-                        orientation::String
-                    }
-    }} = [[] for _ in 1:sizeAB]
+    range = Tuple{Int64, Int64}[] 
+    gates_by_site = [@NamedTuple{inds::NTuple{4, Index{Int64}}, pos::Int64, depth::Int64, orientation::String}[] for _ in 1:sizeAB]
     gates_by_layer::Vector{Vector{Int64}} = []
     sites_by_gate::Vector{Tuple{Int64, Int64}} = []
     k = 1
@@ -109,7 +102,7 @@ function newLightcone(sites::Vector{<:Index}, depth::Int64; U_array::Union{Nothi
         lslope, rslope = llim, rlim
         # left range is 1 for odd layers, 2 for even layers
         # right range depends on sizeAB: if sizeAB even it's just sizeAB and sizeAB-1; if it's odd it's sizeAB-1 and sizeAB
-        # ADDED: shift value which is 0 in normal mode, 1 when first site is empty, in which case the range is swapped
+        # ADDED: shift value which is 0 in normal mode, 1 when first site is empty; in the latter case the range is swapped
         lrange, rrange = 1+mod(i+1-shift,2), (iseven(sizeAB) ? sizeAB-mod(i+1-shift,2) : sizeAB-mod(i+shift,2))
         if lightbounds[1]
             lslope += div(i-1,2)
@@ -121,7 +114,7 @@ function newLightcone(sites::Vector{<:Index}, depth::Int64; U_array::Union{Nothi
         end
         push!(range, (lrange, rrange))
 
-        layer_i_pos::Vector{Int64} = []
+        layer_i_pos = Int64[]
         # sweep over unitaries, from left to right if depth odd, otherwise from right to left
         # this will be helpful with the og center
         for j in (isodd(i) ? (lslope:rslope) : (rslope:-1:lslope))

@@ -1,5 +1,3 @@
-import Distributed
-
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
 function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; site1_empty = false, d = 2, conv_err = 1E-8, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}
@@ -21,28 +19,26 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
         env = conj(mpo[1]*mpo[2])
 
         inds = sites
-        U, S, Vdag = svd(env, inds, cutoff = 1E-15)
+        U, S, Vdag = svd(env, inds; cutoff = 1e-15)
         u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity
-        newfid = real(tr(Array{ComplexF64}(S, (u, v))))/normalization
+        newfid = real(tr(Matrix{ComplexF64}(S, (u, v))))/normalization
         gate_ji_opt = U * replaceind(Vdag, v, u)
-        lightcone = newLightcone(sites, 1; lightbounds = (false, false))
-        lightcone.circuit[1] = replaceprime(gate_ji_opt, tau => 1)
+        lc = newLightcone(sites, 1; lightbounds = (false, false))
+        lc.circuit[1] = permute(replaceprime(gate_ji_opt, tau => 1), inds, inds')
 
         println("Matrix is 2-local, converged to fidelity $newfid immediately")
-        return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", 1)])
+        return Dict([("lightcone", lc), ("overlap", newfid), ("niter", 1)])
     end
 
     # create random brickwork circuit
-    # circuit[i][j] = timestep i unitary acting on qubits (2j-1, 2j) if i odd or (2j, 2j+1) if i even
     lightcone = newLightcone(sites, tau; U_array = init_array, lightbounds = (false, false), site1_empty = site1_empty)
 
     L_blocks = ITensor[]
     R_blocks = ITensor[]
 
     # construct L_1
-    # first item is zero projector, then there are the gates in ascending order, then the mpo site
     leftmost_block = mpo[1]  # 2 indices
     push!(L_blocks, leftmost_block)
 
@@ -58,8 +54,6 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
         right_gates_k = [lightcone.circuit[gate[:pos]] for gate in gates_k if gate[:orientation]=="R"]
         all_blocks = [right_gates_k; mpo[k]]
 
-        # if k even contract in descending order, else ascending
-        all_blocks = iseven(k) ? reverse(all_blocks) : all_blocks
         for block in all_blocks
             rightmost_block *= block
         end
@@ -95,22 +89,20 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
                 end
             end
 
-            contract_left = ITensor[]
-            contract_right = ITensor[]
-            if isodd(tau+j)
-                push!(contract_left, mpo[j])
+            # contract mpo[j] to either left or right tensors
+            # choice only makes a difference if tau odd
+            if isodd(j) ⊻ site1_empty
+                push!(right_tensors, mpo[j])
             else
-                push!(contract_right, mpo[j])
+                push!(left_tensors, mpo[j])
             end
-            contract_left = [left_tensors; contract_left]
-            contract_right = [right_tensors; contract_right]
             
             env_left = leftmost_block
-            for gate in contract_left
+            for gate in left_tensors
                 env_left *= gate
             end
             env_right = rightmost_block
-            for gate in contract_right
+            for gate in right_tensors
                 env_right *= gate
             end
 
@@ -121,10 +113,10 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
             u, v = commonind(U, S), commonind(Vdag, S)
 
             # evaluate fidelity as Tr(Env*Gate), i.e. the overlap (NOT SQUARED)
-            newfid = real(tr(Array{ComplexF64}(S, (u, v))))/normalization
+            newfid = real(tr(Matrix{ComplexF64}(S, (u, v))))/normalization
 
             #replace gate_ji with optimized one, both in gates_j (used in this loop) and in circuit
-            gate_ji_opt = U * replaceind(Vdag, v, u)
+            gate_ji_opt = permute(U * replaceind(Vdag, v, u), gate_ji[:inds]; allow_alias = true)
             tensors_j[i] = gate_ji_opt
             lightcone.circuit[gate_ji[:pos]] = gate_ji_opt
         end
@@ -163,10 +155,10 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
         if N > 3
             # update L_blocks or R_blocks depending on sweep direction
             if rev == false
-                gates_to_append = tensors_j[(1+mod(j,2)):2:end]     # follow fig. 6
-                all_blocks = [gates_to_append; mpo[j]]
-                all_blocks = isodd(j) ? reverse(all_blocks) : all_blocks
-                for block in all_blocks
+                # append left gates to leftmost_block
+                gates_to_append = [tensors_j[l] for l in eachindex(gates_j) if gates_j[l][:orientation] == "L"]
+                push!(gates_to_append, mpo[j])
+                for block in gates_to_append
                     leftmost_block *= block
                 end
                 if first_sweep == true
@@ -174,12 +166,12 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
                 else
                     L_blocks[j] = leftmost_block
                 end
-                rightmost_block = R_blocks[j]       #it should be j+2 but R_blocks starts from site 3
+                rightmost_block = R_blocks[j]       #it would be j+2 but R_blocks starts from site 3
             else
-                gates_to_append = tensors_j[(2-mod(j,2)):2:end]
-                all_blocks = [gates_to_append; mpo[j]]
-                all_blocks = iseven(j) ? reverse(all_blocks) : all_blocks
-                for block in all_blocks
+                # append right gates to rightmost_block
+                gates_to_append = [tensors_j[l] for l in eachindex(gates_j) if gates_j[l][:orientation] == "R"]
+                push!(gates_to_append, mpo[j])
+                for block in gates_to_append
                     rightmost_block *= block
                 end
                 R_blocks[j-2] = rightmost_block         #same argument
@@ -191,9 +183,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
     end
 
     println("Converged to fidelity $newfid with $sweep sweeps\n")
-    if tau > 1
-        @show lightcone.circuit
-    end
+
     return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", sweep)])
 
 end
@@ -208,7 +198,6 @@ function _fgGlobalSweep(U_array::Vector{Matrix{T}}, lightcone::Lightcone, mpo::U
     R_blocks = ITensor[]
 
     # construct L_1
-    # first item is the delta, i.e. the first site of mpo_low which is composed of only deltas, then the mpo site
     leftmost_block = mpo[1]  # 2 indices
 
     # construct R_N
@@ -342,11 +331,14 @@ function invertGlobalSweep(mpo::Union{Vector{ITensor}, MPS, MPO}, tau::Integer, 
 end
 
 
-"Calls invertSweepLC for Vector{ITensor} mpo input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps'"
+"Calls invertMethod on input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps';
+if input tau is specified (i.e. set to a non-zero integer) the fixed_tau_mode is activated, and a single inversion attempt
+with a circuit of depth tau is performed."
 function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}, invertMethod; tau = 0, eps = 1e-3, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing, kargs...) where {T}
     obj = typeof(mpo)
     print("Attempting inversion of size $(length(mpo)) $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\n")
 
+    # by default the inversion runs in 
     fixed_tau_mode = true
     if iszero(tau)
         print("Overlap (normalized): $overlap\nRelative error: $eps\nStarting depth: $start_tau\n")
@@ -363,16 +355,15 @@ function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Inde
     while !found
         println("Attempting depth $tau...")
         # choose multiprocessing method
-        results_array::Vector{Dict{String, Any}} = [Dict([("ready", 0)]) for _ in 1:nruns]
-        Threads.@threads for i in 1:nruns
-            res = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, kargs...)
-            results_array[i] = res
+        results_array = Array{Dict{String, Any}}(undef, nruns)
+        if nruns == 1   #avoid spawning threads if nruns == 1
+            results_array[1] = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, kargs...)
+        else
+            Threads.@threads for i in 1:nruns
+                res = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, kargs...)
+                results_array[i] = res
+            end
         end
-
-        # results_array = [invertMethod(mpo, tau, input_inds, output_inds; kargs...) for _ in 1:nruns]
-        
-        ## f = obj -> invertMethod(obj, tau, input_inds, output_inds; kargs...)
-        ## results_array = Distributed.pmap(f, (mpo for _ in 1:nruns))
         
         errs = [abs(overlap - results["overlap"]) for results in results_array]
         err_min_pos = argmin(errs)

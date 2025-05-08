@@ -15,6 +15,8 @@ const T = [1 0
             0 exp(1im*pi/4)]
 const X = [0 1
             1 0]
+const Z = [1 0
+            0 -1]
 const CX = [1 0 0 0
             0 1 0 0
             0 0 0 1
@@ -1122,25 +1124,25 @@ function invertMPS1(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Julia\\M
 end
 
 
-function invertMPS2(pathname, N, eps; nthreads = 4)
+function invertMPS2(pathname, N, eps, invertMethod)
 
     params = load_object(pathname*"$(N)_$(eps)_params.jld2")
     @show params
     best_guess = load_object(pathname*"$(N)_$(eps)_ansatz.jld2")
+    best_guess = [Matrix{ComplexF64}(U) for U in best_guess]
+    @show typeof(best_guess)
     f = h5open(pathname*"$(N)_mps.h5","r")
     mps = read(f,"psi",MPS)
     close(f)
-    tau = params["start_tau"]
+    start_tau = params["start_tau"]
 
-    Threads.@threads for start_tau in tau : tau+nthreads-1
-        results_final = invert(mps, invertGlobalSweep; 
-                                    nruns = 1, 
-                                    site1_empty = params["site1_empty"], 
-                                    eps = eps, 
-                                    start_tau = start_tau, 
-                                    init_array = best_guess)
-        jldsave(pathname*"$(N)_$(eps)_$(start_tau)ST_result.jld2"; results_final)
-    end
+    results_final = invert(mps, invertMethod; 
+                                nruns = 1, 
+                                site1_empty = params["site1_empty"], 
+                                eps = eps, 
+                                start_tau = start_tau, 
+                                init_array = best_guess)
+    jldsave(pathname*"$(N)_$(eps)_$(start_tau)ST_result.jld2"; results_final)
 
     return
 end
@@ -1148,7 +1150,7 @@ end
 function invertMPSfinal(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\", nthreads = 4)
     N = length(mps)
     invertMPS1(mps, invertMethod; eps = eps, pathname = pathname)
-    invertMPS2(pathname, N, eps; nthreads = nthreads)
+    invertMPS2(pathname, N, eps, invertMethod)
     return
 end
 
