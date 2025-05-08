@@ -7,6 +7,10 @@ using CSV
 using JET
 #using DataFrames, StatsPlots
 
+#Strided.disable_threads()
+#@show ITensors.Strided.get_num_threads()
+#BLAS.set_num_threads(56)
+#@show ITensors.blas_get_num_threads()
 
 function execute(command, N, eps_array; D = 2, tau = 3)
 # Choose object to invert
