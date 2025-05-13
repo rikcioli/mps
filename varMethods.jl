@@ -334,9 +334,9 @@ end
 "Calls invertMethod on input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps';
 if input tau is specified (i.e. set to a non-zero integer) the fixed_tau_mode is activated, and a single inversion attempt
 with a circuit of depth tau is performed."
-function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}, invertMethod; tau = 0, eps = 1e-3, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing, kargs...) where {T}
+function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}, invertMethod; tau = 0, eps = 1e-3, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing, maxiter = 20000, kargs...) where {T}
     obj = typeof(mpo)
-    print("Attempting inversion of size $(length(mpo)) $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\n")
+    print("Attempting inversion of size $(length(mpo)) $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\nMax iterations: $maxiter\n")
 
     # by default the inversion runs in 
     fixed_tau_mode = true
@@ -357,10 +357,10 @@ function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Inde
         # choose multiprocessing method
         results_array = Array{Dict{String, Any}}(undef, nruns)
         if nruns == 1   #avoid spawning threads if nruns == 1
-            results_array[1] = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, kargs...)
+            results_array[1] = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, maxiter = maxiter, kargs...)
         else
             Threads.@threads for i in 1:nruns
-                res = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, kargs...)
+                res = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, maxiter = maxiter, kargs...)
                 results_array[i] = res
             end
         end

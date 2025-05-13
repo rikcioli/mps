@@ -764,14 +764,14 @@ function _fgLiu(U_array::Vector{Matrix{T}}, lightcone::Lightcone, reduced_mps::V
 end
 
 
-
-function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
+"Invert state up to infidelity upper bounded by eps"
+function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-2, maxiter = 20000)
 
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
     sites = siteinds(mps)
-    eps1 = eps # error of the whole first part, that is inversion of reduced dm + truncation
-    eps2 = eps # error of the second part, that is inversion of the pure states
+    eps1 = eps/4 # error of the whole first part, that is inversion of reduced dm + truncation
+    eps2 = eps/4 # error of the second part, that is inversion of the pure states
     println("Attempting inversion of MPS with invertMPSLiu and errors:\neps1 = $eps1\neps2 = $eps2")
 
     local mps_trunc, boundaries, rangesA, err_list, lc_list, err1, ltg_map
@@ -831,11 +831,8 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
 
 
         rangesA = Array{Tuple, 1}(undef, length(initial_pos))
-
         lc_list = Array{Lightcone, 1}(undef, length(initial_pos))
-        #lc_list::Vector{Lightcone} = []
         err_list = Array{Float64, 1}(undef, length(initial_pos))
-        #err_list = []
 
         reduced_mps_list = []
         k_sites_list = []
@@ -853,7 +850,8 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
             _k_sites = k_sites_list[l]
             
             _lightbounds = (true, _last_site==N ? false : true)   # first region will always be left for step 2, last region could end up in step 1
-            _lightcone = newLightcone(_k_sites, tau; lightbounds = _lightbounds, U_array = use_previous ? Vector{Matrix{ComplexF64}}(undef, 0) : nothing)
+            _lightcone = newLightcone(_k_sites, tau; lightbounds = _lightbounds, U_array = use_previous ? Matrix{ComplexF64}[] : nothing)
+            # using an empty array will fill the lightcone with identities, which will then be modified by the following piece of code
 
             if use_previous #use knowledge of previous inversions for initial start 
                 for j in _first_site:_last_site
@@ -884,7 +882,7 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
             _arrU0 = Array(_lightcone)
             _fg = arrU -> _fgLiu(arrU, _lightcone, _reduced_mps)
             # Quasi-Newton method
-            _algorithm = LBFGS(5; maxiter = 20000, gradtol = 1E-8, verbosity = 1)
+            _algorithm = LBFGS(5; maxiter = maxiter, gradtol = 1E-8, verbosity = 1)
             # optimize and store results
             # note that arrUmin is already stored in current lightcone, ready to be applied to mps
             _, _neg_overlap, _ = optimize(_fg, _arrU0, _algorithm; retract = retract, transport! = transport!, isometrictransport = true , inner = inner);
@@ -930,7 +928,7 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
     println("Inversion and truncation reached within requested eps_trunc, inverting local states with local error eps2/N_regions^2 = $(eps2/length(rangesA)^2)")
     
     # Now we proceed with inversion of all pure states
-    epsinv2 = 2*eps2/length(rangesA)^2     # heuristic, the scaling is 1/L^2
+    epsinv2 = eps2/length(rangesA)^2     # the scaling is 1/Nregions^2
     trunc_siteinds = siteinds(mps_trunc)
     trunc_linkinds = linkinds(mps_trunc)
     ranges = []
@@ -977,53 +975,47 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
         push!(reduced_mps_list, reduced_mps)
     end
     
-    local lc_list2, tau_list2, err_list2, mps_final, err2, err_total
-    for attempt in 1:5
-        lc_list2 = Array{Lightcone, 1}(undef, length(ranges))
-        tau_list2 = Array{Integer, 1}(undef, length(ranges))
-        err_list2 = Array{Float64, 1}(undef, length(ranges))
+    lc_list2 = Array{Lightcone, 1}(undef, length(ranges))
+    tau_list2 = Array{Integer, 1}(undef, length(ranges))
+    err_list2 = Array{Float64, 1}(undef, length(ranges))
 
-        Threads.@threads for l in eachindex(ranges)
-            _range = ranges[l]
-            _reduced_mps = reduced_mps_list[l]
-            _start_tau2 = (_range in rangesA ? 1 : 2)
-            _site1_empty = false
-            if iseven(_range[2]-_range[1])
-                _start_tau2 = 2
-                # if the first region has odd number of sites we need to start the lightcone
-                # in the site1_empty mode, in order to have a coherent global brickwork structure at the end
-                if l == 1   
-                    _site1_empty = true
-                end
+    Threads.@threads for l in eachindex(ranges)
+        _range = ranges[l]
+        _reduced_mps = reduced_mps_list[l]
+        _start_tau2 = (_range in rangesA ? 1 : 2)
+        _site1_empty = false
+        if iseven(_range[2]-_range[1])
+            _start_tau2 = 2
+            # if the first region has odd number of sites we need to start the lightcone
+            # in the site1_empty mode, in order to have a coherent global brickwork structure at the end
+            if l == 1   
+                _site1_empty = true
             end
-            results2 = invert(_reduced_mps, invertMethod; start_tau = _start_tau2, eps = epsinv2, site1_empty = _site1_empty, reuse_previous = false, nruns = 1)
-            #if _site1_empty
-            #    @show results2["lightcone"]
-            #end
-            lc_list2[l] = results2["lightcone"]
-            tau_list2[l] = results2["tau"]
-            err_list2[l] = results2["err"]
         end
+        results2 = invert(_reduced_mps, invertMethod; start_tau = _start_tau2, eps = epsinv2, site1_empty = _site1_empty, maxiter = maxiter, reuse_previous = false, nruns = 1)
 
-        # finally create a 0 state and apply all the V to recreate the original state for final total error
-        mps_final = initialize_vac(N, trunc_siteinds)
-        apply!(mps_final, lc_list2)
-        err2 = 1-abs(dot(mps_final, mps_trunc))
-        @show err2
-
-        replace_siteinds!(mps_final, sites)
-        apply!(mps_final, lc_list, dagger=true)
-        
-        err_total = 1-abs(dot(mps_final, mps))
-        @show err_total
-        if err_total < eps
-            break
-        else
-            println("Convergence up to desired total error not found with initial eps2 = $epsinv2, reducing the error...")
-            epsinv2 *= 0.5
-        end
-
+        lc_list2[l] = results2["lightcone"]
+        tau_list2[l] = results2["tau"]
+        err_list2[l] = results2["err"]
     end
+
+    # finally create a 0 state and apply all the V to recreate the original state for final total error
+    mps_final = initialize_vac(N, trunc_siteinds)
+    apply!(mps_final, lc_list2)
+    err2 = 1-abs(dot(mps_final, mps_trunc))
+    @show err2
+
+    replace_siteinds!(mps_final, sites)
+    apply!(mps_final, lc_list, dagger=true)
+        
+    err_total = 1-abs(dot(mps_final, mps))
+    @show err_total
+    if err_total < eps
+        println("Convergence obtained with total infidelity $err_total. Required: $eps.")
+    else #this case should never happen if everything goes right
+        @warn("Total infidelity greater than requested value. \nRequested: $eps \nObtained: $err_total")
+    end
+    
     
     return Dict([("lc1", lc_list), ("tau1", tau), ("errinv1", err_list), ("lc2", lc_list2), ("tau2", tau_list2), 
     ("errinv2", err_list2), ("mps_final", mps_final), ("err1", err1), ("err2", err2), ("err_total", err_total), ("ltg_map", ltg_map), ("ltg_map2", ltg_map2)])
@@ -1033,10 +1025,10 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-5)
 end
 
 
-function invertMPS1(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\")
+function invertMPS1(mps::MPS, invertMethod; eps = 1e-3, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\", ansatz_eps = 0.1, maxiter = 20000)
     N = length(mps)
 
-    results = invertMPSLiu(mps, invertMethod; eps = 0.1)
+    results = invertMPSLiu(mps, invertMethod; eps = ansatz_eps, maxiter = maxiter)
 
     tau1 = results["tau1"]
     tau2 = maximum(results["tau2"])
@@ -1124,13 +1116,13 @@ function invertMPS1(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Julia\\M
 end
 
 
-function invertMPS2(pathname, N, eps, invertMethod)
+function invertMPS2(pathname, N, eps, invertMethod; maxiter = 50000)
 
     params = load_object(pathname*"$(N)_$(eps)_params.jld2")
     @show params
     best_guess = load_object(pathname*"$(N)_$(eps)_ansatz.jld2")
     best_guess = [Matrix{ComplexF64}(U) for U in best_guess]
-    @show typeof(best_guess)
+
     f = h5open(pathname*"$(N)_mps.h5","r")
     mps = read(f,"psi",MPS)
     close(f)
@@ -1140,11 +1132,12 @@ function invertMPS2(pathname, N, eps, invertMethod)
                                 nruns = 1, 
                                 site1_empty = params["site1_empty"], 
                                 eps = eps, 
+                                maxiter = maxiter,
                                 start_tau = start_tau, 
                                 init_array = best_guess)
     jldsave(pathname*"$(N)_$(eps)_$(start_tau)ST_result.jld2"; results_final)
 
-    return
+    return results_final
 end
 
 function invertMPSfinal(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\", nthreads = 4)
