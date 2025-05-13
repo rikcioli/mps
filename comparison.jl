@@ -4,7 +4,8 @@ using ITensors, ITensorMPS
 #import Plots
 using LaTeXStrings, LinearAlgebra, Statistics, Random
 using CSV
-using JET
+#using JET
+#using Strided
 #using DataFrames, StatsPlots
 
 #Strided.disable_threads()
@@ -192,7 +193,7 @@ let
     N = 1000
     eps = 1e-3
     psi = random_mps(siteinds("Qubit", N), linkdims = 2)
-    mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\")
+    mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\", ansatz_eps = 1)
     #mt.invertMPS2("D:\\Julia\\MyProject\\Data\\randMPS\\", N, eps, mt.invertGlobalSweep)
 end
 
