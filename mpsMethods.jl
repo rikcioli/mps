@@ -979,43 +979,47 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-2, maxiter
     tau_list2 = Array{Integer, 1}(undef, length(ranges))
     err_list2 = Array{Float64, 1}(undef, length(ranges))
 
-    Threads.@threads for l in eachindex(ranges)
-        _range = ranges[l]
-        _reduced_mps = reduced_mps_list[l]
-        _start_tau2 = (_range in rangesA ? 1 : 2)
-        _site1_empty = false
-        if iseven(_range[2]-_range[1])
-            _start_tau2 = 2
-            # if the first region has odd number of sites we need to start the lightcone
-            # in the site1_empty mode, in order to have a coherent global brickwork structure at the end
-            if l == 1   
-                _site1_empty = true
+    # We try a different approach: we invert depth after depth until the total error is < eps, s.t. eps is a tight upper bound
+    attempt_tau = 2
+    local mps_final, err2, err_total
+    while true
+        Threads.@threads for l in eachindex(ranges)
+            _range = ranges[l]
+            _reduced_mps = reduced_mps_list[l]
+            _site1_empty = false
+            if iseven(_range[2]-_range[1])
+                # if the first region has odd number of sites we need to start the lightcone
+                # in the site1_empty mode, in order to have a coherent global brickwork structure at the end
+                if l == 1   
+                    _site1_empty = true
+                end
             end
+            results2 = invert(_reduced_mps, invertMethod; tau = attempt_tau, site1_empty = _site1_empty, maxiter = maxiter, reuse_previous = false, nruns = 1)
+
+            lc_list2[l] = results2["lightcone"]
+            tau_list2[l] = results2["tau"]
+            err_list2[l] = results2["err"]
         end
-        results2 = invert(_reduced_mps, invertMethod; start_tau = _start_tau2, eps = epsinv2, site1_empty = _site1_empty, maxiter = maxiter, reuse_previous = false, nruns = 1)
 
-        lc_list2[l] = results2["lightcone"]
-        tau_list2[l] = results2["tau"]
-        err_list2[l] = results2["err"]
+        # finally create a 0 state and apply all the V to recreate the original state for final total error
+        mps_final = initialize_vac(N, trunc_siteinds)
+        apply!(mps_final, lc_list2)
+        err2 = 1-abs(dot(mps_final, mps_trunc))
+        @show err2
+
+        replace_siteinds!(mps_final, sites)
+        apply!(mps_final, lc_list, dagger=true)
+            
+        err_total = 1-abs(dot(mps_final, mps))
+        @show err_total
+        if err_total < eps
+            println("Convergence obtained with total infidelity $err_total. Required: $eps.")
+            break
+        else
+            println("Total infidelity greater than requested value, increasing inversion depth. \nRequested: $eps \nObtained: $err_total")
+            attempt_tau += 1
+        end
     end
-
-    # finally create a 0 state and apply all the V to recreate the original state for final total error
-    mps_final = initialize_vac(N, trunc_siteinds)
-    apply!(mps_final, lc_list2)
-    err2 = 1-abs(dot(mps_final, mps_trunc))
-    @show err2
-
-    replace_siteinds!(mps_final, sites)
-    apply!(mps_final, lc_list, dagger=true)
-        
-    err_total = 1-abs(dot(mps_final, mps))
-    @show err_total
-    if err_total < eps
-        println("Convergence obtained with total infidelity $err_total. Required: $eps.")
-    else #this case should never happen if everything goes right
-        @warn("Total infidelity greater than requested value. \nRequested: $eps \nObtained: $err_total")
-    end
-    
     
     return Dict([("lc1", lc_list), ("tau1", tau), ("errinv1", err_list), ("lc2", lc_list2), ("tau2", tau_list2), 
     ("errinv2", err_list2), ("mps_final", mps_final), ("err1", err1), ("err2", err2), ("err_total", err_total), ("ltg_map", ltg_map), ("ltg_map2", ltg_map2)])

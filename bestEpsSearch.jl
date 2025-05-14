@@ -13,7 +13,7 @@ using JET
 #@show ITensors.blas_get_num_threads()
 
 #pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\bestEps\\"
-#results = [load_object(pathname*"$(ansatz_eps).jld2") for ansatz_eps in [1, 0.5, 0.25, 0.1, 0.05, 0.025, 0.01]]
+#results = [load_object(pathname*"$(40)Q_$(ansatz_eps).jld2") for ansatz_eps in [1., 0.5, 0.2, 0.1, 0.05, 0.01]]
 #taus = [res["tau"] for res in results]
 
 
@@ -22,12 +22,12 @@ let
     N = 100
     psi = random_mps(siteinds("Qubit", N), linkdims = 2)
     eps = 1e-2
-    ansatz_eps_list = [4, 2, 1, 0.5, 0.1]
+    ansatz_eps_list = [1., 0.5, 0.1]
 
     for ansatz_eps in ansatz_eps_list
         mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = pathname, ansatz_eps = ansatz_eps)
         results = mt.invertMPS2(pathname, N, eps, mt.invertGlobalSweep)
-        jldsave(pathname*"$(ansatz_eps).jld2"; results)
+        jldsave(pathname*"$(N)Q_$(ansatz_eps).jld2"; results)
     end
     
 end

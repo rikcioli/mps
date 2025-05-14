@@ -190,10 +190,11 @@ end
 
 
 let
+    pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\"
     N = 1000
     eps = 1e-3
     psi = random_mps(siteinds("Qubit", N), linkdims = 2)
-    mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\", ansatz_eps = 1)
-    #mt.invertMPS2("D:\\Julia\\MyProject\\Data\\randMPS\\", N, eps, mt.invertGlobalSweep)
+    mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = pathname, ansatz_eps = 0.5)
+    mt.invertMPS2(pathname, N, eps, mt.invertGlobalSweep)
 end
 
