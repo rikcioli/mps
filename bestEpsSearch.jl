@@ -13,16 +13,19 @@ using JET
 #@show ITensors.blas_get_num_threads()
 
 #pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\bestEps\\"
-#results = [load_object(pathname*"$(40)Q_$(ansatz_eps).jld2") for ansatz_eps in [1., 0.5, 0.2, 0.1, 0.05, 0.01]]
+#results = [load_object(pathname*"$(100)Q_$(ansatz_eps).jld2") for ansatz_eps in [1., 0.5]]
 #taus = [res["tau"] for res in results]
 
 
 let
     pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\bestEps\\"
-    N = 100
+    N = 50
     psi = random_mps(siteinds("Qubit", N), linkdims = 2)
+    #f = h5open(pathname*"$(N)_mps.h5","r")
+    #psi = read(f,"psi",MPS)
+    #close(f)
     eps = 1e-2
-    ansatz_eps_list = [1., 0.5, 0.1]
+    ansatz_eps_list = [0.5]
 
     for ansatz_eps in ansatz_eps_list
         mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = pathname, ansatz_eps = ansatz_eps)

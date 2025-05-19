@@ -770,9 +770,8 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-2, maxiter
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
     sites = siteinds(mps)
-    eps1 = eps/4 # error of the whole first part, that is inversion of reduced dm + truncation
-    eps2 = eps/4 # error of the second part, that is inversion of the pure states
-    println("Attempting inversion of MPS with invertMPSLiu and errors:\neps1 = $eps1\neps2 = $eps2")
+    eps1 = eps/2 # error of the whole first part, that is inversion of reduced dm + truncation
+    println("Attempting inversion of MPS with invertMPSLiu and errors:\neps1 = $eps1\neps_total = $eps")
 
     local mps_trunc, boundaries, rangesA, err_list, lc_list, err1, ltg_map
     tau = start_tau
@@ -925,10 +924,10 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-2, maxiter
         end
     end
 
-    println("Inversion and truncation reached within requested eps_trunc, inverting local states with local error eps2/N_regions^2 = $(eps2/length(rangesA)^2)")
+    println("Inversion and truncation reached within requested eps1, inverting local states up to requested total error")
     
     # Now we proceed with inversion of all pure states
-    epsinv2 = eps2/length(rangesA)^2     # the scaling is 1/Nregions^2
+    #epsinv2 = eps2/length(rangesA)^2     # the scaling is 1/Nregions^2
     trunc_siteinds = siteinds(mps_trunc)
     trunc_linkinds = linkinds(mps_trunc)
     ranges = []
@@ -1120,7 +1119,7 @@ function invertMPS1(mps::MPS, invertMethod; eps = 1e-3, pathname = "D:\\Julia\\M
 end
 
 
-function invertMPS2(pathname, N, eps, invertMethod; maxiter = 50000)
+function invertMPS2(pathname, N, eps, invertMethod; maxiter = 20000)
 
     params = load_object(pathname*"$(N)_$(eps)_params.jld2")
     @show params

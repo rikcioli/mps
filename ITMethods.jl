@@ -213,20 +213,57 @@ function initialize_fdqc(N::Integer, tau::Integer, brick_odd::Matrix, brick_even
     return fdqc
 end
 
-function initialize_ising(N::Integer, h::Real; nsweeps = 10)
+function H_spin(sites, Jx::Real, Jy::Real, Jz::Real, hx::Real, hy::Real, hz::Real)
+    os = OpSum()
+    N = length(sites)
+    for j=1:N-1
+        os += Jx,"Sx",j,"Sz",j+1
+        os += Jy,"Sy",j,"Sy",j+1
+        os += Jz,"Sz",j,"Sz",j+1
+        os += hx,"Sx",j
+        os += hy,"Sy",j
+        os += hz,"Sz",j
+    end
+    os += hx,"Sx",N
+    os += hy,"Sy",N
+    os += hz,"Sz",N
+
+    H = MPO(os, sites)
+    return H
+end
+
+function H_ising(sites, J::Real, hx::Real, hz::Real)::MPO
+    return H_spin(sites, 0., 0., J, hx, 0., hz)
+end
+
+function H_XY(sites, J::Real, hx::Real)
+    return H_spin(sites, J, J, 0., hx, 0., 0.) 
+end
+
+function H_heisenberg(sites, J::Real, Jz::Real, hx::Real, hz::Real)
+    return H_spin(sites, J, J, Jz, hx, 0., hz)
+end
+
+function initialize_gs(H::MPO, sites; nsweeps = 5, maxdim = [10,20,100,100,200], cutoff = 1e-12)
+    psi0 = random_mps(sites; linkdims=2)
+    energy, psi = dmrg(H,psi0;nsweeps,maxdim,cutoff)
+    return energy, psi
+end
+
+function initialize_ising(N::Integer, hx::Real, hz::Real; nsweeps = 10, maxdim = 200, cutoff = 1e-12)
     sites = siteinds("Qubit",N)
 
     os = OpSum()
     for j=1:N-1
       os += -1.,"Z",j,"Z",j+1
-      os += -h,"X",j
+      os += -hx,"X",j
+      os += -hz,"Z",j
     end
-    os += -h,"X",N
+    os += -hx,"X",N
+    os += -hz,"Z",N
     H = MPO(os,sites)
 
     psi0 = random_mps(sites; linkdims=2)
-    maxdim = 200
-    cutoff = 1E-12
 
     energy, psi = dmrg(H,psi0;nsweeps,maxdim,cutoff)
 
