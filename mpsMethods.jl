@@ -921,11 +921,12 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-2, maxiter
             tau += 1
             lc_list_old = lc_list
             ltg_map_old = ltg_map
+            flush(stdout)
         end
     end
 
     println("Inversion and truncation reached within requested eps1, inverting local states up to requested total error")
-    
+    flush(stdout)
     # Now we proceed with inversion of all pure states
     #epsinv2 = eps2/length(rangesA)^2     # the scaling is 1/Nregions^2
     trunc_siteinds = siteinds(mps_trunc)
@@ -1011,6 +1012,7 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-2, maxiter
             
         err_total = 1-abs(dot(mps_final, mps))
         @show err_total
+        flush(stdout)
         if err_total < eps
             println("Convergence obtained with total infidelity $err_total. Required: <$eps.")
             break
@@ -1018,6 +1020,7 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-2, maxiter
             println("Total infidelity greater than requested value, increasing inversion depth. \nRequested: $eps \nObtained: $err_total")
             attempt_tau += 1
         end
+        flush(stdout)
     end
     
     return Dict([("lc1", lc_list), ("tau1", tau), ("errinv1", err_list), ("lc2", lc_list2), ("tau2", tau_list2), 
