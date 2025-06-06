@@ -980,21 +980,26 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-2, maxiter
     err_list2 = Array{Float64, 1}(undef, length(ranges))
 
     # We try a different approach: we invert depth after depth until the total error is < eps, s.t. eps is a tight upper bound
-    attempt_tau = 2
+    attempt_tau = 1
     local mps_final, err2, err_total
     while true
         Threads.@threads for l in eachindex(ranges)
             _range = ranges[l]
             _reduced_mps = reduced_mps_list[l]
             _site1_empty = false
+
+            _local_tau = (_range in rangesA ? min(2, attempt_tau) : attempt_tau) # small optimization: if it's an A region, a depth 1-2 is usually enough
+
             if iseven(_range[2]-_range[1])
                 # if the first region has odd number of sites we need to start the lightcone
                 # in the site1_empty mode, in order to have a coherent global brickwork structure at the end
                 if l == 1   
                     _site1_empty = true
                 end
+                # and also make sure tau is at least 2 to not cause problems with lightcones
+                _local_tau = max(2, _local_tau)
             end
-            results2 = invert(_reduced_mps, invertMethod; tau = attempt_tau, site1_empty = _site1_empty, maxiter = maxiter, reuse_previous = false, nruns = 1)
+            results2 = invert(_reduced_mps, invertMethod; tau = _local_tau, site1_empty = _site1_empty, maxiter = maxiter, reuse_previous = false, nruns = 1)
 
             lc_list2[l] = results2["lightcone"]
             tau_list2[l] = results2["tau"]
