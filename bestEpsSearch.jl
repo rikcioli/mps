@@ -16,6 +16,9 @@ using JET
 #results = [load_object(pathname*"$(100)Q_$(ansatz_eps).jld2") for ansatz_eps in [1., 0.5]]
 #taus = [res["tau"] for res in results]
 
+#pathname = "D:\\Julia\\MyProject\\Data\\ising\\"
+#params = load_object(pathname*"1000_0.001_params.jld2")
+
 
 let
     pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\bestEps\\"

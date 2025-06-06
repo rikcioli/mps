@@ -1012,7 +1012,7 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-2, maxiter
         err_total = 1-abs(dot(mps_final, mps))
         @show err_total
         if err_total < eps
-            println("Convergence obtained with total infidelity $err_total. Required: $eps.")
+            println("Convergence obtained with total infidelity $err_total. Required: <$eps.")
             break
         else
             println("Total infidelity greater than requested value, increasing inversion depth. \nRequested: $eps \nObtained: $err_total")
@@ -1028,7 +1028,7 @@ function invertMPSLiu(mps::MPS, invertMethod; start_tau = 1, eps = 1e-2, maxiter
 end
 
 
-function invertMPS1(mps::MPS, invertMethod; eps = 1e-3, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\", ansatz_eps = 0.1, maxiter = 20000)
+function invertMPS1(mps::MPS, pathname::String; ansatz_eps = 0.5, invertMethod = invertGlobalSweep, maxiter = 20000)
     N = length(mps)
 
     results = invertMPSLiu(mps, invertMethod; eps = ansatz_eps, maxiter = maxiter)
@@ -1104,11 +1104,11 @@ function invertMPS1(mps::MPS, invertMethod; eps = 1e-3, pathname = "D:\\Julia\\M
 
     # save lightcone to file
     best_guess = Array(lightcone)
-    jldsave(pathname*"$(N)_$(eps)_ansatz.jld2"; best_guess)
+    jldsave(pathname*"$(N)_ansatz.jld2"; best_guess)
 
     # save important info to file
-    params = Dict([("N", N), ("eps", eps), ("site1_empty", site1_empty), ("start_tau", tau)])
-    jldsave(pathname*"$(N)_$(eps)_params.jld2"; params)
+    params = Dict([("N", N), ("ansatz_eps", ansatz_eps), ("site1_empty", site1_empty), ("start_tau", tau)])
+    jldsave(pathname*"$(N)_params.jld2"; params)
 
     # save original mps to file
     f = h5open(pathname*"$(N)_mps.h5","w")
@@ -1119,11 +1119,11 @@ function invertMPS1(mps::MPS, invertMethod; eps = 1e-3, pathname = "D:\\Julia\\M
 end
 
 
-function invertMPS2(pathname, N, eps, invertMethod; maxiter = 20000)
+function invertMPS2(pathname, N, eps; invertMethod = invertGlobalSweep, maxiter = 20000)
 
-    params = load_object(pathname*"$(N)_$(eps)_params.jld2")
+    params = load_object(pathname*"$(N)_params.jld2")
     @show params
-    best_guess = load_object(pathname*"$(N)_$(eps)_ansatz.jld2")
+    best_guess = load_object(pathname*"$(N)_ansatz.jld2")
     best_guess = [Matrix{ComplexF64}(U) for U in best_guess]
 
     f = h5open(pathname*"$(N)_mps.h5","r")
@@ -1143,15 +1143,15 @@ function invertMPS2(pathname, N, eps, invertMethod; maxiter = 20000)
     return results_final
 end
 
-function invertMPSfinal(mps::MPS, invertMethod; eps = 1e-5, pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\", nthreads = 4)
+function invertMPSfinal(mps::MPS, pathname::String, eps::Float64; invertMethod = invertGlobalSweep)
     N = length(mps)
-    invertMPS1(mps, invertMethod; eps = eps, pathname = pathname)
-    invertMPS2(pathname, N, eps, invertMethod)
-    return
+    invertMPS1(mps, pathname)
+    results = invertMPS2(pathname, N, eps)
+    return results
 end
 
 
-function invertMPSculo(mps::MPS; kargs...)
+function invertMPSTrunc(mps::MPS; kargs...)
     N = length(mps)
     mps_trunc = deepcopy(mps)
     for i in 1:N-1
@@ -1171,7 +1171,7 @@ function invertMPSculo(mps::MPS; kargs...)
     combinedinds = [combinedind(comb) for comb in combiners]
     tensor_list = [combiners[i]*mps_trunc[i] for i in 1:N]
 
-    Vlist = [Array(tensor_list[i], combinedinds[i]) for i in 1:N]
+    Vlist = [Array{ComplexF64}(tensor_list[i], combinedinds[i]) for i in 1:N]
 
     Ulist = [iso_to_unitary(V) for V in Vlist]
     init_array = [kron(Ulist[2*i], Ulist[2*i-1]) for i in 1:div(N,2)]

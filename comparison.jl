@@ -4,14 +4,14 @@ using ITensors, ITensorMPS
 #import Plots
 using LaTeXStrings, LinearAlgebra, Statistics, Random
 using CSV
-#using JET
-#using Strided
 #using DataFrames, StatsPlots
+using JLD2
 
 #Strided.disable_threads()
 #@show ITensors.Strided.get_num_threads()
 #BLAS.set_num_threads(56)
 #@show ITensors.blas_get_num_threads()
+
 
 function execute(command, N, eps_array; D = 2, tau = 3)
 # Choose object to invert
@@ -76,45 +76,6 @@ function execute(command, N, eps_array; D = 2, tau = 3)
     return data
 end
 
-function testLiu(psi, eps)
-    results = mt.invertMPSLiu(psi, mt.invertGlobalSweep, eps = eps)
-    err_total = results["err_total"]
-    tau_total = maximum(results["tau2"]) + results["tau1"]
-    return err_total, tau_total
-end
-
-function liu_tau_vs_N(Nrange, eps_array)
-    for N in Nrange
-        @show N
-        energy, psi = mt.initialize_ising(N, 2)
-        #psi = random_mps(siteinds("Qubit", N), linkdims = 2)
-        tau_liu = []
-        err_liu = []
-
-        for eps in eps_array
-            println("\nAssuming error threshold eps = $eps\n")
-    
-            if !isempty(err_liu)
-                if err_liu[end] < eps
-                    push!(err_liu, err_liu[end])
-                    push!(tau_liu, tau_liu[end])
-                    continue
-                end
-            end
-    
-            results = mt.invertMPSLiu(psi, mt.invertGlobalSweep; eps = eps, kargs_inv = (nruns = 8,))
-            err_total = results["err_total"]
-            tau_total = maximum(results["tau2"]) + results["tau1"]
-            push!(tau_liu, tau_total)
-            push!(err_liu, err_total)
-        end
-    
-        data = DataFrame(Error = eps_array, tau_Liu = tau_liu, err_Liu = err_liu)
-        CSV.write("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)Q_final_EpsVsTau.csv", data)
-    end
-end
-
-
 
 
 
@@ -154,55 +115,42 @@ function create_invert(N, tau_list)
 end
 
 
-function final_tau_vs_N(Nrange, eps_array)
+function testFinal(Nrange, eps_array, pathname)
     for N in Nrange
-        @show N
-        #energy, psi = mt.initialize_ising(N, 2)
-        psi = random_mps(siteinds("Qubit", N), linkdims = 2)
-        tau_liu = []
-        err_liu = []
-
-        for eps in eps_array
-            println("\nAssuming error threshold eps = $eps\n")
-    
-            if !isempty(err_liu)
-                if err_liu[end] < eps
-                    push!(err_liu, err_liu[end])
-                    push!(tau_liu, tau_liu[end])
-                    continue
-                end
-            end
-    
-            results, results_final = mt.invertMPSfinal(psi, mt.invertGlobalSweep; eps = eps)
-            err1 = results["err_total"]
-            tau1 = maximum(results["tau2"]) + results["tau1"]
-            err_total = results_final["err"]
-            tau_total = results_final["tau"]
-            @show err1, tau1, err_total, tau_total
-            push!(tau_liu, tau_total)
-            push!(err_liu, err_total)
-        end
-    
-        data = DataFrame(Error = eps_array, tau_Liu = tau_liu, err_Liu = err_liu)
-        CSV.write("D:\\Julia\\MyProject\\Data\\randMPS\\$(N)Q_final_EpsVsTau.csv", data)
+        psi0 = random_mps(siteinds("Qubit", N), linkdims = 2)
+        mt.invertMPS1(psi0, pathname)
+    end
+    tasks = vec(collect(Iterators.product(Nrange, eps_array)))
+    Threads.@threads for task in tasks
+        N, eps = task
+        f = h5open(pathname*"$(N)_mps.h5","r")
+        psi0 = read(f,"psi",MPS)
+        close(f)
+        
+        results = mt.invertMPS2(psi0, pathname, eps)
+        taufinal = results["tau"]
+        jldsave(pathname*"invert_$(N)_$(eps).jld2"; taufinal)
     end
 end
 
 
 let
-    pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/ising/"
-    N = 1000
-    eps = 1e-3
+    pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\"
+    Nrange = [20, 40, 60, 80, 100]
+    eps_array = [0.1, 0.02, 0.004, 0.0008]
 
-    sites = siteinds("S=1/2", N)
-    Hamiltonian = mt.H_ising(sites, -1., 0.5, 0.05)
+    testFinal(Nrange, eps_array, pathname)
+
+    #sites = siteinds("S=1/2", N)
+    ##Hamiltonian = mt.H_ising(sites, -1., 0.5, 0.05)
     #Hamiltonian = mt.H_XY(sites, -1., 0.1)
-    #Hamiltonian = mt.H_heisenberg(sites, -1., -0.5, 0.1, 0.1)
-    energy, psi = mt.initialize_gs(Hamiltonian, sites; maxdim = [10,20,100,100,200])
+    ##Hamiltonian = mt.H_heisenberg(sites, -1., -0.5, 0.1, 0.1)
+    #energy, psi = mt.initialize_gs(Hamiltonian, sites; nsweeps = 10, maxdim = [10,50,100,100,80,60,40,30,30,20])
+    #energy2, psi2 = mt.initialize_gs(Hamiltonian, sites; nsweeps = 10, maxdim = [10,50,100,100,100,100,100,100,100,100])
     
     #psi = initialize_ghz(N)
     #psi = random_mps(siteinds("Qubit", N), linkdims = 2)
-    mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = pathname, ansatz_eps = 0.5)
-    mt.invertMPS2(pathname, N, eps, mt.invertGlobalSweep; maxiter = 20000)
+    #mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = pathname, ansatz_eps = 0.5)
+    #mt.invertMPS2(pathname, N, eps, mt.invertGlobalSweep; maxiter = 20000)
 end
 
