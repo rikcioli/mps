@@ -116,21 +116,11 @@ end
 
 
 function testFinal(Nrange, eps_array, pathname)
-    for N in Nrange
-        psi0 = random_mps(siteinds("Qubit", N), linkdims = 2)
-        mt.invertMPS1(psi0, pathname)
-    end
-    tasks = vec(collect(Iterators.product(Nrange, eps_array)))
-    Threads.@threads for task in tasks
-        N, eps = task
-        f = h5open(pathname*"$(N)_mps.h5","r")
-        psi0 = read(f,"psi",MPS)
-        close(f)
-        
-        results = mt.invertMPS2(psi0, pathname, eps)
-        taufinal = results["tau"]
-        jldsave(pathname*"invert_$(N)_$(eps).jld2"; taufinal)
-    end
+    #for N in Nrange
+    #    psi0 = random_mps(siteinds("Qubit", N), linkdims = 2)
+    #    mt.invertMPS1(psi0, pathname)
+    #end
+    mt.invertMPS2(pathname, Nrange, eps_array)
 end
 
 

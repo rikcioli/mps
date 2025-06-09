@@ -1127,7 +1127,7 @@ function invertMPS1(mps::MPS, pathname::String; ansatz_eps = 0.5, invertMethod =
 end
 
 
-function invertMPS2(pathname, N, eps; invertMethod = invertGlobalSweep, maxiter = 20000)
+function invertMPS2(pathname::String, N::Integer, eps::Float64; invertMethod = invertGlobalSweep, maxiter = 20000)
 
     params = load_object(pathname*"$(N)_params.jld2")
     @show params
@@ -1149,6 +1149,38 @@ function invertMPS2(pathname, N, eps; invertMethod = invertGlobalSweep, maxiter 
     jldsave(pathname*"$(N)_$(eps)_$(start_tau)ST_result.jld2"; results_final)
 
     return results_final
+end
+
+function invertMPS2(pathname::String, N_list::Vector{<:Integer}, eps_list::Vector{<:Real}; invertMethod = invertGlobalSweep, maxiter = 20000)
+
+    params_array = [load_object(pathname*"$(N)_params.jld2") for N in N_list]
+    ansatz_array = [[Matrix{ComplexF64}(U) for U in load_object(pathname*"$(N)_ansatz.jld2")] for N in N_list]
+    mps_array = MPS[]
+    for N in N_list
+        f = h5open(pathname*"$(N)_mps.h5","r")
+        mps = read(f,"psi",MPS)
+        close(f)
+        push!(mps_array, mps)
+    end
+
+    tasks = vec(collect(Iterators.product(1:length(N_list), eps_list)))
+    Threads.@threads for task in tasks
+        _i, _N, _eps = task[1], N_list[task[1]], task[2]
+        @show _N, _eps
+        _results = invert(mps_array[_i], invertMethod; 
+                                nruns = 1, 
+                                reuse_previous = true,
+                                site1_empty = params_array[_i]["site1_empty"], 
+                                eps = _eps, 
+                                maxiter = maxiter,
+                                start_tau = params_array[_i]["start_tau"], 
+                                init_array = ansatz_array[_i])
+        _taufinal = _results["tau"]
+        jldsave(pathname*"invert_$(_N)_$(_eps).jld2"; _taufinal)
+        jldsave(pathname*"$(_N)_$(_eps)_result.jld2"; _results)
+    end
+
+    return
 end
 
 function invertMPSfinal(mps::MPS, pathname::String, eps::Float64; invertMethod = invertGlobalSweep)
