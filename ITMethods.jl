@@ -84,9 +84,9 @@ function apply(U::Matrix, psi::MPS, b::Integer; cutoff = 1E-14)
     psi = deepcopy(psi)
     orthogonalize!(psi, b)
     s = siteinds(psi)
-    op = op(U, s[b+1], s[b])
+    operator = op(U, s[b+1], s[b])
 
-    wf = noprime((psi[b]*psi[b+1])*op)
+    wf = noprime((psi[b]*psi[b+1])*operator)
     indsb = uniqueinds(psi[b], psi[b+1])
     U, S, V = svd(wf, indsb, cutoff = cutoff)
     psi[b] = U
@@ -98,9 +98,9 @@ end
 function apply!(U::Matrix, psi::MPS, b::Integer; cutoff = 1E-15)
     orthogonalize!(psi, b)
     s = siteinds(psi)
-    op = op(U, s[b+1], s[b])
+    operator = op(U, s[b+1], s[b])
 
-    wf = noprime((psi[b]*psi[b+1])*op)
+    wf = noprime((psi[b]*psi[b+1])*operator)
     indsb = uniqueinds(psi[b], psi[b+1])
     U, S, V = svd(wf, indsb, cutoff = cutoff)
     psi[b] = U

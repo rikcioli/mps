@@ -291,7 +291,7 @@ function invertMPSMalz(mps::MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, eps_V 
     for i in 1:npairs
         W_ext = zeros(ComplexF64, (2^bitlength, 2^bitlength))   # embed W in n = bitlength qudits
         W = Wlayer[i]
-        W = reshape(Array(W, inds(W)), (D, D))
+        W = reshape(Array{ComplexF64}(W, inds(W)), (D, D))
         W_ext[1:D, 1:D] = W
         W_ext = reshape(W_ext, 2^(2*bitlength))
         sites = siteinds(d, 2*bitlength)
@@ -309,7 +309,7 @@ end
 
 
 # ONLY WORKS FOR d=2
-function invertMPSMalz(mps::MPS, invertMethod; q = 0, eps = 1e-3, kargsP = NamedTuple(), kargsV = NamedTuple(), kargsW = NamedTuple())
+function invertMPSMalz(mps::MPS, eps::Float64; q = 0, invertMethod = invertGlobalSweep, kargsP = NamedTuple(), kargsV = NamedTuple(), kargsW = NamedTuple())
     N = length(mps)
     sites = siteinds(mps)
     links = linkinds(mps)
@@ -319,10 +319,10 @@ function invertMPSMalz(mps::MPS, invertMethod; q = 0, eps = 1e-3, kargsP = Named
     @assert d == 2
     bitlength = length(digits(D-1, base=d))     # how many qudits of dim d to represent bond dim D
 
-    eps_malz = eps/9
-    eps_V = eps/9
-    eps_bell = eps/9
-    println("Attempting inversion of MPS with invertMPSMalz and errors:\neps_malz = $eps_malz\neps_V = $eps_V\neps_bell = $eps_bell")
+    eps_malz = eps/3
+    #eps_V = eps/9
+    eps_bell = eps/3
+    println("Attempting inversion of MPS with invertMPSMalz and error eps = $eps\n")
 
     local blockMPS, new_siteinds, newN, npairs, block_linkinds, block_linkinds_dims
 
@@ -405,7 +405,7 @@ function invertMPSMalz(mps::MPS, invertMethod; q = 0, eps = 1e-3, kargsP = Named
     for i in 1:newN
 
         block_i = i < newN ? mps[q*(i-1)+1 : q*i] : mps[q*(i-1)+1 : end]
-        block_i_Ulist::Vector{ITensor} = []
+        block_i_Ulist = ITensor[]
 
         # if i=1 no svd must be done, entire block 1 is already a series of isometries
         if i == 1
@@ -437,7 +437,7 @@ function invertMPSMalz(mps::MPS, invertMethod; q = 0, eps = 1e-3, kargsP = Named
                 dim = reduce(*, block_linkinds_dims[i-1:i])
                 cup, clow = combiner(PnL, PnR), combiner(PiL, PiR)
                 P = (P*cup)*clow
-                P_matrix = Array(P, (combinedind(cup), combinedind(clow)))
+                P_matrix = Array{ComplexF64}(P, (combinedind(cup), combinedind(clow)))
                 Pinv = inv(P_matrix)
             
                 # convert back to tensor with inds ready to contract with Ctilde = prev_SV * C   
@@ -448,7 +448,7 @@ function invertMPSMalz(mps::MPS, invertMethod; q = 0, eps = 1e-3, kargsP = Named
                 PiL = block_linkinds[i-1]
                 PnL = new_siteinds[2*i-2]
                 dim = block_linkinds_dims[i-1]
-                P_matrix = reshape(Array(P, [PnL, PiL]), (dim, dim))
+                P_matrix = reshape(Array{ComplexF64}(P, [PnL, PiL]), (dim, dim))
                 Pinv = inv(P_matrix)
 
                 Pinv = ITensor(Pinv, [iL, PnL])
@@ -467,7 +467,7 @@ function invertMPSMalz(mps::MPS, invertMethod; q = 0, eps = 1e-3, kargsP = Named
         V_upinds = upinds[1:2*bitlength]
         V_downinds = uniqueinds(V, V_upinds)
         down_d = reduce(*, [ind.space for ind in V_downinds])  # will be D for i=1, D^2 elsewhere
-        V_matrix = reshape(Array(V, V_upinds, V_downinds), (d^(2*bitlength), down_d))      # MUST BE MODIFIED WHEN i=1 or newN THE OUTPUT LEG IS ONLY D
+        V_matrix = reshape(Array{ComplexF64}(V, V_upinds, V_downinds), (d^(2*bitlength), down_d))      # MUST BE MODIFIED WHEN i=1 or newN THE OUTPUT LEG IS ONLY D
         sizeV = size(V_matrix)
         @show sizeV
 
@@ -498,7 +498,7 @@ function invertMPSMalz(mps::MPS, invertMethod; q = 0, eps = 1e-3, kargsP = Named
             uk_downinds = uniqueinds(uk, uk_upinds)
             up_d = reduce(*, [ind.space for ind in uk_upinds])
             down_d = reduce(*, [ind.space for ind in uk_downinds])
-            uk_matrix = reshape(Array(uk, uk_upinds, uk_downinds), (up_d, down_d))
+            uk_matrix = reshape(Array{ComplexF64}(uk, uk_upinds, uk_downinds), (up_d, down_d))
             size_uk = size(uk_matrix)
             @show size_uk
 
@@ -522,14 +522,14 @@ function invertMPSMalz(mps::MPS, invertMethod; q = 0, eps = 1e-3, kargsP = Named
             V_mpo = V_mpo*uk_mpo
         end
 
-        replaceprime!(V_mpo, q-2*bitlength+1 => 1)
+        ITensors.replaceprime!(V_mpo, q-2*bitlength+1 => 1)
         push!(V_mpo_list, V_mpo)
     end
     
 
     # BELL PAIRS PREPARATION
     # prepare |0> state and act with W
-    zero_projs::Vector{ITensor} = []
+    zero_projs = ITensor[]
     for ind in new_siteinds
         vec = [1; [0 for _ in 1:ind.space-1]]
         push!(zero_projs, ITensor(vec, ind'))
@@ -587,46 +587,45 @@ function invertMPSMalz(mps::MPS, invertMethod; q = 0, eps = 1e-3, kargsP = Named
 
     # apply V_mpo on Wstep_mps to check that conversion to mpo worked - must be equal to the fidelity obtained in the blocking part
     V_mpo_final = MPO(reduce(vcat, [mpo[1:end] for mpo in V_mpo_list]))
-    res = apply(V_mpo_final, Wstep_mps)
+    res = ITensors.apply(V_mpo_final, Wstep_mps)
     fidelity = abs(Array(contract(conj(mps), res))[1])
     @show fidelity
 
 
     # invert all the V_mpos to bw circuits
-    eps_V_i = eps_V/(newN^2)
+    # eps_V_i = eps_V/(newN^2)
     # proper error should have a d^q factor at the denominator, but it's probably a very loose estimate, so we try not putting it
     # and adjust it iteratively if it does not converge to required fidelity
-    start_taus = [2 for _ in 1:newN]
+    attempt_tau =  1
     local V_tau_list, V_lc_list, err_total
-    for _ in 1:10
-        V_tau_list = []         # final tau list, counting also swap gates
-        V_taures_list = []      # intermediate tau list, storing the results of inversion of each mpo
-        V_lc_list::Vector{Lightcone} = []
+    while true
+        V_tau_list = zeros(Int64, newN)         # final tau list, counting also swap gates
+        V_taures_list = zeros(Int64, newN)      # intermediate tau list, storing the results of inversion of each mpo
+        V_lc_list = Vector{Lightcone}(undef, newN)
         mps_final_copy = deepcopy(mps_final)
         for i in 1:newN
-            V_mpo = V_mpo_list[i]
-            res = invert(V_mpo, invertMethod; eps = eps_V_i, start_tau = start_taus[i], kargsV...) # NOTE: FOR NOW invertGlobalSweep ONLY WORKS WITH QUBITS, AS IT OPTIMIZES OVER U(4) UNITARIES
-            tau = res["tau"]
-            push!(V_taures_list, tau)
-            push!(V_lc_list, res["lightcone"])
+            _tau = attempt_tau
+            _V_mpo = V_mpo_list[i]
+            _res = invert(_V_mpo, invertMethod; tau = _tau, kargsV...) # NOTE: FOR NOW invertGlobalSweep ONLY WORKS WITH QUBITS, AS IT OPTIMIZES OVER U(4) UNITARIES
+            V_taures_list[i] = _tau
+            V_lc_list[i] = _res["lightcone"]
             
             # account for the swap gates 
             if i > 1
-                tau += q - bitlength - 1
+                _tau += q - bitlength - 1
             end
-            push!(V_tau_list, tau)
+            V_tau_list[i] = _tau
         end
 
         # apply V unitaries as fdqc on mps_final to construct the final inversion circuit
         apply!(mps_final_copy, V_lc_list)
-        err_total = 1-abs(Array(contract(conj(mps), mps_final_copy))[1])
+        err_total = 1-abs(Array{ComplexF64}(contract(conj(mps), mps_final_copy))[1])
         @show err_total
         if err_total < eps
             break
         else
-            println("Convergence to required total error eps = $eps not found, decreasing eps_V")
-            eps_V_i *= 0.5
-            start_taus = V_taures_list
+            println("Convergence to required total error eps = $eps not found, increasing depth")
+            attempt_tau += 1
         end
     end
 
