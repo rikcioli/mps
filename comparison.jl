@@ -13,28 +13,6 @@ using JLD2, HDF5
 #@show ITensors.blas_get_num_threads()
 
 
-using DataFrames
-
-# Create an empty DataFrame
-df = DataFrame(N=Int[], eps=Float64[], depth=Int[], nmps=Int[])
-pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\"
-Nrange = [20, 40, 60, 80, 100]
-eps_array = [0.1, 0.02, 0.004, 0.0008]
-
-for N in Nrange
-    for eps in eps_array
-        # For each file, push a new row
-        depth = load_object(pathname*"invert_$(N)_$(eps).jld2")
-        push!(df, (N=N, eps=eps, depth=depth, nmps=1))
-    end
-end
-CSV.write(pathname*"result1.csv", df)
-# etc.
-
-# You can then query it easily:
-filter(row -> row.N == 10 && row.eps == 0.1, df)
-
-
 function execute(command, N, eps_array; D = 2, tau = 3)
 # Choose object to invert
     if command == "randMPS"
