@@ -236,12 +236,12 @@ function H_ising(sites, J::Real, hx::Real, hz::Real)::MPO
     return H_spin(sites, 0., 0., J, hx, 0., hz)
 end
 
-function H_XY(sites, J::Real, hx::Real)
-    return H_spin(sites, J, J, 0., hx, 0., 0.) 
+function H_XY(sites, g::Real, hx::Real)
+    return H_spin(sites, -(1+g), -(1-g), 0., hx, 0., 0.) 
 end
 
-function H_heisenberg(sites, J::Real, Jz::Real, hx::Real, hz::Real)
-    return H_spin(sites, J, J, Jz, hx, 0., hz)
+function H_heisenberg(sites, Jx::Real, Jy::Real, Jz::Real, hx::Real, hz::Real)
+    return H_spin(sites, Jx, Jy, Jz, hx, 0., hz)
 end
 
 function initialize_gs(H::MPO, sites; nsweeps = 5, maxdim = [10,20,100,100,200], cutoff = 1e-12)

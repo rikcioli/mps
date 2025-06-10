@@ -137,26 +137,40 @@ function create_invert(N, tau_list)
 end
 
 
-function testFinal(Nrange, eps_array, pathname)
-    #for N in Nrange
-    #    psi0 = random_mps(siteinds("Qubit", N), linkdims = 2)
-    #    mt.invertMPS1(psi0, pathname)
-    #end
+function testRandom(Nrange, eps_array, pathname)
+    for N in Nrange
+        psi0 = random_mps(siteinds("Qubit", N), linkdims = 2)
+        mt.invertMPS1(psi0, pathname)
+    end
     mt.invertMPS2(pathname, Nrange, eps_array)
 end
 
+function testXY(Nrange, eps_array, pathname)
+    for N in Nrange
+        sites = siteinds("S=1/2", N)
+        Hamiltonian = mt.H_XY(sites, 0.7, 0.1)
+        energy, psi0 = mt.initialize_gs(Hamiltonian, sites; nsweeps = 10, maxdim = [10,50,100,100,80,60,40,30,30,20])
+        mt.invertMPS1(psi0, pathname)
+    end
+    mt.invertMPS2(pathname, Nrange, eps_array)
+end
+
+function testIsing(Nrange, eps_array, pathname)
+    for N in Nrange
+        sites = siteinds("S=1/2", N)
+        Hamiltonian = mt.H_ising(sites, -1., 0.5, 0.05)
+        energy, psi0 = mt.initialize_gs(Hamiltonian, sites; nsweeps = 10, maxdim = [10,50,100,100,80,60,40,30,30,20])
+        mt.invertMPS1(psi0, pathname)
+    end
+    mt.invertMPS2(pathname, Nrange, eps_array)
+end
 
 let
     pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\"
     Nrange = [20, 40, 60, 80, 100]
     eps_array = [0.1, 0.02, 0.004, 0.0008]
 
-    #testFinal(Nrange, eps_array, pathname)
-
-    N = 20
-    eps = 0.01
-    psi = random_mps(siteinds("Qubit", N), linkdims = 2)
-    result = mt.invertMPSMalz(psi, eps)
+    testFinal(Nrange, eps_array, pathname)
 
     #sites = siteinds("S=1/2", N)
     ##Hamiltonian = mt.H_ising(sites, -1., 0.5, 0.05)
