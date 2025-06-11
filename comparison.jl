@@ -143,6 +143,18 @@ function testIsing(Nrange, eps_array, pathname)
     mt.invertMPS2(pathname, Nrange, eps_array)
 end
 
+function testXXZ(Nrange, eps_array, pathname)
+    for N in Nrange
+        sites = siteinds("S=1/2", N)
+        Hamiltonian = mt.H_heisenberg(sites, -1., -1., -0.5, -0.1, -0.1)
+        energy, psi0 = mt.initialize_gs(Hamiltonian, sites; nsweeps = 10, maxdim = [10,50,100,100,80,60,40,30,30,20])
+        mt.invertMPS1(psi0, pathname)
+    end
+    mt.invertMPS2(pathname, Nrange, eps_array)
+end
+
+
+
 let
     pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\"
     Nrange = [20, 40, 60, 80, 100]
