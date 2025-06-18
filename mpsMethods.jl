@@ -1190,35 +1190,55 @@ function invertMPSfinal(mps::MPS, pathname::String, eps::Float64; invertMethod =
 end
 
 
-function invertMPSTrunc(mps::MPS; kargs...)
-    N = length(mps)
-    mps_trunc = deepcopy(mps)
-    for i in 1:N-1
-        cut!(mps_trunc, i)
+function invertMPSTrunc(pathname::String, N_list::Vector{<:Integer}, eps_list::Vector{<:Real}; invertMethod = invertGlobalSweep, maxiter = 20000)
+    mps_array = MPS[]
+    for N in N_list
+        f = h5open(pathname*"$(N)_mps.h5","r")
+        mps = read(f,"psi",MPS)
+        close(f)
+        push!(mps_array, mps)
     end
-    @show abs(dot(mps, mps_trunc))
 
-    orthogonalize!(mps_trunc, N)
-    sites = siteinds(mps_trunc)
-    links = linkinds(mps_trunc)
+    tasks = vec(collect(Iterators.product(1:length(N_list), eps_list)))
+    Threads.@threads for task in tasks
+        _i, _N, _eps = task[1], N_list[task[1]], task[2]
+        @show _N, _eps
+        _mps_trunc = deepcopy(mps_array[_i])
 
-    combiners1 = [combiner((sites[1], links[1]))]
-    combiners = [combiner([sites[i]; links[i-1:i]]) for i in 2:N-1]
-    combinersN = [combiner((sites[N], links[N-1]))]
-    combiners = [combiners1; combiners; combinersN]
+        for j in 1:_N-1
+            cut!(_mps_trunc, j)
+        end
 
-    combinedinds = [combinedind(comb) for comb in combiners]
-    tensor_list = [combiners[i]*mps_trunc[i] for i in 1:N]
+        orthogonalize!(_mps_trunc, _N)
+        _sites = siteinds(_mps_trunc)
+        _links = linkinds(_mps_trunc)
 
-    Vlist = [Array{ComplexF64}(tensor_list[i], combinedinds[i]) for i in 1:N]
+        _combiners1 = [combiner((_sites[1], _links[1]))]
+        _combiners = [combiner([_sites[j]; _links[j-1:j]]) for j in 2:_N-1]
+        _combinersN = [combiner((_sites[_N], _links[_N-1]))]
+        _combiners = [_combiners1; _combiners; _combinersN]
 
-    Ulist = [iso_to_unitary(V) for V in Vlist]
-    init_array = [kron(Ulist[2*i], Ulist[2*i-1]) for i in 1:div(N,2)]
-    @show length(init_array)
+        _combinedinds = [combinedind(comb) for comb in _combiners]
+        _tensor_list = [_combiners[j]*_mps_trunc[j] for j in 1:_N]
 
-    results = invert(mps, invertGlobalSweep; init_array = init_array, kargs...)
+        _Vlist = [Array{ComplexF64}(_tensor_list[j], _combinedinds[j]) for j in 1:_N]
 
-    return results
+        _Ulist = [iso_to_unitary(V) for V in _Vlist]
+        _init_array = [kron(_Ulist[2*j], _Ulist[2*j-1]) for j in 1:div(_N,2)]
+        
+        _results = invert(mps_array[_i], invertMethod; 
+                                nruns = 1, 
+                                reuse_previous = true,
+                                site1_empty = false, 
+                                eps = _eps, 
+                                maxiter = maxiter, 
+                                init_array = _init_array)
+        _taufinal = _results["tau"]
+        jldsave(pathname*"trunc_$(_N)_$(_eps).jld2"; _taufinal)
+        jldsave(pathname*"trunc_$(_N)_$(_eps)_result.jld2"; _results)
+    end    
+
+    return
 end
 
 

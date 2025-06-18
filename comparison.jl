@@ -156,11 +156,11 @@ end
 
 
 let
-    pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\"
+    pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\mps1\\"
     Nrange = [20, 40, 60, 80, 100]
     eps_array = [0.1, 0.02, 0.004, 0.0008]
 
-    testFinal(Nrange, eps_array, pathname)
+    mt.invertMPSTrunc(pathname, Nrange, eps_array)
 
     #sites = siteinds("S=1/2", N)
     ##Hamiltonian = mt.H_ising(sites, -1., 0.5, 0.05)
