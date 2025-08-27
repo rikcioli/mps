@@ -1038,7 +1038,8 @@ end
 function invertMPS1(mps::MPS, pathname::String; ansatz_eps = 0.5, invertMethod = invertGlobalSweep, maxiter = 20000)
     N = length(mps)
 
-    results = invertMPSLiu(mps, invertMethod; eps = ansatz_eps, maxiter = maxiter)
+    dt1 = @elapsed results = invertMPSLiu(mps, invertMethod; eps = ansatz_eps, maxiter = maxiter)
+    jldsave(pathname*"time_invert1_$(N)_$(ansatz_eps).jld2"; dt1)
 
     tau1 = results["tau1"]
     tau2 = maximum(results["tau2"])
@@ -1138,14 +1139,17 @@ function invertMPS2(pathname::String, N::Integer, eps::Float64; invertMethod = i
     close(f)
     start_tau = params["start_tau"]
 
-    results_final = invert(mps, invertMethod; 
+    dt2 = @elapsed results_final = invert(mps, invertMethod; 
                                 nruns = 1, 
                                 site1_empty = params["site1_empty"], 
                                 eps = eps, 
                                 maxiter = maxiter,
                                 start_tau = start_tau, 
                                 init_array = best_guess)
+    taufinal = results_final["tau"]
+    jldsave(pathname*"invert_$(N)_$(eps).jld2"; taufinal)
     jldsave(pathname*"$(N)_$(eps)_$(start_tau)ST_result.jld2"; results_final)
+    jldsave(pathname*"time_invert2_$(N)_$(eps).jld2"; dt2)
 
     return results_final
 end
@@ -1166,7 +1170,7 @@ function invertMPS2(pathname::String, N_list::Vector{<:Integer}, eps_list::Vecto
     Threads.@threads for task in tasks
         _i, _N, _eps = task[1], N_list[task[1]], task[2]
         @show _N, _eps
-        _results = invert(mps_array[_i], invertMethod; 
+        _dt2 = @elapsed _results = invert(mps_array[_i], invertMethod; 
                                 nruns = 1, 
                                 reuse_previous = true,
                                 site1_empty = params_array[_i]["site1_empty"], 
@@ -1177,6 +1181,7 @@ function invertMPS2(pathname::String, N_list::Vector{<:Integer}, eps_list::Vecto
         _taufinal = _results["tau"]
         jldsave(pathname*"invert_$(_N)_$(_eps).jld2"; _taufinal)
         jldsave(pathname*"$(_N)_$(_eps)_result.jld2"; _results)
+        jldsave(pathname*"time_invert2_$(_N)_$(_eps).jld2"; _dt2)
     end
 
     return
@@ -1226,7 +1231,7 @@ function invertMPSTrunc(pathname::String, N_list::Vector{<:Integer}, eps_list::V
         _Ulist = [iso_to_unitary(V) for V in _Vlist]
         _init_array = [kron(_Ulist[2*j], _Ulist[2*j-1]) for j in 1:div(_N,2)]
         
-        _results = invert(mps_array[_i], invertMethod; 
+        _dt = @elapsed _results = invert(mps_array[_i], invertMethod; 
                                 nruns = 1, 
                                 reuse_previous = true,
                                 site1_empty = false, 
@@ -1236,6 +1241,7 @@ function invertMPSTrunc(pathname::String, N_list::Vector{<:Integer}, eps_list::V
         _taufinal = _results["tau"]
         jldsave(pathname*"trunc_$(_N)_$(_eps).jld2"; _taufinal)
         jldsave(pathname*"trunc_$(_N)_$(_eps)_result.jld2"; _results)
+        jldsave(pathname*"time_trunc_$(_N)_$(_eps).jld2"; _dt)
     end    
 
     return
