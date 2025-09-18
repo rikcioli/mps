@@ -154,13 +154,27 @@ function testXXZ(Nrange, eps_array, pathname)
 end
 
 
+function invertExisting(Nrange, eps_array, pathname)
+    for N in Nrange
+        f = h5open(pathname*"$(N)_mps.h5","r")
+        psi0 = read(f,"psi",MPS)
+        close(f)
+
+        dt1 = @elapsed mt.invertMPS1(psi0, pathname; invertMethod = mt.invertSweepLC)
+        jldsave(pathname*"time_invert1_$(N)_0.5.jld2"; dt1)
+    end
+    mt.invertMPS2(pathname, Nrange, eps_array; invertMethod = mt.invertSweepLC)
+end
+
 
 let
-    pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\mps1\\"
-    Nrange = [20, 40, 60, 80, 100]
-    eps_array = [0.1, 0.02, 0.004, 0.0008]
+    pathname = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\mpstest\\"
+    Nrange = [20]
+    eps_array = [0.1]
 
-    mt.invertMPSTrunc(pathname, Nrange, eps_array)
+    N = 34
+    psi0 = random_mps(siteinds("Qubit", N), linkdims = 4)
+    mt.invertMPS1(psi0, pathname; invertMethod = mt.invertSweepLC)
 
     #sites = siteinds("S=1/2", N)
     ##Hamiltonian = mt.H_ising(sites, -1., 0.5, 0.05)

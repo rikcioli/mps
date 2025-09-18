@@ -26,7 +26,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
         newfid = real(tr(Matrix{ComplexF64}(S, (u, v))))/normalization
         gate_ji_opt = U * replaceind(Vdag, v, u)
         lc = newLightcone(sites, 1; lightbounds = (false, false))
-        lc.circuit[1] = permute(replaceprime(gate_ji_opt, tau => 1), inds, inds')
+        lc.circuit[1] = permute(replaceprime(gate_ji_opt, tau => 1), [inds; inds'])
 
         println("Matrix is 2-local, converged to fidelity $newfid immediately")
         return Dict([("lightcone", lc), ("overlap", newfid), ("niter", 1)])
@@ -299,7 +299,7 @@ function invertGlobalSweep(mpo::Union{Vector{ITensor}, MPS, MPO}, tau::Integer, 
         u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity
-        newfid = real(tr(Array(S, (u, v))))/normalization
+        newfid = real(tr(Matrix{ComplexF64}(S, (u, v))))/normalization
         gate_ji_opt = U * replaceind(Vdag, v, u)
         lightcone = newLightcone(sites, 1; lightbounds = (false, false))
         lightcone.circuit[1] = replaceprime(gate_ji_opt, tau => 1)

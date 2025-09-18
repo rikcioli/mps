@@ -1108,7 +1108,7 @@ function invertMPS1(mps::MPS, pathname::String; ansatz_eps = 0.5, invertMethod =
     #apply!(zero2, lc_list2)
 
     fid = abs(dot(zero, mps_final))
-    @assert isapprox(fid, 1)
+    @assert isapprox(fid, 1)    #checks that the total lightcone reconstruction works
 
     # save lightcone to file
     best_guess = Array(lightcone)
@@ -1148,7 +1148,7 @@ function invertMPS2(pathname::String, N::Integer, eps::Float64; invertMethod = i
                                 init_array = best_guess)
     taufinal = results_final["tau"]
     jldsave(pathname*"invert_$(N)_$(eps).jld2"; taufinal)
-    jldsave(pathname*"$(N)_$(eps)_$(start_tau)ST_result.jld2"; results_final)
+    jldsave(pathname*"$(N)_$(eps)_result.jld2"; results_final)
     jldsave(pathname*"time_invert2_$(N)_$(eps).jld2"; dt2)
 
     return results_final
