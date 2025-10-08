@@ -67,30 +67,25 @@ end
 
 
 let
-    pathname = "D:\\Julia\\MyProject\\Data\\xxz\\"
-    Nrange = [40]
+    #pathname = "D:\\Julia\\MyProject\\Data\\xxz\\"
+    pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/xxz/Jz2.5/"
+    Nrange = [60:40:300]
 
     for N in Nrange
         sites = siteinds("S=1/2", N)
         Hamiltonian = mt.H_heisenberg(sites, 1., 1., 2.5, 0., 0.)
-        energy, psi = mt.initialize_gs(Hamiltonian, sites; nsweeps = 10, maxdim = [10,50,100,100,100,100,100,100,100,100])
+        energy, psi = mt.initialize_gs(Hamiltonian, sites; nsweeps = 20, maxdim = [10,50,200])
+        f = h5open(pathname*"$(N)_mps.h5","w")
+        write(f,"psi",psi)
+        close(f)
+    end
+
+    for N in Nrange
+        f = h5open(pathname*"$(N)_mps.h5","r")
+        psi = read(f,"psi",MPS)
+        close(f)
         mt.invertMPSLiu(psi, 6; folder=pathname)
     end
-    #psi0 = random_mps(siteinds("Qubit", N), linkdims = 4)
-    #mt.invertMPS1(psi0, pathname; invertMethod = mt.invertSweepLC)
-
-    #for N in [40]
-    #    sites = siteinds("S=1/2", N)
-    #    ##Hamiltonian = mt.H_ising(sites, -1., 0.5, 0.05)
-    #    Hamiltonian = mt.H_XY(sites, 0, 0)
-    #    ##Hamiltonian = mt.H_heisenberg(sites, -1., -0.5, 0.1, 0.1)
-    #    energy, psi = mt.initialize_gs(Hamiltonian, sites; nsweeps = 10, maxdim = [10,50,100,100,80,60,40,30,30,20])
-    #    energy2, psi2 = mt.initialize_gs(Hamiltonian, sites; nsweeps = 10, maxdim = [10,50,100,100,100,100,100,100,100,100])
-    #    @show dot(psi, psi2)
-    #end
-    #psi = initialize_ghz(N)
-    #psi = random_mps(siteinds("Qubit", N), linkdims = 2)
-    #mt.invertMPS1(psi, mt.invertGlobalSweep; eps = eps, pathname = pathname, ansatz_eps = 0.5)
-    #mt.invertMPS2(pathname, N, eps, mt.invertGlobalSweep; maxiter = 20000)
+    
 end
 
