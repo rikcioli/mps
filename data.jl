@@ -175,6 +175,35 @@ CSV.write(folder*"result_invert.csv", df_final)
 
 
 
+# TIME INVERT1 RANDMPS
+df_list = []
+folder = "D:\\Julia\\MyProject\\Data\\cluster_copy\\"
+
+for i in 1:5
+    # Create an empty DataFrame
+    df = DataFrame(N=Int[], eps=Float64[], depth=Int[], time=Float64[], nmps=Int[])
+    subfolder = folder*"mps$(i)\\"
+    Nrange = [20, 40, 60, 80, 100, 300, 1000]
+    eps_array = [0.5]
+    
+    for N in Nrange
+        for eps in eps_array
+            # For each file, push a new row
+            params = load_object(subfolder*"$(N)_params.jld2")
+            depth = params["start_tau"]
+            time1 = load_object(subfolder*"time_invert1_$(N)_0.5.jld2")
+            push!(df, (N=N, eps=eps, depth=depth, time=time1, nmps=i))
+        end
+    end
+    CSV.write(subfolder*"result_invert1.csv", df)
+    push!(df_list, df)
+end
+
+df_final = reduce(vcat, df_list)
+CSV.write(folder*"result_invert1.csv", df_final)
+
+
+
 # TIME TRUNC RANDMPS
 df_list = []
 folder = "D:\\Julia\\MyProject\\Data\\cluster_copy\\"
