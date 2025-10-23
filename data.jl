@@ -258,3 +258,12 @@ end
 
 df_final = reduce(vcat, df_list)
 CSV.write(folder*"result_new.csv", df_final)
+
+
+folder = "D:\\Julia\\MyProject\\Data\\xxz\\"
+df = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
+filenames = glob("df_*.jld2", folder)
+for name in filenames
+    df = vcat(df, load_object(name))
+end
+CSV.write(folder*"df_all.csv", df)

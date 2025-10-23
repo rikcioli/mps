@@ -244,9 +244,9 @@ function H_heisenberg(sites, Jx::Real, Jy::Real, Jz::Real, hx::Real, hz::Real)
     return H_spin(sites, Jx, Jy, Jz, hx, 0., hz)
 end
 
-function initialize_gs(H::MPO, sites; nsweeps = 5, maxdim = [10,20,100,100,200], cutoff = 1e-12)
-    psi0 = random_mps(sites; linkdims=2)
-    energy, psi = dmrg(H,psi0;nsweeps,maxdim,cutoff)
+function initialize_gs(H::MPO, sites; nsweeps = 5, maxdim = [10,20,100,100,200], cutoff = 1e-15, linkdims=2, kwargs...)
+    psi0 = random_mps(sites; linkdims=linkdims)
+    energy, psi = dmrg(H,psi0;nsweeps,maxdim,cutoff,kwargs...)
     return energy, psi
 end
 
