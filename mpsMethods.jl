@@ -7,16 +7,13 @@ using CSV, HDF5, JLD2, DataFrames
 ITensors.set_warn_order(28)
 
 
-const H = [1 1
-           1 -1]/sqrt(2)
-const Id = [1 0
-            0 1]
-const T = [1 0
-            0 exp(1im*pi/4)]
-const X = [0 1
-            1 0]
-const Z = [1 0
-            0 -1]
+const H = [1 1; 1 -1]/sqrt(2)
+const Id = [1 0; 0 1]
+const T = [1 0; 0 exp(1im*pi/4)]
+const X = [0 1; 1 0]
+const Y = [0 -1im; 1im 0]
+const Z = [1 0; 0 -1]
+
 const CX = [1 0 0 0
             0 1 0 0
             0 0 0 1
@@ -48,6 +45,7 @@ include("optFunctions.jl")
 include("lightcone.jl")
 include("ITMethods.jl")
 include("varMethods.jl")
+
 
 
 function invertMPSMalz(mps::MPS; q = 0, eps_malz = 1E-2, eps_bell = 1E-2, eps_V = 1E-2, kargs...)
@@ -1038,7 +1036,7 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
 
 end
 
-"Invert state up to infidelity upper bounded by eps"
+"Invert state up to error upper bounded by eps"
 function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-2, maxiter = 20000)
 
     N = length(mps)
@@ -1293,10 +1291,10 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
         @show err_total
         flush(stdout)
         if err_total < eps
-            println("Convergence obtained with total infidelity $err_total. Required: <$eps.")
+            println("Convergence obtained with total 1-overlap = $err_total. Required: <$eps.")
             break
         else
-            println("Total infidelity greater than requested value, increasing inversion depth. \nRequested: $eps \nObtained: $err_total")
+            println("Total 1-overlap greater than requested value, increasing inversion depth. \nRequested: $eps \nObtained: $err_total")
             attempt_tau += 1
         end
         flush(stdout)
@@ -1483,11 +1481,8 @@ function invertMPSTrunc(pathname::String, N_list::Vector{<:Integer}, eps_list::V
     Threads.@threads for task in tasks
         _i, _N, _eps = task[1], N_list[task[1]], task[2]
         @show _N, _eps
-        _mps_trunc = deepcopy(mps_array[_i])
 
-        for j in 1:_N-1
-            cut!(_mps_trunc, j)
-        end
+        _, _mps_trunc, _ = truncate(mps_array[_i])
 
         orthogonalize!(_mps_trunc, _N)
         _sites = siteinds(_mps_trunc)

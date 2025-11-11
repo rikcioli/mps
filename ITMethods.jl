@@ -120,9 +120,10 @@ function contract!(psi::Vector{ITensor}, U::ITensor, b; cutoff = 1E-15)
 end
 
 "Multiply two mps/mpo respecting their indices"
-function contract(psi1::Union{MPS, MPO, Vector{ITensor}}, psi2::Union{MPS, MPO, Vector{ITensor}})
+function contract(psi1::Union{MPS, Vector{ITensor}}, psi2::Union{MPS, Vector{ITensor}})
     left_tensor = psi1[1] * psi2[1]
-    for i in 2:length(psi1)
+    N = length(psi1)
+    for i in 2:N
         left_tensor *= psi1[i]
         left_tensor *= psi2[i]
     end

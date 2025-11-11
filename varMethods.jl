@@ -1,3 +1,100 @@
+"Approximate MPS with the closest product state, obtained via variational optimization"
+function truncate(psi::MPS; Uarr0 = nothing, maxiter = 1000, conv_err = 1e-6)
+    psi = conj(psi)
+    sites = siteinds(psi)
+    N = length(psi)
+    @assert N>1
+
+    vac = [ITensor([1; 0], sites[i]') for i in 1:N]
+    if isnothing(Uarr0)
+        Uarr0 = [random_unitary(2) for _ in 1:N]
+    end
+    mpo = [ITensor(Uarr0[i], sites[i], sites[i]') for i in 1:N]
+
+    env_right = psi[N]
+    env_left = vac[1]
+
+    R_blocks = [env_right]
+    L_blocks = [env_left]
+
+    for i in N-1:-1:1
+        env_right *= psi[i]*mpo[i+1]*vac[i+1]
+        push!(R_blocks, env_right)
+    end
+    reverse!(R_blocks)
+
+    rev = false
+    first_sweep = true
+    fid, newfid = 0, 0
+    j = 0
+    sweep = 0
+
+    while sweep < maxiter
+        j = rev ? j-1 : j+1
+        
+        if j == 1 && first_sweep == false
+            rev = false
+            sweep += 1
+        end
+
+        if j == N
+            first_sweep = false
+            rev = true
+            sweep += 1
+        end
+
+        env_dag = conj(env_left*env_right)
+        U, S, Vdag = svd(env_dag, sites[j]; cutoff = 1e-15)
+        u, v = commonind(U, S), commonind(Vdag, S)
+        newfid = real(tr(Matrix{ComplexF64}(S, (u, v))))
+        mpo[j] = U * replaceind(Vdag, v, u)
+
+        # while loop end conditions
+        if newfid >= 1
+            newfid = 1
+            break
+        end
+        
+        # if we arrived at the end of the sweep
+        if (j==1 && first_sweep==false) || j==N
+            # compare the relative increase in frobenius norm
+            ratio = 1 - sqrt((1-newfid)/(1-fid))
+            #convergence occurs when fidelity after new sweep doesn't change considerably
+            if -conv_err < ratio < conv_err && first_sweep == false
+                break   
+            end
+            if ratio >= 0   # only register if the ratio has increased, otherwise it's useless
+                fid = newfid
+            end
+        end
+        
+        # update L_blocks or R_blocks depending on sweep direction
+        if rev == false
+            # append to leftmost_block
+            env_left *= mpo[j]*psi[j]*vac[j+1]
+            if first_sweep == true
+                push!(L_blocks, env_left)
+            else
+                L_blocks[j+1] = env_left
+            end
+            env_right = R_blocks[j+1]
+        else
+            # append to rightmost_block
+            env_right *= mpo[j]*vac[j]*psi[j-1]
+            R_blocks[j-1] = env_right         
+            env_left = L_blocks[j-1]
+        end
+    end
+
+    println("Converged to fidelity $newfid with $sweep sweeps\n")
+    approx_mps = MPS(mpo*vac)
+    overlap = real(contract(psi, mpo*vac))[]
+
+    return mpo, approx_mps, overlap
+end
+
+
+
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
 function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; site1_empty = false, d = 2, conv_err = 1E-8, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}

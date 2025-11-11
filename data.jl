@@ -153,7 +153,7 @@ folder = "D:\\Julia\\MyProject\\Data\\cluster_copy\\"
 for i in 1:5
     # Create an empty DataFrame
     df = DataFrame(N=Int[], eps=Float64[], depth=Int[], time=Float64[], nmps=Int[])
-    subfolder = folder*"mps$(i)LC\\"
+    subfolder = folder*"mps$(i)\\"
     Nrange = [20, 40, 60, 80, 100]
     eps_array = [0.1, 0.02, 0.004, 0.0008]
     
@@ -211,9 +211,9 @@ folder = "D:\\Julia\\MyProject\\Data\\cluster_copy\\"
 for i in 1:5
     # Create an empty DataFrame
     df = DataFrame(N=Int[], eps=Float64[], depth=Int[], time=Float64[], nmps=Int[])
-    subfolder = folder*"mps$(i)LC\\"
+    subfolder = folder*"mps$(i)\\"
     Nrange = [20, 40, 60, 80, 100]
-    eps_array = [0.1, 0.02]
+    eps_array = [0.1, 0.02, 0.004, 0.0008]
     
     for N in Nrange
         for eps in eps_array
@@ -235,18 +235,18 @@ CSV.write(folder*"result_trunc.csv", df_final)
 # DISENT RANDMPS NEW + TIME
 Nrange = [20, 40, 60, 80, 100]
 df_list = []
-folder = "D:\\Julia\\MyProject\\Data\\randMPS\\disent\\"
+folder = "D:\\Julia\\MyProject\\Data\\cluster_copy\\"
 
 for i in 1:5
     # Create an empty DataFrame
     df = DataFrame(N=Int[], eps=Float64[], depth=Int[], time=Float64[], nmps=Int[])
-    subfolder = folder*"mps$(i)new\\"
+    subfolder = folder*"mps$(i)\\"
     Nrange = [20, 40, 60, 80, 100]
     
     for N in Nrange
         filenames = glob("disent_$(N)_*.jld2", subfolder)
         for filename in filenames
-            eps = parse(Float64, filename[56+length(string(N)):end-5])
+            eps = parse(Float64, filename[51+length(string(N)):end-5])
             depth = load_object(filename)
             time = load_object(subfolder*"time_disent_$(N)_$(depth).jld2")
             push!(df, (N=N, eps=eps, depth=depth, time=time, nmps=i))
@@ -257,9 +257,10 @@ for i in 1:5
 end
 
 df_final = reduce(vcat, df_list)
-CSV.write(folder*"result_new.csv", df_final)
+CSV.write(folder*"result_disent.csv", df_final)
 
 
+# RESULTS SCALING XXZ
 folder = "D:\\Julia\\MyProject\\Data\\xxz\\"
 df = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
 filenames = glob("df_*.jld2", folder)
@@ -267,3 +268,17 @@ for name in filenames
     df = vcat(df, load_object(name))
 end
 CSV.write(folder*"df_all.csv", df)
+
+
+# SCALING RANDOM MPS
+path = "D:\\Julia\\MyProject\\Data\\cluster_copy\\"
+
+for i in 1:5
+    df = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
+    folder = path*"mps$i\\"
+    filenames = glob("df_*.jld2", folder)
+    for name in filenames
+        df = vcat(df, load_object(name))
+    end
+    CSV.write(folder*"df$i.csv", df)
+end
