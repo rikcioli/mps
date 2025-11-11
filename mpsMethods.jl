@@ -819,13 +819,13 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
             @show rangesAB
 
             # Construct map that associated to each site the region name (C vs AB), the lightcone that will end up in lc_list, and the local site in that lightcone
-            ltg_map = []
+            ltg_map = [("C", 1, l) for l in 1:2]
             for num in eachindex(initial_pos[1:end-1])
                 for l in 1:sizeAB
                     push!(ltg_map, ("AB", num, l))
                 end
                 for l in 1:spacing
-                    push!(ltg_map, ("C", num, l))
+                    push!(ltg_map, ("C", num+1, l))
                 end
             end
             remainder = N-length(ltg_map)
@@ -835,7 +835,7 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
             end
             remainder -= lastABsize
             for l in 1:remainder
-                push!(ltg_map, ("C", length(initial_pos), l))
+                push!(ltg_map, ("C", length(initial_pos)+1, l))
             end
 
 
@@ -1069,8 +1069,9 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
         isodd(sizeAB) && throw(DomainError(sizeAB, "Choose an even number for sizeAB"))
         isodd(spacing) && throw(DomainError(spacing, "Choose an even number for the spacing between regions"))
         
-        # the first region will always be a AB type ## IMPORTANT CHANGE, CHECK IF WORKS
-        i = 1
+        # the first region will always be 2 SITES AND THEN AB type ## IMPORTANT CHANGE, CHECK IF WORKS
+        # the 2 sites condition is needed for when the depth is 2, to avoid getting a single site in a C region
+        i = 3
         # select initial positions 
         initial_pos::Vector{Int64} = []
         while i < N-tau
@@ -1081,13 +1082,13 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
         @show rangesAB
 
         # Construct map that associates to each site the region name (C vs AB), the lightcone that will end up in lc_list, and the local site in that lightcone
-        ltg_map = []
+        ltg_map = [("C", 1, l) for l in 1:2]
         for num in eachindex(initial_pos[1:end-1])
             for l in 1:sizeAB
                 push!(ltg_map, ("AB", num, l))
             end
             for l in 1:spacing
-                push!(ltg_map, ("C", num, l))
+                push!(ltg_map, ("C", num+1, l))
             end
         end
         remainder = N-length(ltg_map)
@@ -1097,7 +1098,7 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
         end
         remainder -= lastABsize
         for l in 1:remainder
-            push!(ltg_map, ("C", length(initial_pos), l))
+            push!(ltg_map, ("C", length(initial_pos)+1, l))
         end
 
 
@@ -1461,10 +1462,10 @@ function invertMPS2(pathname::String, N_list::Vector{<:Integer}, eps_list::Vecto
     return
 end
 
-function invertMPSfinal(mps::MPS, pathname::String, eps::Float64; invertMethod = invertGlobalSweep)
+function invertMPSfinal(mps::MPS, pathname::String, eps::Float64; kargs...)
     N = length(mps)
-    invertMPS1(mps, pathname)
-    results = invertMPS2(pathname, N, eps)
+    invertMPS1(mps, pathname; kargs...)
+    results = invertMPS2(pathname, N, eps; kargs...)
     return results
 end
 
