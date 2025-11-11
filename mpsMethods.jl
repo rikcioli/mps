@@ -1462,9 +1462,9 @@ function invertMPS2(pathname::String, N_list::Vector{<:Integer}, eps_list::Vecto
     return
 end
 
-function invertMPSfinal(mps::MPS, pathname::String, eps::Float64; kargs...)
+function invertMPSfinal(mps::MPS, pathname::String, eps::Float64; ansatz_eps = 0.5, kargs...)
     N = length(mps)
-    invertMPS1(mps, pathname; kargs...)
+    invertMPS1(mps, pathname; ansatz_eps = ansatz_eps)
     results = invertMPS2(pathname, N, eps; kargs...)
     return results
 end
