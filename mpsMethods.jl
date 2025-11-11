@@ -783,7 +783,7 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
     tau = start_tau
 
     local fid_total, lc_list, ltg_map, lc_list_old
-    ltg_map_old = Array{Lightcone, 1}()
+    lc_list_old = Array{Lightcone, 1}()
     while tau <= max_tau
         
         dt = @elapsed begin
@@ -1069,8 +1069,8 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
         isodd(sizeAB) && throw(DomainError(sizeAB, "Choose an even number for sizeAB"))
         isodd(spacing) && throw(DomainError(spacing, "Choose an even number for the spacing between regions"))
         
-        # the first region will always be a C type
-        i = spacing+1
+        # the first region will always be a AB type ## IMPORTANT CHANGE, CHECK IF WORKS
+        i = 1
         # select initial positions 
         initial_pos::Vector{Int64} = []
         while i < N-tau
@@ -1080,14 +1080,14 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
         rangesAB = [(j, min(j+sizeAB-1, N)) for j in initial_pos]
         @show rangesAB
 
-        # Construct map that associated to each site the region name (C vs AB), the lightcone that will end up in lc_list, and the local site in that lightcone
-        ltg_map = [("C", 1, l) for l in 1:spacing]
+        # Construct map that associates to each site the region name (C vs AB), the lightcone that will end up in lc_list, and the local site in that lightcone
+        ltg_map = []
         for num in eachindex(initial_pos[1:end-1])
             for l in 1:sizeAB
                 push!(ltg_map, ("AB", num, l))
             end
             for l in 1:spacing
-                push!(ltg_map, ("C", num+1, l))
+                push!(ltg_map, ("C", num, l))
             end
         end
         remainder = N-length(ltg_map)
@@ -1097,7 +1097,7 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
         end
         remainder -= lastABsize
         for l in 1:remainder
-            push!(ltg_map, ("C", length(initial_pos)+1, l))
+            push!(ltg_map, ("C", length(initial_pos), l))
         end
 
 
@@ -1180,6 +1180,7 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
             end
         end
         push!(boundaries, N)
+        @show boundaries
 
         mps_reconstr = deepcopy(mps_trunc)
         apply!(mps_reconstr, lc_list, dagger=true)
