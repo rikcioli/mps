@@ -807,8 +807,8 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
             isodd(sizeAB) && throw(DomainError(sizeAB, "Choose an even number for sizeAB"))
             isodd(spacing) && throw(DomainError(spacing, "Choose an even number for the spacing between regions"))
             
-            # the first region will always be a C type
-            i = spacing+1
+            # the first region will always be a AB type
+            i = 1
             # select initial positions 
             initial_pos::Vector{Int64} = []
             while i < N-tau
@@ -819,13 +819,13 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
             @show rangesAB
 
             # Construct map that associated to each site the region name (C vs AB), the lightcone that will end up in lc_list, and the local site in that lightcone
-            ltg_map = [("C", 1, l) for l in 1:spacing]
+            ltg_map = []
             for num in eachindex(initial_pos[1:end-1])
                 for l in 1:sizeAB
                     push!(ltg_map, ("AB", num, l))
                 end
                 for l in 1:spacing
-                    push!(ltg_map, ("C", num+1, l))
+                    push!(ltg_map, ("C", num, l))
                 end
             end
             remainder = N-length(ltg_map)
@@ -835,7 +835,7 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
             end
             remainder -= lastABsize
             for l in 1:remainder
-                push!(ltg_map, ("C", length(initial_pos)+1, l))
+                push!(ltg_map, ("C", length(initial_pos), l))
             end
 
 
