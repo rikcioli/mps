@@ -801,6 +801,10 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
                 spacing = 2
             end
 
+            if sizeAB >= N
+            throw(DomainError(sizeAB, "Lightcone size is greater than system's size. This happens when the system size is too small for this method to give an improvement over global variational optimization. Use mt.invert for this case."))
+            end
+
             println("Attempting inversion of reduced density matrices with depth tau = $tau, imposing sizeAB = $sizeAB and spacing = $spacing for factorization")
 
             @assert tau > 0
@@ -819,13 +823,13 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
             @show rangesAB
 
             # Construct map that associated to each site the region name (C vs AB), the lightcone that will end up in lc_list, and the local site in that lightcone
-            ltg_map = [("C", 1, l) for l in 1:2]
+            ltg_map = []
             for num in eachindex(initial_pos[1:end-1])
                 for l in 1:sizeAB
                     push!(ltg_map, ("AB", num, l))
                 end
                 for l in 1:spacing
-                    push!(ltg_map, ("C", num+1, l))
+                    push!(ltg_map, ("C", num, l))
                 end
             end
             remainder = N-length(ltg_map)
@@ -835,7 +839,7 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
             end
             remainder -= lastABsize
             for l in 1:remainder
-                push!(ltg_map, ("C", length(initial_pos)+1, l))
+                push!(ltg_map, ("C", length(initial_pos), l))
             end
 
 
@@ -858,7 +862,7 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
                 _reduced_mps = reduced_mps_list[l]
                 _k_sites = k_sites_list[l]
                 
-                _lightbounds = (true, _last_site==N ? false : true)   # first region will always be left for step 2, last region could end up in step 1
+                _lightbounds = (_first_site==1 ? false : true, _last_site==N ? false : true)   # first region will always be left for step 2, last region could end up in step 1
                 _lightcone = newLightcone(_k_sites, tau; lightbounds = _lightbounds, U_array = use_previous ? Matrix{ComplexF64}[] : nothing)
                 # using an empty array will fill the lightcone with identities, which will then be modified by the following piece of code
 
@@ -884,7 +888,7 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
                 end
 
                 _rangeA_rel = _lightcone.range[end]       # region which will be inverted to 0, relative to first site of lightcone
-                _rangeA_abs = (_rangeA_rel[1]+_first_site-1, _last_site==N ? N : _rangeA_rel[2]+_first_site-1)      # same region relative to total mps sites
+                _rangeA_abs = (_first_site==1 ? 1 : _rangeA_rel[1]+_first_site-1, _last_site==N ? N : _rangeA_rel[2]+_first_site-1)      # same region relative to total mps sites
                 rangesA[l] = _rangeA_abs
 
                 # setup optimization stuff
@@ -936,9 +940,9 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
 
 
             # construct local-to-global map for second part of inversion, could be useful later
-            # WARNING: here region_n counts all regions as different, so it's gonna be BC-1, A-2, BC-3, A-4 and so on
-            # this is different from ltg_map, where the pos counts differently for the two regions, so C-1, AB-1, C-2, AB-2, and so on
-            curr_type = "BC"
+            # WARNING: here region_n counts all regions as different, so it's gonna be A-1, BC-2, A-3, BC-4 and so on
+            # this is different from ltg_map, where the pos counts differently for the two regions, so AB-1, C-1, AB-2, C-2 and so on
+            curr_type = "A"
             region_n = 1
             ltg_map2 = []
             for range in ranges
@@ -1063,15 +1067,18 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
             spacing = 2
         end
 
+        if sizeAB >= N
+            throw(DomainError(sizeAB, "Lightcone size is greater than system's size. This happens when the system size is too small for this method to give an improvement over global variational optimization. Use mt.invert for this case."))
+        end
+
         println("Attempting inversion of reduced density matrices with depth tau = $tau, imposing sizeAB = $sizeAB and spacing = $spacing for factorization")
 
         @assert tau > 0
         isodd(sizeAB) && throw(DomainError(sizeAB, "Choose an even number for sizeAB"))
         isodd(spacing) && throw(DomainError(spacing, "Choose an even number for the spacing between regions"))
         
-        # the first region will always be 2 SITES AND THEN AB type ## IMPORTANT CHANGE, CHECK IF WORKS
-        # the 2 sites condition is needed for when the depth is 2, to avoid getting a single site in a C region
-        i = 3
+        # the first region will always be AB type with lightbounds (false, true) ## IMPORTANT CHANGE, CHECK IF WORKS
+        i = 1
         # select initial positions 
         initial_pos::Vector{Int64} = []
         while i < N-tau
@@ -1082,13 +1089,13 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
         @show rangesAB
 
         # Construct map that associates to each site the region name (C vs AB), the lightcone that will end up in lc_list, and the local site in that lightcone
-        ltg_map = [("C", 1, l) for l in 1:2]
+        ltg_map = []
         for num in eachindex(initial_pos[1:end-1])
             for l in 1:sizeAB
                 push!(ltg_map, ("AB", num, l))
             end
             for l in 1:spacing
-                push!(ltg_map, ("C", num+1, l))
+                push!(ltg_map, ("C", num, l))
             end
         end
         remainder = N-length(ltg_map)
@@ -1098,7 +1105,7 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
         end
         remainder -= lastABsize
         for l in 1:remainder
-            push!(ltg_map, ("C", length(initial_pos)+1, l))
+            push!(ltg_map, ("C", length(initial_pos), l))
         end
 
 
@@ -1121,7 +1128,7 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
             _reduced_mps = reduced_mps_list[l]
             _k_sites = k_sites_list[l]
             
-            _lightbounds = (true, _last_site==N ? false : true)   # first region will always be left for step 2, last region could end up in step 1
+            _lightbounds = (_first_site==1 ? false : true, _last_site==N ? false : true)   # we remove lightbounds if AB region touches one of the ends of the chain
             _lightcone = newLightcone(_k_sites, tau; lightbounds = _lightbounds, U_array = use_previous ? Matrix{ComplexF64}[] : nothing)
             # using an empty array will fill the lightcone with identities, which will then be modified by the following piece of code
 
@@ -1147,13 +1154,12 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
             end
 
             _rangeA_rel = _lightcone.range[end]       # region which will be inverted to 0, relative to first site of lightcone
-            _rangeA_abs = (_rangeA_rel[1]+_first_site-1, _last_site==N ? N : _rangeA_rel[2]+_first_site-1)      # same region relative to total mps sites
+            _rangeA_abs = (_first_site==1 ? 1 : _rangeA_rel[1]+_first_site-1, _last_site==N ? N : _rangeA_rel[2]+_first_site-1)      # same region relative to total mps sites
             rangesA[l] = _rangeA_abs
 
             # setup optimization stuff
             _arrU0 = Array(_lightcone)
             _fg = arrU -> _fgLiu(arrU, _lightcone, _reduced_mps)
-            # Quasi-Newton method
             _algorithm = LBFGS(5; maxiter = maxiter, gradtol = 1E-8, verbosity = 1)
             # optimize and store results
             # note that arrUmin is already stored in current lightcone, ready to be applied to mps
@@ -1212,9 +1218,9 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
     @show ranges
 
     # construct local-to-global map for second part of inversion, could be useful later
-    # WARNING: here region_n counts all regions as different, so it's gonna be BC-1, A-2, BC-3, A-4 and so on
-    # this is different from ltg_map, where the pos counts differently for the two regions, so C-1, AB-1, C-2, AB-2, and so on
-    curr_type = "BC"
+    # WARNING: here region_n counts all regions as different, so it's gonna be A-1, BC-2, A-3, BC-4 and so on
+    # this is different from ltg_map, where the pos counts differently for the two regions, so AB-1, C-1, AB-2, C-2 and so on
+    curr_type = "A"
     region_n = 1
     ltg_map2 = []
     for range in ranges

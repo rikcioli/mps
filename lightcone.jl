@@ -246,14 +246,14 @@ end
 "Extract d by d Matrix corresponding to position k"
 function Base.Matrix(lightcone::Lightcone, k::Integer)
     d = lightcone.d
-    U = reshape(Array(lightcone.circuit[k], lightcone.inds_arr[k]), (d^2,d^2))
+    U = reshape(Array{ComplexF64}(lightcone.circuit[k], lightcone.inds_arr[k]), (d^2,d^2))
     return U
 end
 
 "Flatten Lightcone to 1D array, from bottom to top"
 function Base.Array(lightcone::Lightcone)
     d = lightcone.d
-    arr = [reshape(Array(lightcone.circuit[k], lightcone.inds_arr[k]), (d^2,d^2)) for k in 1:lightcone.n_unitaries]
+    arr = [reshape(Array{ComplexF64}(lightcone.circuit[k], lightcone.inds_arr[k]), (d^2,d^2)) for k in 1:lightcone.n_unitaries]
     return arr
 end
 
