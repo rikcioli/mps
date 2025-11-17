@@ -1041,13 +1041,13 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
 end
 
 "Invert state up to error upper bounded by eps"
-function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-2, maxiter = 20000)
+function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-2, maxiter = 20000, nruns_part2 = 1)
 
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
     sites = siteinds(mps)
     eps1 = eps/2 # error of the whole first part, that is inversion of reduced dm + truncation
-    println("Attempting inversion of MPS with invertMPSLiu and errors:\neps1 = $eps1\neps_total = $eps")
+    println("\nAttempting inversion of MPS with invertMPSLiu and errors:\neps1 = $eps1\neps_total = $eps")
 
     local mps_trunc, boundaries, rangesA, err_list, lc_list, err1, ltg_map
     tau = start_tau
@@ -1268,7 +1268,8 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
             _reduced_mps = reduced_mps_list[l]
             _site1_empty = false
 
-            _local_tau = (_range in rangesA ? min(2, attempt_tau) : attempt_tau) # small optimization: if it's an A region, a depth 1-2 is usually enough
+            #_local_tau = (_range in rangesA ? min(2, attempt_tau) : attempt_tau) # small optimization: if it's an A region, a depth 1-2 is usually enough
+            _local_tau = attempt_tau
 
             if iseven(_range[2]-_range[1])
                 # if the first region has odd number of sites we need to start the lightcone
@@ -1279,7 +1280,9 @@ function invertMPSLiu(mps::MPS, invertMethod::Function; start_tau = 1, eps = 1e-
                 # and also make sure tau is at least 2 to not cause problems with lightcones
                 _local_tau = max(2, _local_tau)
             end
-            results2 = invert(_reduced_mps, invertMethod; tau = _local_tau, site1_empty = _site1_empty, maxiter = maxiter, reuse_previous = false, nruns = 1)
+
+            _prev_guess = (nruns_part2==1 && _local_tau>2) ? Array(lc_list2[l]) : nothing
+            results2 = invert(_reduced_mps, invertMethod; tau = _local_tau, site1_empty = _site1_empty, maxiter = maxiter, init_array = _prev_guess, nruns = nruns_part2)
 
             lc_list2[l] = results2["lightcone"]
             tau_list2[l] = results2["tau"]
