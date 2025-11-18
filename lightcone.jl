@@ -12,6 +12,7 @@ struct Lightcone
     lightbounds::Tuple{Bool, Bool}          # (leftslope == 'light', rightslope == 'light')
     siteinds::Vector{Index}              # siteinds of AB region
     range::Vector{Tuple{Int64, Int64}}      # leftmost and rightmost sites on which each layer acts non-trivially
+    rangeA::Tuple{Int64, Int64}             # leftmost and rightmost sites belonging to A region
     gates_by_site::Vector{Vector{@NamedTuple{
                         inds::NTuple{4, Index{Int64}},
                         pos::Int64,
@@ -198,8 +199,10 @@ function newLightcone(sites::Vector{<:Index}, depth::Int64; U_array::Union{Nothi
         push!(gates_by_layer, layer_i_pos)
     end
 
+    rangeA = (lightbounds[1] ? range[end][1] : 1, lightbounds[2] ? range[end][end] : sizeAB)
 
-    return Lightcone(circuit, inds_arr, d, sizeAB, depth, site1_empty, n_unitaries, lightbounds, sites, range, gates_by_site, gates_by_layer, sites_by_gate)
+
+    return Lightcone(circuit, inds_arr, d, sizeAB, depth, site1_empty, n_unitaries, lightbounds, sites, range, rangeA, gates_by_site, gates_by_layer, sites_by_gate)
 end
 
 "Update k-th unitary of lightcone in-place"
