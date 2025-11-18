@@ -450,7 +450,7 @@ function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Inde
     besterr_history = []
     best_guess = init_array
     while !found
-        println("Attempting depth $tau...")
+        println("\nAttempting depth $tau...")
         # choose multiprocessing method
         results_array = Array{Dict{String, Any}}(undef, nruns)
         if nruns == 1   #avoid spawning threads if nruns == 1
@@ -465,6 +465,7 @@ function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Inde
         errs = [abs(overlap - results["overlap"]) for results in results_array]
         err_min_pos = argmin(errs)
         err_min = errs[err_min_pos]
+        println("Obtained error = $err_min")
         push!(besterr_history, err_min)
         if err_min < eps || tau > 24 || fixed_tau_mode
             found = true
@@ -515,19 +516,7 @@ end
 function invert(mpo::MPO, invertMethod; kargs...)
     N = length(mpo)
     mpo = conj(mpo)
-    allinds = reduce(vcat, siteinds(mpo))
-    # determine primelevel of inputinds, which will be the lowest found in allinds
-    first2inds = allinds[1:2]   
-    plev_in = 0
-    while true
-        ind = inds(first2inds, plev = plev_in)
-        if length(ind) > 0
-            break
-        end
-        plev_in += 1
-    end
-    sites = inds(allinds, plev = plev_in)
-    outinds = uniqueinds(allinds, sites)
+    sites, outinds = splitinds(mpo)
 
     results = invert(mpo, outinds, sites, invertMethod; overlap = 1, normalization = 2^N, kargs...) #DO NOT CHANGE NORMALIZATION, WE NEED FIDELITY TO BE NORM. TO 1 OR THE RATIO WON'T WORK
     return results
