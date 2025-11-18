@@ -302,21 +302,8 @@ function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = fa
     N = length(mps)
 
     if isa(mps, MPO)
-        allinds = reduce(vcat, siteinds(mps))
-        # determine primelevel of inputinds, which will be the lowest found in allinds
-        first2inds = allinds[1:2]   
-        plev_in = 0
-        while true
-            ind = inds(first2inds, plev = plev_in)
-            if length(ind) > 0
-                break
-            end
-            plev_in += 1
-        end
-        ininds = inds(allinds, plev = plev_in)
-        outinds = uniqueinds(allinds, ininds)
-
-        new_ininds = siteinds(first2inds[1].space, N)
+        ininds, outinds = splitinds(mps)
+        new_ininds = siteinds(ininds[1].space, N)
         for i in 1:N
             replaceind!(mps[i], ininds[i], new_ininds[i])
         end

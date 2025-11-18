@@ -144,10 +144,10 @@ function entropy(psi::MPS, b::Integer)
 end
 
 "Truncate mps at position b until bond dimension of link (b, b+1) becomes 1"
-function cut!(psi::MPS, b::Integer)
+function cut!(psi::Union{MPS, MPO}, b::Integer; cutoff=1e-18)
     orthogonalize!(psi, b)
     indsb = uniqueinds(psi[b], psi[b+1])
-    U, S, V = svd(psi[b]*psi[b+1], indsb, cutoff = 1E-18)
+    U, S, V = svd(psi[b]*psi[b+1], indsb, cutoff = cutoff)
 
     u, v = inds(S)
     w = Index(1)
@@ -380,6 +380,18 @@ end
 
 
 ### CUSTOM MPO METHODS ###
+
+"Extract input and output inds of an MPO. The input inds will be those with lower prime level"
+function splitinds(mpo::MPO)
+    all_inds = reduce(vcat, siteinds(mpo))
+    min_plev = minimum(plev(i) for i in all_inds)
+
+    input_inds = siteinds(mpo; plev = min_plev)
+    output_inds = uniqueinds(all_inds, input_inds)
+    return input_inds, output_inds
+end
+
+
 "Convert unitary to MPO via repeated SVD"
 function unitary_to_mpo(U::Union{Matrix, Vector{AbstractFloat}}; d = 2, sites = nothing, skip_qudits = 0, orthogonalize = true)
     D = size(U, 1)
