@@ -763,7 +763,6 @@ function _fgLiu(U_array::Vector{Matrix{T}}, lightcone::Lightcone, reduced_mps::V
     # compute environment now that we contracted all blocks, so that we are effectively computing the overlap
     # we use the absolute value as a cost function
     overlap = abs(Array{T}(leftmost_block)[1])
-    @show overlap
     riem_grad = project(U_array, grad)
 
     # put a - sign so that it minimizes
@@ -774,8 +773,6 @@ function _fgLiu(U_array::Vector{Matrix{T}}, lightcone::Lightcone, reduced_mps::V
         riem_grad/=2^(2*sizeA+(N-sizeA))
     end
 
-    @show cost
-
     return cost, riem_grad
 
 end
@@ -783,10 +780,10 @@ end
 
 "Invert state up to error upper bounded by eps"
 function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1, eps = 1e-2, maxiter = 20000, nruns_part2 = 1)
-
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
-
+    
+    mps = copy(mps)
     obj = typeof(mps)
     eps1 = eps/2 # error of the whole first part, that is inversion of reduced dm + truncation
     println("\nAttempting inversion of $obj with invertMPSLiu and errors:\neps1 = $eps1\neps_total = $eps")
@@ -958,7 +955,7 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1
         err1 = 1-abs(overlap1)
         @show err1
 
-        if (-eps1 <= err1 <= eps1) && false
+        if (-eps1 <= err1 <= eps1)
             break
         else
             println("Inversion and truncation to required error failed with initial depth tau = $tau, increasing inversion depth")
@@ -973,7 +970,16 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1
     flush(stdout)
     # Now we proceed with inversion of all pure states
     #epsinv2 = eps2/length(rangesA)^2     # the scaling is 1/Nregions^2
-    trunc_siteinds = siteinds(mps_trunc)
+    if is_mpo
+        orthogonalize!(mps_trunc, N)
+        for i in 1:N-1
+            mps_trunc[i] *= sqrt(2)     #we want each subregion to be a normalized unitary
+        end
+        mps_trunc[end] /= sqrt(2^(N-1))
+        _, trunc_siteinds = splitinds(mps_trunc)
+    else
+        trunc_siteinds = siteinds(mps_trunc)
+    end
     trunc_linkinds = linkinds(mps_trunc)
     ranges = []
     for l in 1:length(boundaries)-1
@@ -1015,8 +1021,11 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1
             replaceind!(reduced_mps[end], cind, trunc_siteinds[range[2]])
         end
         
-        reduced_mps = MPS(reduced_mps)
-        push!(reduced_mps_list, reduced_mps)
+        if is_mpo
+            push!(reduced_mps_list, MPO(reduced_mps))
+        else
+            push!(reduced_mps_list, MPS(reduced_mps))
+        end
     end
     
     lc_list2 = Array{Lightcone, 1}(undef, length(ranges))
@@ -1053,17 +1062,28 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1
             err_list2[l] = results2["err"]
         end
 
-        # finally create a 0 state and apply all the V to recreate the original state for final total error
-        mps_final = initialize_vac(N, trunc_siteinds)
-        apply!(mps_final, lc_list2)
-        err2 = 1-abs(dot(mps_final, mps_trunc))
-        @show err2
+        if is_mpo
+            mps_final = MPO(lc_list2, prime(trunc_siteinds, -1))
+            err2 = 1-abs(dot(mps_final, mps_trunc)/2^N)
+            @show err2
 
-        replace_siteinds!(mps_final, sites)
-        apply!(mps_final, lc_list, dagger=true)
-            
-        err_total = 1-abs(dot(mps_final, mps))
-        @show err_total
+            apply!(mps_final, lc_list, dagger=true)
+            err_total = 1-abs(dot(mps_final, mps)/2^N)
+            @show err_total
+        else
+            # finally create a 0 state and apply all the V to recreate the original state for final total error
+            mps_final = initialize_vac(N, trunc_siteinds)
+            apply!(mps_final, lc_list2)
+            err2 = 1-abs(dot(mps_final, mps_trunc))
+            @show err2
+
+            replace_siteinds!(mps_final, sites)
+            apply!(mps_final, lc_list, dagger=true)
+                
+            err_total = 1-abs(dot(mps_final, mps))
+            @show err_total
+        end
+
         flush(stdout)
         if err_total < eps
             println("Convergence obtained with total 1-overlap = $err_total. Required: <$eps.")
