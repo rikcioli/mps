@@ -1104,32 +1104,46 @@ end
 
 
 "Function to test the scaling of the fidelity for the initialization"
-function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxiter = 20000, invertMethod = invertGlobalSweep)
+function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau = 1, maxiter = 20000, nruns_part2 = 1, invertMethod = invertGlobalSweep)
     N = length(mps)
+    isodd(N) && throw(DomainError(N, "Choose an even number for N"))
 
+    is_mpo = isa(mps, MPO)
     # First section is for product state truncation
     mps_prod = deepcopy(mps)
     for j in 1:N-1
         cut!(mps_prod, j)
     end
-    fid_prod = abs2(dot(mps_prod, mps))
+    ovlp = dot(mps_prod, mps)
+    if is_mpo
+        ovlp /= 2^N
+    end
+    fid_prod = abs2(ovlp)
 
     df = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
     push!(df, (N=N, fid=fid_prod, depth=0, time=0))
     jldsave(folder*"df_$(N)_0.jld2"; df)
 
 
-    isodd(N) && throw(DomainError(N, "Choose an even number for N"))
-    sites = siteinds(mps)
+    sites = reduce(vcat, siteinds(mps; plev=0))
+    is_mpo = isa(mps, MPO)
+    if is_mpo
+        outinds = uniqueinds(reduce(vcat, siteinds(mps)), sites)
+        contrinds = prime(sites, -1)
+        for i in 1:N
+            replaceind!(mps[i], sites[i], contrinds[i])
+            replaceind!(mps[i], outinds[i], sites[i])
+        end
+    end
 
     tau = start_tau
-
-    local fid_total, lc_list, ltg_map, lc_list_old
+    local lc_list, ltg_map, ltg_map_old
     lc_list_old = Array{Lightcone, 1}()
+    lc_list2_old = Array{Lightcone, 1}()
     while tau <= max_tau
         
         dt = @elapsed begin
-            local mps_trunc, boundaries, rangesA, err_list, lc_list, err1, ltg_map 
+            local mps_trunc, boundaries, rangesA, err_list, err1, fid_total
 
             mps_copy = deepcopy(mps)
             use_previous = (tau > 2 && !isempty(lc_list_old)) #use knowledge of previous inversions for initial start 
@@ -1192,8 +1206,15 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
             reduced_mps_list = []
             k_sites_list = []
             for (first_site, last_site) in rangesAB
-                orthogonalize!(mps_copy, div(first_site+last_site, 2))
-                push!(reduced_mps_list, mps_copy[first_site:last_site])
+                og_center = div(first_site+last_site, 2)
+                reduced_size = last_site-first_site+1
+                orthogonalize!(mps_copy, og_center)
+
+                reduced_mps = mps_copy[first_site:last_site]
+                if is_mpo
+                    reduced_mps[og_center-first_site+1] /= sqrt(2^(N-reduced_size))
+                end
+                push!(reduced_mps_list, reduced_mps)
                 push!(k_sites_list, sites[first_site:last_site])
             end
 
@@ -1235,7 +1256,7 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
 
                 # setup optimization stuff
                 _arrU0 = Array(_lightcone)
-                _fg = arrU -> _fgLiu(arrU, _lightcone, _reduced_mps)
+                _fg = arrU -> _fgLiu(arrU, _lightcone, _reduced_mps; is_mpo=is_mpo)
                 # Quasi-Newton method
                 _algorithm = LBFGS(5; maxiter = maxiter, gradtol = 1E-8, verbosity = 1)
                 # optimize and store results
@@ -1266,14 +1287,27 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
 
             mps_reconstr = deepcopy(mps_trunc)
             apply!(mps_reconstr, lc_list, dagger=true)
-            err1 = 1-abs(dot(mps, mps_reconstr))
+            overlap1 = dot(mps, mps_reconstr)
+            if is_mpo
+                overlap1 /= 2^N
+            end
+            err1 = 1-abs(overlap1)
             @show err1
 
             println("Inversion and truncation completed, inverting local states with depth $tau")
             flush(stdout)
             # Now we proceed with inversion of all pure states
 
-            trunc_siteinds = siteinds(mps_trunc)
+            if is_mpo
+                orthogonalize!(mps_trunc, N)
+                for i in 1:N-1
+                    mps_trunc[i] *= sqrt(2)     #we want each subregion to be a normalized unitary
+                end
+                mps_trunc[end] /= sqrt(2^(N-1))
+                _, trunc_siteinds = splitinds(mps_trunc)
+            else
+                trunc_siteinds = siteinds(mps_trunc)
+            end
             trunc_linkinds = linkinds(mps_trunc)
             ranges = []
             for l in 1:length(boundaries)-1
@@ -1315,8 +1349,11 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
                     replaceind!(reduced_mps[end], cind, trunc_siteinds[range[2]])
                 end
                 
-                reduced_mps = MPS(reduced_mps)
-                push!(reduced_mps_list, reduced_mps)
+                if is_mpo
+                    push!(reduced_mps_list, MPO(reduced_mps))
+                else
+                    push!(reduced_mps_list, MPS(reduced_mps))
+                end
             end
             
             lc_list2 = Array{Lightcone, 1}(undef, length(ranges))
@@ -1332,7 +1369,8 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
                 _reduced_mps = reduced_mps_list[l]
                 _site1_empty = false
 
-                _local_tau = (_range in rangesA ? min(2, attempt_tau) : attempt_tau) # small optimization: if it's an A region, a depth 1-2 is usually enough
+                #_local_tau = (_range in rangesA ? min(2, attempt_tau) : attempt_tau) # small optimization: if it's an A region, a depth 1-2 is usually enough
+                _local_tau = attempt_tau
 
                 if iseven(_range[2]-_range[1])
                     # if the first region has odd number of sites we need to start the lightcone
@@ -1343,26 +1381,28 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
                     # and also make sure tau is at least 2 to not cause problems with lightcones
                     _local_tau = max(2, _local_tau)
                 end
-                results2 = invert(_reduced_mps, invertMethod; tau = _local_tau, site1_empty = _site1_empty, maxiter = maxiter, reuse_previous = false, nruns = 1)
+
+                _prev_guess = (nruns_part2==1 && _local_tau>2) ? Array(lc_list2_old[l]) : nothing
+                results2 = invert(_reduced_mps, invertMethod; tau = _local_tau, site1_empty = _site1_empty, maxiter = maxiter, init_array = _prev_guess, nruns = nruns_part2)
 
                 lc_list2[l] = results2["lightcone"]
                 tau_list2[l] = results2["tau"]
                 err_list2[l] = results2["err"]
             end
 
-            # finally create a 0 state and apply all the V to recreate the original state for final total error
-            mps_final = initialize_vac(N, trunc_siteinds)
-            apply!(mps_final, lc_list2)
-            #err2 = 1-abs(dot(mps_final, mps_trunc))
-            #@show err2
-
-            replace_siteinds!(mps_final, sites)
-            apply!(mps_final, lc_list, dagger=true)
-                
-            #err_total = 1-abs(dot(mps_final, mps))
-            #@show err_total
-            #flush(stdout)
-            fid_total = abs2(dot(mps_final, mps))
+            if is_mpo
+                mps_final = MPO(lc_list2, prime(trunc_siteinds, -1))
+                apply!(mps_final, lc_list, dagger=true)
+                ovlp_total = dot(mps_final, mps)/2^N
+            else
+                # finally create a 0 state and apply all the V to recreate the original state for final total error
+                mps_final = initialize_vac(N, trunc_siteinds)
+                apply!(mps_final, lc_list2)
+                replace_siteinds!(mps_final, sites)
+                apply!(mps_final, lc_list, dagger=true)
+                ovlp_total = dot(mps_final, mps)
+            end
+            fid_total = abs2(ovlp_total)
         end
 
         df = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
@@ -1372,6 +1412,7 @@ function invertMPSLiu(mps::MPS, max_tau::Int; folder="\\", start_tau = 1, maxite
         println("Convergence obtained with depth $tau, fidelity $fid_total.")
         tau += 1
         lc_list_old = lc_list
+        lc_list2_old = lc_list2
         ltg_map_old = ltg_map
 
         flush(stdout)
