@@ -411,3 +411,15 @@ function MPO(lightcone::Lightcone)
 
     return mpo
 end
+
+"Convert lightcone to MPO"
+# must be updated to account for the removal of identities?
+function MPO(lc_list::Vector{Lightcone}, sites::Vector{<:Index})
+    # convert lightcone to mpo by using the apply(mps, lightcone) function defined above on an MPO of delta tensors
+
+    mpo_list = [delta(ind, ind') for ind in sites]
+    mpo = MPO(mpo_list)
+    apply!(mpo, lc_list)
+
+    return mpo
+end
