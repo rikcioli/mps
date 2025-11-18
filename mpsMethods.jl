@@ -1382,8 +1382,7 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau 
                     _local_tau = max(2, _local_tau)
                 end
 
-                _prev_guess = (nruns_part2==1 && _local_tau>2) ? Array(lc_list2_old[l]) : nothing
-                results2 = invert(_reduced_mps, invertMethod; tau = _local_tau, site1_empty = _site1_empty, maxiter = maxiter, init_array = _prev_guess, nruns = nruns_part2)
+                results2 = invert(_reduced_mps, invertMethod; tau = _local_tau, site1_empty = _site1_empty, maxiter = maxiter, reuse_previous = false, nruns = nruns_part2)
 
                 lc_list2[l] = results2["lightcone"]
                 tau_list2[l] = results2["tau"]
