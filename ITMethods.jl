@@ -144,7 +144,7 @@ function entropy(psi::MPS, b::Integer)
 end
 
 "Truncate mps at position b until bond dimension of link (b, b+1) becomes 1"
-function cut!(psi::Union{MPS, MPO}, b::Integer; cutoff=1e-18)
+function cut!(psi::MPS, b::Integer; cutoff=1e-18)
     orthogonalize!(psi, b)
     indsb = uniqueinds(psi[b], psi[b+1])
     U, S, V = svd(psi[b]*psi[b+1], indsb, cutoff = cutoff)
@@ -155,6 +155,20 @@ function cut!(psi::Union{MPS, MPO}, b::Integer; cutoff=1e-18)
     projV = ITensor([1; [0 for _ in 1:v.space-1]], (w,v))
     psi[b] = U*projU
     psi[b+1] = projV*V
+end
+
+function cut!(mpo::MPO, b::Integer; cutoff=1e-18)
+    orthogonalize!(mpo, b)
+    norm_mpo = norm(mpo)
+    indsb = uniqueinds(mpo[b], mpo[b+1])
+    U, S, V = svd(mpo[b]*mpo[b+1], indsb, cutoff = cutoff)
+
+    u, v = inds(S)
+    w = Index(1)
+    projU = ITensor([norm_mpo; [0 for _ in 1:u.space-1]], (u,w))
+    projV = ITensor([1; [0 for _ in 1:v.space-1]], (w,v))
+    mpo[b] = U*projU
+    mpo[b+1] = projV*V
 end
 
 
