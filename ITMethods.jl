@@ -386,7 +386,7 @@ function splitinds(mpo::MPO)
     all_inds = reduce(vcat, siteinds(mpo))
     min_plev = minimum(plev(i) for i in all_inds)
 
-    input_inds = siteinds(mpo; plev = min_plev)
+    input_inds = inds(all_inds; plev = min_plev)
     output_inds = uniqueinds(all_inds, input_inds)
     return input_inds, output_inds
 end
