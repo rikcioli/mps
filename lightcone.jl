@@ -300,18 +300,20 @@ end
 # IMPORTANT: IT ASSUMES THE INDICES OF THE UNITARIES INSIDE LIGHTCONE ARE ALWAYS (N, N+1) AND THEIR PRIMES
 "Apply lightcone to MPS/MPO, from base to top. Lightcones' siteinds must match mps siteinds only in id, not in primelevel.
 If dagger is true, all the unitaries are conjugated and the order of application is inverted
-If an empty list is passed as entropy_arr karg it will be filled with half-subsystem entropies at each timestep"
+If an empty list is passed as entropy_arr karg it will be filled with half-subsystem entropies at each timestep
+(to be replaced with generic observer for time evolution if needed)"
 function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = false, cutoff = 1E-15, entropy_arr = nothing)
     N = length(mps)
+    #norm0 = norm(mps)
 
     if isa(mps, MPO)
-        ininds, outinds = splitinds(mps)
-        new_ininds = siteinds(ininds[1].space, N)
+        mps_ininds, mps_outinds = splitinds(mps)
+        new_ininds = siteinds(mps_ininds[1].space, N)
         for i in 1:N
-            replaceind!(mps[i], ininds[i], new_ininds[i])
+            replaceind!(mps[i], mps_ininds[i], new_ininds[i])
         end
         noprime!(mps)
-        sites = noprime(outinds)
+        sites = noprime(mps_outinds)
     else
         noprime!(mps)
         sites = siteinds(mps)
@@ -360,10 +362,10 @@ function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = fa
                     mps[b] = replaceinds(U, suminds, outinds)
                     mps[b+1] = replaceinds(S*V, suminds, outinds) 
         
-                    # norm1 = norm(mps)
-                    # if abs(norm0-norm1)>1E-14
-                    #     throw(DomainError(norm1, "MPS norm has changed during the application of lightcone of initpos $initpos"))
-                    # end
+                    #norm1 = norm(mps)
+                    #if abs(norm0-norm1)>1E-14
+                    #    throw(DomainError(norm1, "MPS norm has changed during the application of lightcone of initpos $initpos"))
+                    #end
                     if !isnothing(entropy_arr) && lc.sites_by_gate[k] == (div(size,2), div(size,2)+1) 
                         SvN = 0.0
                         for n in 1:dim(S, 1)
@@ -385,8 +387,8 @@ function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = fa
     end
     if isa(mps, MPO)
         for i in 1:N
-            replaceind!(mps[i], sites[i], ininds'[i])
-            replaceind!(mps[i], new_ininds[i], ininds[i])
+            replaceind!(mps[i], sites[i], mps_outinds[i])
+            replaceind!(mps[i], new_ininds[i], mps_ininds[i])
         end
     end
 end
