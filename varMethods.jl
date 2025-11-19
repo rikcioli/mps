@@ -521,8 +521,14 @@ function invert(mpo::MPO, invertMethod; kargs...)
     mpo = conj(mpo)
     sites, outinds = splitinds(mpo)
     d = sites[1].space
-    for i in eachindex(mpo)
-        mpo[i] /= d
+    if isapprox(norm(mpo), 1)   # if it's already normalized (can be if stable canonical form is needed)
+        for i in eachindex(mpo)
+            mpo[i] /= sqrt(d)
+        end
+    else
+        for i in eachindex(mpo)
+            mpo[i] /= d
+        end
     end
     # we (more than) normalize the mpo at this step in order not to need a normalization later
     # note that normalizing would require just a factor of sqrt(d)
