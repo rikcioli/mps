@@ -338,8 +338,7 @@ function _fgGlobalSweep(U_array::Vector{Matrix{T}}, lightcone::Lightcone, mpo::U
             gate_jl = filter(gate -> gate[:orientation] == "L", gates_j)[l]
             gate_jl_inds, gate_jl_pos = gate_jl[:inds], gate_jl[:pos]
             ddUjl_arr = Array{T}(env, gate_jl_inds)
-            @show reshape(ddUjl_arr, (d^2,d^2))
-            @show normalization
+
             ddUjl = conj(reshape(ddUjl_arr, (d^2, d^2)))/normalization #include rescaling if needed (for mpos)
             grad[gate_jl_pos] = ddUjl
         end
