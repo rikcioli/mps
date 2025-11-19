@@ -338,6 +338,8 @@ function _fgGlobalSweep(U_array::Vector{Matrix{T}}, lightcone::Lightcone, mpo::U
             gate_jl = filter(gate -> gate[:orientation] == "L", gates_j)[l]
             gate_jl_inds, gate_jl_pos = gate_jl[:inds], gate_jl[:pos]
             ddUjl_arr = Array{T}(env, gate_jl_inds)
+            @show reshape(ddUjl_arr, (d^2,d^2))
+            @show normalization
             ddUjl = conj(reshape(ddUjl_arr, (d^2, d^2)))/normalization #include rescaling if needed (for mpos)
             grad[gate_jl_pos] = ddUjl
         end
@@ -353,6 +355,7 @@ function _fgGlobalSweep(U_array::Vector{Matrix{T}}, lightcone::Lightcone, mpo::U
             rightmost_block = R_blocks[j]       #R_blocks starts from site 3
         end
     end
+
 
     # compute environment now that we contracted all blocks, so that we are effectively computing the overlap
     overlap = Array{T}(leftmost_block)[1]
@@ -517,8 +520,14 @@ function invert(mpo::MPO, invertMethod; kargs...)
     N = length(mpo)
     mpo = conj(mpo)
     sites, outinds = splitinds(mpo)
+    d = sites[1].space
+    for i in eachindex(mpo)
+        mpo[i] /= d
+    end
+    # we (more than) normalize the mpo at this step in order not to need a normalization later
+    # note that normalizing would require just a factor of sqrt(d)
 
-    results = invert(mpo, outinds, sites, invertMethod; overlap = 1, normalization = 2^N, kargs...) #DO NOT CHANGE NORMALIZATION, WE NEED FIDELITY TO BE NORM. TO 1 OR THE RATIO WON'T WORK
+    results = invert(mpo, outinds, sites, invertMethod; overlap = 1, normalization = 1, kargs...) #DO NOT CHANGE NORMALIZATION, WE NEED FIDELITY TO BE NORM. TO 1 OR THE RATIO WON'T WORK
     return results
 end
 
