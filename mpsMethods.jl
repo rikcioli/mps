@@ -769,8 +769,8 @@ function _fgLiu(U_array::Vector{Matrix{T}}, lightcone::Lightcone, reduced_mps::V
     cost = -overlap
     riem_grad = -riem_grad
     if is_mpo
-        cost/=2^(2*sizeA+(N-sizeA))
-        riem_grad/=2^(2*sizeA+(N-sizeA))
+        cost*=d^(N-sizeA)
+        riem_grad*=d^(N-sizeA)
     end
 
     return cost, riem_grad
@@ -783,19 +783,23 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
     
-    mps = copy(mps)
+    mps = deepcopy(mps)
     obj = typeof(mps)
     eps1 = eps/2 # error of the whole first part, that is inversion of reduced dm + truncation
     println("\nAttempting inversion of $obj with invertMPSLiu and errors:\neps1 = $eps1\neps_total = $eps")
     
     sites = reduce(vcat, siteinds(mps; plev=0))
+    d = sites[1].space
     is_mpo = isa(mps, MPO)
     if is_mpo
+        normalized = isapprox(norm(mps), 1)
+        @show normalized
         outinds = uniqueinds(reduce(vcat, siteinds(mps)), sites)
         contrinds = prime(sites, -1)
         for i in 1:N
             replaceind!(mps[i], sites[i], contrinds[i])
             replaceind!(mps[i], outinds[i], sites[i])
+            !normalized && (mps[i] /= sqrt(d))   # we normalize since we will need canonical form to be stable
         end
     end
 
@@ -867,16 +871,20 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1
         k_sites_list = []
         for (first_site, last_site) in rangesAB
             og_center = div(first_site+last_site, 2)
-            reduced_size = last_site-first_site+1
+            # reduced_size = last_site-first_site+1
             orthogonalize!(mps_copy, og_center)
 
             reduced_mps = mps_copy[first_site:last_site]
             if is_mpo
-                reduced_mps[og_center-first_site+1] /= sqrt(2^(N-reduced_size))
+                for i in eachindex(reduced_mps)
+                    reduced_mps[i] /= sqrt(d)       # at this point we don't need canonical form anymore, we can divide once more
+                end
             end
             push!(reduced_mps_list, reduced_mps)
             push!(k_sites_list, sites[first_site:last_site])
         end
+
+
 
         println("Inverting reduced density matrices...")
         # all variables defined inside each thread have a _
@@ -948,10 +956,7 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1
 
         mps_reconstr = deepcopy(mps_trunc)
         apply!(mps_reconstr, lc_list, dagger=true)
-        overlap1 = dot(mps, mps_reconstr)
-        if is_mpo
-            overlap1 /= 2^N
-        end
+        overlap1 = dot(mps, mps_reconstr)   # no normalization needed for mpo since it was normalized at the beginnin
         err1 = 1-abs(overlap1)
         @show err1
 
@@ -971,11 +976,6 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1
     # Now we proceed with inversion of all pure states
     #epsinv2 = eps2/length(rangesA)^2     # the scaling is 1/Nregions^2
     if is_mpo
-        orthogonalize!(mps_trunc, N)
-        for i in 1:N-1
-            mps_trunc[i] *= sqrt(2)     #we want each subregion to be a normalized unitary
-        end
-        mps_trunc[end] /= sqrt(2^(N-1))
         _, trunc_siteinds = splitinds(mps_trunc)
     else
         trunc_siteinds = siteinds(mps_trunc)
@@ -1063,26 +1063,19 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1
         end
 
         if is_mpo
+            # convert lc_list2 to mpo, this will recreate the product of unitaries
             mps_final = MPO(lc_list2, prime(trunc_siteinds, -1))
-            err2 = 1-abs(dot(mps_final, mps_trunc)/2^N)
-            @show err2
-
-            apply!(mps_final, lc_list, dagger=true)
-            err_total = 1-abs(dot(mps_final, mps)/2^N)
-            @show err_total
         else
-            # finally create a 0 state and apply all the V to recreate the original state for final total error
+            # create a 0 state and apply lc_list2, this will recreate the the product of states
             mps_final = initialize_vac(N, trunc_siteinds)
             apply!(mps_final, lc_list2)
-            err2 = 1-abs(dot(mps_final, mps_trunc))
-            @show err2
-
-            replace_siteinds!(mps_final, sites)
-            apply!(mps_final, lc_list, dagger=true)
-                
-            err_total = 1-abs(dot(mps_final, mps))
-            @show err_total
         end
+        err2 = 1-abs(dot(mps_final, mps_trunc))
+        @show err2
+
+        apply!(mps_final, lc_list, dagger=true)
+        err_total = 1-abs(dot(mps_final, mps))
+        @show err_total
 
         flush(stdout)
         if err_total < eps
