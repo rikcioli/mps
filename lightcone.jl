@@ -315,8 +315,9 @@ function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = fa
         noprime!(mps)
         sites = noprime(mps_outinds)
     else
+        oldsites = siteinds(mps)
         noprime!(mps)
-        sites = siteinds(mps)
+        sites = noprime(oldsites)
     end
 
     l = 1
@@ -389,6 +390,10 @@ function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = fa
         for i in 1:N
             replaceind!(mps[i], sites[i], mps_outinds[i])
             replaceind!(mps[i], new_ininds[i], mps_ininds[i])
+        end
+    else
+        for i in 1:N
+            replaceind!(mps[i], sites[i], oldsites[i])
         end
     end
 end
