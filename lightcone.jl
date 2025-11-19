@@ -405,7 +405,8 @@ function MPO(lightcone::Lightcone)
     # convert lightcone to mpo by using the apply(mps, lightcone) function defined above on an MPO of delta tensors
     sites = lightcone.siteinds
 
-    mpo_list = [delta(ind, ind') for ind in sites]
+    d = sites[1].space
+    mpo_list = [delta(ind, ind')/sqrt(d) for ind in sites]  # we divide by sqrt(d) to ensure normalization of mpo, to avoid overflow
     mpo = MPO(mpo_list)
     apply!(mpo, lightcone)
 
@@ -417,7 +418,8 @@ end
 function MPO(lc_list::Vector{Lightcone}, sites::Vector{<:Index})
     # convert lightcone to mpo by using the apply(mps, lightcone) function defined above on an MPO of delta tensors
 
-    mpo_list = [delta(ind, ind') for ind in sites]
+    d = sites[1].space
+    mpo_list = [delta(ind, ind')/sqrt(d) for ind in sites]  # we divide by sqrt(d) to ensure normalization of mpo, to avoid overflow
     mpo = MPO(mpo_list)
     apply!(mpo, lc_list)
 
