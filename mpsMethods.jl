@@ -871,7 +871,6 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1
         k_sites_list = []
         for (first_site, last_site) in rangesAB
             og_center = div(first_site+last_site, 2)
-            # reduced_size = last_site-first_site+1
             orthogonalize!(mps_copy, og_center)
 
             reduced_mps = mps_copy[first_site:last_site]
@@ -1100,26 +1099,33 @@ end
 function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau = 1, maxiter = 20000, nruns_part2 = 1, invertMethod = invertGlobalSweep)
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
+    
+    mps = deepcopy(mps)
+    sites = reduce(vcat, siteinds(mps; plev=0))
+    d = sites[1].space
 
     is_mpo = isa(mps, MPO)
+    if is_mpo
+        normalized = isapprox(norm(mps), 1)
+        @show normalized
+        for i in 1:N
+            !normalized && (mps[i] /= sqrt(d))   # we normalize since we will need canonical form to be stable
+        end
+    end
+    
     # First section is for product state truncation
     mps_prod = deepcopy(mps)
     for j in 1:N-1
         cut!(mps_prod, j)
     end
-    ovlp = dot(mps_prod, mps)
-    if is_mpo
-        ovlp /= 2^N
-    end
-    fid_prod = abs2(ovlp)
+    fid_prod = abs2(dot(mps_prod, mps))
 
     df = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
     push!(df, (N=N, fid=fid_prod, depth=0, time=0))
     jldsave(folder*"df_$(N)_0.jld2"; df)
 
 
-    sites = reduce(vcat, siteinds(mps; plev=0))
-    is_mpo = isa(mps, MPO)
+
     if is_mpo
         outinds = uniqueinds(reduce(vcat, siteinds(mps)), sites)
         contrinds = prime(sites, -1)
@@ -1200,12 +1206,13 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau 
             k_sites_list = []
             for (first_site, last_site) in rangesAB
                 og_center = div(first_site+last_site, 2)
-                reduced_size = last_site-first_site+1
                 orthogonalize!(mps_copy, og_center)
 
                 reduced_mps = mps_copy[first_site:last_site]
                 if is_mpo
-                    reduced_mps[og_center-first_site+1] /= sqrt(2^(N-reduced_size))
+                for i in eachindex(reduced_mps)
+                    reduced_mps[i] /= sqrt(d)       # at this point we don't need canonical form anymore, we can divide once more
+                end
                 end
                 push!(reduced_mps_list, reduced_mps)
                 push!(k_sites_list, sites[first_site:last_site])
@@ -1281,9 +1288,6 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau 
             mps_reconstr = deepcopy(mps_trunc)
             apply!(mps_reconstr, lc_list, dagger=true)
             overlap1 = dot(mps, mps_reconstr)
-            if is_mpo
-                overlap1 /= 2^N
-            end
             err1 = 1-abs(overlap1)
             @show err1
 
@@ -1292,11 +1296,6 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau 
             # Now we proceed with inversion of all pure states
 
             if is_mpo
-                orthogonalize!(mps_trunc, N)
-                for i in 1:N-1
-                    mps_trunc[i] *= sqrt(2)     #we want each subregion to be a normalized unitary
-                end
-                mps_trunc[end] /= sqrt(2^(N-1))
                 _, trunc_siteinds = splitinds(mps_trunc)
             else
                 trunc_siteinds = siteinds(mps_trunc)
@@ -1383,18 +1382,15 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau 
             end
 
             if is_mpo
+                # convert lc_list2 to mpo, this will recreate the product of unitaries
                 mps_final = MPO(lc_list2, prime(trunc_siteinds, -1))
-                apply!(mps_final, lc_list, dagger=true)
-                ovlp_total = dot(mps_final, mps)/2^N
             else
                 # finally create a 0 state and apply all the V to recreate the original state for final total error
                 mps_final = initialize_vac(N, trunc_siteinds)
                 apply!(mps_final, lc_list2)
-                replace_siteinds!(mps_final, sites)
-                apply!(mps_final, lc_list, dagger=true)
-                ovlp_total = dot(mps_final, mps)
             end
-            fid_total = abs2(ovlp_total)
+            apply!(mps_final, lc_list, dagger=true)
+            fid_total = abs2(dot(mps_final, mps))
         end
 
         df = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
