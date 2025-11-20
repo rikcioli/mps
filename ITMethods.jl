@@ -391,6 +391,47 @@ function project_tozero!(psi::MPS, positions::Vector{Int64})
 end
 
 
+function time_evolution_MPO(N::Int, t::Float64, dt::Float64)
+    cutoff = 1E-16
+    tau = dt
+    ttotal = t
+
+    # Make an array of 'site' indices
+    s = siteinds("S=1/2", N)
+    extra_s = siteinds("S=1/2", N)
+
+    # Make gates (1,2),(2,3),(3,4),...
+    gates = ITensor[]
+    for j in 1:(N - 1)
+        s1 = s[j]
+        s2 = s[j + 1]
+        extra_s1 = extra_s[j]
+        extra_s2 = extra_s[j+1]
+        hj =
+        op("Sz", s1)*op("Sz", s2)*op("I", extra_s1)*op("I", extra_s2) +
+        1 / 2 * op("S+", s1) * op("S-", s2)*op("I", extra_s1)*op("I", extra_s2) +
+        1 / 2 * op("S-", s1) * op("S+", s2)*op("I", extra_s1)*op("I", extra_s2)
+        Gj = exp(-im * tau / 2 * hj)
+        push!(gates, Gj)
+    end
+    # Include gates in reverse order too
+    # (N,N-1),(N-1,N-2),...
+    append!(gates, reverse(gates))
+
+    # Initialize identity MPO to act upon
+    psi = MPO([ITensor((1.0+0.0im)*Id/sqrt(2), s[i], extra_s[i]) for i in 1:N])
+
+    # then apply the gates to go to the next time
+    for t in 0.0:tau:ttotal
+        t≈ttotal && break
+
+        psi = ITensorMPS.apply(gates, psi; cutoff)
+        #normalize!(psi)
+    end
+
+    return psi, s, extra_s
+end
+
 
 
 ### CUSTOM MPO METHODS ###
