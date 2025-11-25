@@ -131,7 +131,7 @@ function contract(psi1::Union{MPS, Vector{ITensor}}, psi2::Union{MPS, Vector{ITe
 end
 
 
-function entropy(psi::MPS, b::Integer)  
+function entropy(psi::Union{MPS, MPO}, b::Integer)  
     orthogonalize!(psi, b)
     indsb = uniqueinds(psi[b], psi[b+1])
     U, S, V = svd(psi[b], indsb, cutoff = 1E-15)
@@ -157,6 +157,35 @@ function cut!(psi::MPS, b::Integer; cutoff=1e-18)
     psi[b+1] = projV*V
 end
 
+function cut(psi::MPS, pos_list::Vector{<:Integer}; cutoff=1e-18)
+    psi = deepcopy(psi)
+    cut_mps = MPS[]
+    prev_b = 1
+    for b in pos_list
+        orthogonalize!(psi, b+1)
+
+        norm_mpo = norm(psi)
+        indsb = uniqueinds(psi[b], psi[b+1])
+        U, S, V = svd(psi[b]*psi[b+1], indsb, cutoff = cutoff)
+
+        u, v = inds(S)
+        projU = ITensor([norm_mpo; [0 for _ in 1:u.space-1]], u)
+        projV = ITensor([1; [0 for _ in 1:v.space-1]], v)
+        psi[b] = U*projU
+        psi[b+1] = projV*V
+
+        if prev_b>1     # needed since orthogonalize will reintroduce a dim 1 link that we want to remove
+            links = linkinds(psi)
+            psi[prev_b] *= delta(links[prev_b-1])
+        end
+        push!(cut_mps, MPS(psi[prev_b:b]))
+        prev_b = b+1
+    end
+
+    push!(cut_mps, MPS(psi[prev_b:end]))
+    return cut_mps
+end
+
 function cut!(mpo::MPO, b::Integer; cutoff=1e-18)
     orthogonalize!(mpo, b)
     norm_mpo = norm(mpo)
@@ -169,6 +198,35 @@ function cut!(mpo::MPO, b::Integer; cutoff=1e-18)
     projV = ITensor([1; [0 for _ in 1:v.space-1]], (w,v))
     mpo[b] = U*projU
     mpo[b+1] = projV*V
+end
+
+function cut(mpo::MPO, pos_list::Vector{<:Integer}; cutoff=1e-18)
+    mpo = deepcopy(mpo)
+    cut_mpos = MPO[]
+    prev_b = 1
+    for b in pos_list
+        orthogonalize!(mpo, b+1)
+
+        norm_mpo = norm(mpo)
+        indsb = uniqueinds(mpo[b], mpo[b+1])
+        U, S, V = svd(mpo[b]*mpo[b+1], indsb, cutoff = cutoff)
+
+        u, v = inds(S)
+        projU = ITensor([norm_mpo; [0 for _ in 1:u.space-1]], u)
+        projV = ITensor([1; [0 for _ in 1:v.space-1]], v)
+        mpo[b] = U*projU
+        mpo[b+1] = projV*V
+
+        if prev_b>1     # needed since orthogonalize will reintroduce a dim 1 link that we want to remove
+            links = linkinds(mpo)
+            mpo[prev_b] *= delta(links[prev_b-1])
+        end
+        push!(cut_mpos, MPO(mpo[prev_b:b]))
+        prev_b = b+1
+    end
+
+    push!(cut_mpos, MPO(mpo[prev_b:end]))
+    return cut_mpos
 end
 
 
@@ -270,9 +328,9 @@ function initialize_ising(N::Integer, hx::Real, hz::Real; nsweeps = 10, maxdim =
 
     os = OpSum()
     for j=1:N-1
-      os += -1.,"Z",j,"Z",j+1
-      os += -hx,"X",j
-      os += -hz,"Z",j
+        os += -1.,"Z",j,"Z",j+1
+        os += -hx,"X",j
+        os += -hz,"Z",j
     end
     os += -hx,"X",N
     os += -hz,"Z",N
@@ -390,46 +448,62 @@ function project_tozero!(psi::MPS, positions::Vector{Int64})
     end
 end
 
+function gate_Ising(tau::Float64, pair; extra_pair = nothing)
+    hj_list = [op("Sz", pair[1])*op("Sz", pair[2]),
+        1 / 2 * op("S+", pair[1]) * op("S-", pair[2]),
+        1 / 2 * op("S-", pair[1]) * op("S+", pair[2])]
+    if !isnothing(extra_pair)
+        for i in eachindex(hj_list)
+            hj_list[i] *= op("I", extra_pair[1])*op("I", extra_pair[2])
+        end
+    end
+    hj = sum(hj_list)
+    Gj = exp(-im * tau / 2 * hj)
+    return Gj
+end
 
-function time_evolution_MPO(N::Int, t::Float64, dt::Float64)
-    cutoff = 1E-16
-    tau = dt
-    ttotal = t
+function gate_NNNI(tau::Float64, trio; last_gate=false)
+    hj_list = [op("X", trio[1]) * op("I", trio[2]) * op("I", trio[3]),
+            op("Z", trio[1]) * op("Z", trio[2]) * op("I", trio[3]),
+            op("Z", trio[1]) * op("I", trio[2]) * op("Z", trio[3])]
+    # if last_gate
+    #     push!(hj_list, op("I", trio[1]) * op("X", trio[2]) * op("I", trio[3]))
+    #     push!(hj_list, op("I", trio[1]) * op("Z", trio[2]) * op("Z", trio[3]))
+    #     push!(hj_list, op("I", trio[1]) * op("I", trio[2]) * op("X", trio[3]))
+    # end
+
+    hj = sum(hj_list)
+    Gj = exp(-im * tau / 2 * hj)
+    return Gj
+end
+
+
+function time_evolution_MPO(N::Int, ttotal::Real, dt::Real; cutoff=1e-16)
 
     # Make an array of 'site' indices
-    s = siteinds("S=1/2", N)
-    extra_s = siteinds("S=1/2", N)
+    s = siteinds("Qubit", N)
+    extra_s = siteinds("Qubit", N)
 
     # Make gates (1,2),(2,3),(3,4),...
-    gates = ITensor[]
-    for j in 1:(N - 1)
-        s1 = s[j]
-        s2 = s[j + 1]
-        extra_s1 = extra_s[j]
-        extra_s2 = extra_s[j+1]
-        hj =
-        op("Sz", s1)*op("Sz", s2)*op("I", extra_s1)*op("I", extra_s2) +
-        1 / 2 * op("S+", s1) * op("S-", s2)*op("I", extra_s1)*op("I", extra_s2) +
-        1 / 2 * op("S-", s1) * op("S+", s2)*op("I", extra_s1)*op("I", extra_s2)
-        Gj = exp(-im * tau / 2 * hj)
-        push!(gates, Gj)
-    end
-    # Include gates in reverse order too
-    # (N,N-1),(N-1,N-2),...
+    gates = [gate_NNNI(dt, s[j:j+2]; last_gate = (j==N-2)) for j in 1:N-2]
     append!(gates, reverse(gates))
 
     # Initialize identity MPO to act upon
     psi = MPO([ITensor((1.0+0.0im)*Id/sqrt(2), s[i], extra_s[i]) for i in 1:N])
 
     # then apply the gates to go to the next time
-    for t in 0.0:tau:ttotal
+    for t in 0.0:dt:ttotal
         t≈ttotal && break
 
-        psi = ITensorMPS.apply(gates, psi; cutoff)
+        psi = ITensorMPS.apply(gates, psi; cutoff=cutoff)
         #normalize!(psi)
     end
 
-    return psi, s, extra_s
+    for i in eachindex(psi)
+        psi[i] = replaceind(psi[i], s[i], extra_s[i]')
+    end
+
+    return psi
 end
 
 
