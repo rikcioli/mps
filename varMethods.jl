@@ -491,7 +491,7 @@ function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Inde
             best_guess = Array(results_array[err_min_pos]["lightcone"])
         end
         tau += 1
-        if tau > 5 && all(x->x==besterr_history[1], besterr_history)
+        if tau-start_tau > 4 && all(x->x==besterr_history[1], besterr_history)
             println("Last 5 attempts led to the same 0 overlap, gradient is too small to resolve")
             return
         end
