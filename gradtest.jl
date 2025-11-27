@@ -3,8 +3,8 @@ import .MPSMethods as mt
 import Plots
 using ITensors, ITensorMPS
 using LaTeXStrings, LinearAlgebra
-using Zygote
-using HDF5
+#using Zygote
+#using HDF5
 
 
 
@@ -37,16 +37,24 @@ function testGrad(genPoint::Function, genTanVec::Function, computeCostGrad::Func
 end
 
 
-N = 8
+N = 10
 sites = siteinds("Qubit",N)
-#mps = mt.random_mps(sites, linkdims=2)
-lc = mt.newLightcone(sites, 2)
+mps = mt.random_mps(sites, linkdims=2)
+lc = mt.newLightcone(sites, 2; lightbounds=(false,false), site1_empty=true);
 n = lc.n_unitaries
 
-test = [mt.random_unitary(2) for _ in 1:N]
-#mpo = MPO([ITensor((1.0+0.0im)*mt.Id, sites[i]', sites[i]) for i in 1:N])
 
-mt.invertMPSLiu(mpo, mt.invertGlobalSweep)
+mpo = MPO([ITensor((1.0+0.0im)*mt.Id, sites[i]', sites[i]) for i in 1:N])
+mpo = MPO(lc)
+
+mpo, outinds, ininds = mt.time_evolution_MPO(N, 0.1, 0.01)
+for i in eachindex(mpo)
+    mpo[i] = replaceind(mpo[i], outinds[i], ininds[i]')
+end
+
+#mt.invert(mpo, mt.invertGlobalSweep; eps=0.5)
+
+mt.invertMPSLiu(mpo, 3)
 
 sites = reduce(vcat, siteinds(mpo; plev=0))
 is_mpo = isa(mpo, MPO)
@@ -58,6 +66,7 @@ if is_mpo
         replaceind!(mpo[i], outinds[i], sites[i])
     end
 end
+
 
 plot = testGrad(() -> genPoint(n), U -> genTanVec(U, n), arrU -> mt._fgLiu(arrU, lc, mpo[1:N]; is_mpo=true), mt.inner, mt.retract)
 

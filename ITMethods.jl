@@ -478,7 +478,7 @@ function gate_NNNI(tau::Float64, trio; last_gate=false)
 end
 
 
-function time_evolution_MPO(N::Int, ttotal::Real, dt::Real; cutoff=1e-16)
+function time_evolution_MPO(N::Int, ttotal::Real, dt::Real; cutoff=1e-12)
 
     # Make an array of 'site' indices
     s = siteinds("Qubit", N)

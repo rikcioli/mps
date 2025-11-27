@@ -227,9 +227,19 @@ function test3(Nmin::Integer, Nmax::Integer)
     return
 end
 
-let
-    test3(4, 12)
+N = 100
+
+results = let N=N
+    sites = siteinds("Qubit",N)
+    lc = mt.newLightcone(sites, 3; lightbounds=(false,false), site1_empty=false);
+    psi0 = mt.initialize_vac(N, sites)
+    mt.apply!(psi0, lc)
+
+    results = mt.invertMPSLiu(psi0, mt.invertGlobalSweep; eps=0.01)
+    results
 end
+
+results 
 
 #mps, reslist, entropy_mps, entropy_tau = test2(8,2)
 #true_ent, reconstr_entr, reconstr_errors = test3(10, 10, 4)

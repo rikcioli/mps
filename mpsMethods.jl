@@ -1412,8 +1412,9 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau 
 end
 
 
-function invertMPS1(mps::MPS, pathname::String; ansatz_eps = 0.5, invertMethod = invertGlobalSweep, maxiter = 20000)
+function invertMPS1(mps::Union{MPS, MPO}, pathname::String; ansatz_eps = 0.5, invertMethod = invertGlobalSweep, maxiter = 20000)
     N = length(mps)
+    is_mpo = isa(mps, MPO)
 
     dt1 = @elapsed results = invertMPSLiu(mps, invertMethod; eps = ansatz_eps, maxiter = maxiter)
     jldsave(pathname*"time_invert1_$(N)_$(ansatz_eps).jld2"; dt1)
@@ -1478,8 +1479,12 @@ function invertMPS1(mps::MPS, pathname::String; ansatz_eps = 0.5, invertMethod =
         end
     end
 
-    zero = initialize_vac(N, sites)
-    apply!(zero, lightcone)
+    if is_mpo
+        zero = MPO(lightcone)
+    else
+        zero = initialize_vac(N, sites)
+        apply!(zero, lightcone)
+    end
 
     #zero2 = initialize_vac(N, sites)
     #apply!(zero2, lc_list2)
@@ -1496,9 +1501,15 @@ function invertMPS1(mps::MPS, pathname::String; ansatz_eps = 0.5, invertMethod =
     jldsave(pathname*"$(N)_params.jld2"; params)
 
     # save original mps to file
-    f = h5open(pathname*"$(N)_mps.h5","w")
-    write(f,"psi",mps)
-    close(f)
+    if is_mpo
+        f = h5open(pathname*"$(N)_mpu.h5","w")
+        write(f,"mpu",mps)
+        close(f)
+    else
+        f = h5open(pathname*"$(N)_mps.h5","w")
+        write(f,"psi",mps)
+        close(f)
+    end
     
     return
 end
@@ -1522,7 +1533,8 @@ function invertMPS2(pathname::String, N::Integer, eps::Float64; invertMethod = i
                                 eps = eps, 
                                 maxiter = maxiter,
                                 start_tau = start_tau, 
-                                init_array = best_guess)
+                                init_array = best_guess,
+                                reuse_previous = true)
     taufinal = results_final["tau"]
     jldsave(pathname*"invert_$(N)_$(eps).jld2"; taufinal)
     jldsave(pathname*"$(N)_$(eps)_result.jld2"; results_final)
@@ -1620,6 +1632,7 @@ function invertMPSTrunc(pathname::String, N_list::Vector{<:Integer}, eps_list::V
 
     return
 end
+
 
 
 
