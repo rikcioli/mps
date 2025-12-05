@@ -779,7 +779,7 @@ end
 
 
 "Invert state up to error upper bounded by eps"
-function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; folder = "", start_tau = 1, eps = 1e-2, maxiter = 20000, nruns_part2 = 1)
+function invertMPSLiu(mps::Union{MPS,MPO}, eps::Float64; invertMethod = invertGlobalSweep, folder = "", start_tau = 1, maxiter = 20000, nruns_part2 = 1)
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
     
@@ -1158,8 +1158,8 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; folder = "", 
         apply!(zero, lightcone)
     end
 
-    fid = abs(dot(zero, mps_final))
-    @assert isapprox(fid, 1)    #checks that the total lightcone reconstruction works
+    ovlp = abs(dot(zero, mps_final))
+    @assert isapprox(ovlp, 1)    #checks that the total lightcone reconstruction works
 
     # save lightcone to file
     best_guess = Array(lightcone)
@@ -1179,7 +1179,7 @@ end
 
 
 "Function to test the scaling of the fidelity for the initialization"
-function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau = 1, maxiter = 20000, nruns_part2 = 1, invertMethod = invertGlobalSweep)
+function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 1, maxiter = 20000, nruns_part2 = 1, invertMethod = invertGlobalSweep)
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
     
@@ -1206,7 +1206,6 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau 
     df = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
     push!(df, (N=N, fid=fid_prod, depth=0, time=0))
     jldsave(folder*"df_$(N)_0.jld2"; df)
-
 
 
     if is_mpo
@@ -1474,12 +1473,80 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau 
                 apply!(mps_final, lc_list2)
             end
             apply!(mps_final, lc_list, dagger=true)
+
             fid_total = abs2(dot(mps_final, mps))
+            err_total = 1-sqrt(fid_total)
 
-            results = Dict([("lc1", lc_list), ("tau1", tau), ("errinv1", err_list), ("lc2", lc_list2), ("tau2", tau_list2), ("errinv2", err_list2), 
-                        ("mps_final", mps_final), ("err1", err1), ("err2", err2), ("err_total", err_total), ("ltg_map", ltg_map), ("ltg_map2", ltg_map2)])
+            
+            # Reconstruct and return the full ansatz
+            tau1 = tau
+            tau2 = maximum(tau_list2)
+            tau = tau1+tau2
+            sites = siteinds(mps_final)
+            
+            reg1_size = lc_list2[1].size
+            reduced = isodd(tau2)    # WILL ONLY WORK AS LONG AS SPACING OF THE LC_LIST1 IS EVEN, WHICH IS THE DEFAULT IN OPTLIU AND CANNOT BE MODIFIED
+            if reduced
+                tau2 -= 1
+                tau -= 1
+            end
 
-            jldsave(folder*"results_$(N)_$(tau).jld2"; results)
+            site1_empty = isodd(reg1_size)
+            lightcone = newLightcone(sites, tau; U_array = Vector{Matrix{ComplexF64}}(undef, 0), lightbounds = (false, false), site1_empty = site1_empty)
+
+            for j in 1:N
+                # extract gates from second part (i.e. those that need to act first on 0)
+                reg_type2, pos2, local_site2 = ltg_map2[j]
+                lc_local2 = lc_list2[pos2]
+                gates2 = [gate for gate in lc_local2.gates_by_site[local_site2] if gate[:orientation] == "R"]
+                unitaries = [Matrix(lc_local2, gate[:pos]) for gate in gates2]   #take the unitaries from lc_list2
+                depths = [gate[:depth] for gate in gates2]
+
+                reg_type, pos, local_site = ltg_map[j]
+                if reg_type == "AB"
+                    lc_local = lc_list[pos]
+                    gates = [gate for gate in lc_local.gates_by_site[local_site] if gate[:orientation] == "R"]
+                    if !isempty(gates)
+                        unitaries1 = [copy((Matrix(lc_local, gate[:pos]))') for gate in gates]   #take the unitaries from lc_list
+                        depths1 = [tau1+1-gate[:depth]+tau2 for gate in gates]
+
+                        if !isempty(depths)
+                            if depths[end] == depths1[end]  # we can remove the last gate of lc2 by multipliying it with the one from lc1 above
+                                unitaries1[end] = unitaries1[end]*unitaries[end]
+                                unitaries = unitaries[1:end-1]
+                                depths = depths[1:end-1]
+                            end
+                        end
+                        
+                        unitaries = [unitaries; unitaries1]
+                        depths = [depths; depths1]
+                    end
+                end
+
+                for m in eachindex(depths)
+                    U = unitaries[m]
+                    tau_U = depths[m]
+                    updateLightcone!(lightcone, U, (j, tau_U))
+                end
+            end
+
+            if is_mpo
+                zero = MPO(lightcone)
+            else
+                zero = initialize_vac(N, sites)
+                apply!(zero, lightcone)
+            end
+
+            ovlp = abs(dot(zero, mps_final))
+            @assert isapprox(ovlp, 1)    #checks that the total lightcone reconstruction works
+
+            # save lightcone to file
+            best_guess = Array(lightcone)
+            jldsave(folder*"$(N)_$(tau)_ansatz.jld2"; best_guess)
+
+            # save important info for subsequent optimization to file
+            params = Dict([("N", N), ("ansatz_eps", err_total), ("site1_empty", site1_empty), ("start_tau", tau)])
+            jldsave(folder*"$(N)_$(tau)_params.jld2"; params)
         end
 
         df = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
