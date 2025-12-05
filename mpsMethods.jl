@@ -779,7 +779,7 @@ end
 
 
 "Invert state up to error upper bounded by eps"
-function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1, eps = 1e-2, maxiter = 20000, nruns_part2 = 1)
+function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; folder = "", start_tau = 1, eps = 1e-2, maxiter = 20000, nruns_part2 = 1)
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
     
@@ -1086,9 +1086,92 @@ function invertMPSLiu(mps::Union{MPS,MPO}, invertMethod::Function; start_tau = 1
         end
         flush(stdout)
     end
+
+    results = Dict([("lc1", lc_list), ("tau1", tau), ("errinv1", err_list), 
+                    ("lc2", lc_list2), ("tau2", tau_list2), ("errinv2", err_list2), 
+                    ("mps_final", mps_final), ("err1", err1), ("err2", err2), 
+                    ("err_total", err_total), ("ltg_map", ltg_map), ("ltg_map2", ltg_map2)])
+
+    # Reconstruct and return the full ansatz
+
+    tau1 = results["tau1"]
+    tau2 = maximum(results["tau2"])
+    tau = tau1+tau2
+    lc_list = results["lc1"]    # REMEMBER WE MUST TAKE THE DAGGER OF THIS BEFORE APPLYING IT TO ZERO
+    lc_list2 = results["lc2"]
+    ltg_map = results["ltg_map"]
+    ltg_map2 = results["ltg_map2"]
+
+    mps_final = results["mps_final"]
+    sites = siteinds(mps_final)
     
-    return Dict([("lc1", lc_list), ("tau1", tau), ("errinv1", err_list), ("lc2", lc_list2), ("tau2", tau_list2), 
-    ("errinv2", err_list2), ("mps_final", mps_final), ("err1", err1), ("err2", err2), ("err_total", err_total), ("ltg_map", ltg_map), ("ltg_map2", ltg_map2)])
+    reg1_size = lc_list2[1].size
+    reduced = isodd(tau2)    # WILL ONLY WORK AS LONG AS SPACING OF THE LC_LIST1 IS EVEN, WHICH IS THE DEFAULT IN OPTLIU AND CANNOT BE MODIFIED
+    if reduced
+        tau2 -= 1
+        tau -= 1
+    end
+
+    site1_empty = isodd(reg1_size)
+    lightcone = newLightcone(sites, tau; U_array = Vector{Matrix{ComplexF64}}(undef, 0), lightbounds = (false, false), site1_empty = site1_empty)
+
+    for j in 1:N
+        # extract gates from second part (i.e. those that need to act first on 0)
+        reg_type2, pos2, local_site2 = ltg_map2[j]
+        lc_local2 = lc_list2[pos2]
+        gates2 = [gate for gate in lc_local2.gates_by_site[local_site2] if gate[:orientation] == "R"]
+        unitaries = [Matrix(lc_local2, gate[:pos]) for gate in gates2]   #take the unitaries from lc_list2
+        depths = [gate[:depth] for gate in gates2]
+
+        reg_type, pos, local_site = ltg_map[j]
+        if reg_type == "AB"
+            lc_local = lc_list[pos]
+            gates = [gate for gate in lc_local.gates_by_site[local_site] if gate[:orientation] == "R"]
+            if !isempty(gates)
+                unitaries1 = [copy((Matrix(lc_local, gate[:pos]))') for gate in gates]   #take the unitaries from lc_list
+                depths1 = [tau1+1-gate[:depth]+tau2 for gate in gates]
+
+                if !isempty(depths)
+                    if depths[end] == depths1[end]  # we can remove the last gate of lc2 by multipliying it with the one from lc1 above
+                        unitaries1[end] = unitaries1[end]*unitaries[end]
+                        unitaries = unitaries[1:end-1]
+                        depths = depths[1:end-1]
+                    end
+                end
+                
+                unitaries = [unitaries; unitaries1]
+                depths = [depths; depths1]
+            end
+        end
+
+        for m in eachindex(depths)
+            U = unitaries[m]
+            tau_U = depths[m]
+            updateLightcone!(lightcone, U, (j, tau_U))
+        end
+    end
+
+    if is_mpo
+        zero = MPO(lightcone)
+    else
+        zero = initialize_vac(N, sites)
+        apply!(zero, lightcone)
+    end
+
+    fid = abs(dot(zero, mps_final))
+    @assert isapprox(fid, 1)    #checks that the total lightcone reconstruction works
+
+    # save lightcone to file
+    best_guess = Array(lightcone)
+    jldsave(folder*"$(N)_ansatz.jld2"; best_guess)
+
+    # save important info for subsequent optimization to file
+    params = Dict([("N", N), ("ansatz_eps", eps), ("site1_empty", site1_empty), ("start_tau", tau)])
+    jldsave(folder*"$(N)_params.jld2"; params)
+
+    results["lc"] = lightcone
+    
+    return results
     # NOTE: lc_list is the lightcone that inverts the state to 0, so in order to create the state from 0
     # you need to take the DAGGER; this can be done via apply!(state, lc_list, dagger = true)
 
@@ -1141,6 +1224,7 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau 
     lc_list2_old = Array{Lightcone, 1}()
     while tau <= max_tau
         
+        local results
         dt = @elapsed begin
             local mps_trunc, boundaries, rangesA, err_list, err1, fid_total
 
@@ -1391,6 +1475,11 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="\\", start_tau 
             end
             apply!(mps_final, lc_list, dagger=true)
             fid_total = abs2(dot(mps_final, mps))
+
+            results = Dict([("lc1", lc_list), ("tau1", tau), ("errinv1", err_list), ("lc2", lc_list2), ("tau2", tau_list2), ("errinv2", err_list2), 
+                        ("mps_final", mps_final), ("err1", err1), ("err2", err2), ("err_total", err_total), ("ltg_map", ltg_map), ("ltg_map2", ltg_map2)])
+
+            jldsave(folder*"results_$(N)_$(tau).jld2"; results)
         end
 
         df = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
@@ -1525,14 +1614,13 @@ function invertMPS2(pathname::String, N::Integer, eps::Float64; invertMethod = i
     f = h5open(pathname*"$(N)_mps.h5","r")
     mps = read(f,"psi",MPS)
     close(f)
-    start_tau = params["start_tau"]
 
     dt2 = @elapsed results_final = invert(mps, invertMethod; 
                                 nruns = 1, 
                                 site1_empty = params["site1_empty"], 
                                 eps = eps, 
                                 maxiter = maxiter,
-                                start_tau = start_tau, 
+                                start_tau = params["start_tau"], 
                                 init_array = best_guess,
                                 reuse_previous = true)
     taufinal = results_final["tau"]
