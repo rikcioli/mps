@@ -779,7 +779,7 @@ end
 
 
 "Invert state up to error upper bounded by eps"
-function invertMPSLiu(mps::Union{MPS,MPO}, eps::Float64; invertMethod = invertGlobalSweep, folder = "", start_tau = 1, maxiter = 20000, nruns_part2 = 1)
+function invertMPSLiu(mps::Union{MPS,MPO}, eps::Float64; invertMethod = invertGlobalSweep, folder = "", start_tau = 1, maxiter = 20000, nruns_part2 = 1, region_factor = 0)
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
     
@@ -814,11 +814,11 @@ function invertMPSLiu(mps::Union{MPS,MPO}, eps::Float64; invertMethod = invertGl
 
         # for a given tau, we already know that both the sizeAB and the spacing have to be chosen
         # so that the final state is a tensor product of pure states
-        sizeAB = 6*(tau-1)
-        spacing = 2*(tau-1)
+        sizeAB = (6+2*region_factor)*(tau-1)
+        spacing = (2+2*region_factor)*(tau-1)
         if tau == 1
-            sizeAB = 2
-            spacing = 2
+            sizeAB = 2+2*region_factor
+            spacing = 2+2*region_factor
         end
 
         if sizeAB >= N
@@ -1163,11 +1163,11 @@ function invertMPSLiu(mps::Union{MPS,MPO}, eps::Float64; invertMethod = invertGl
 
     # save lightcone to file
     best_guess = Array(lightcone)
-    jldsave(folder*"$(N)_ansatz.jld2"; best_guess)
+    jldsave(folder*"$(N)_$(eps)_ansatz.jld2"; best_guess)
 
     # save important info for subsequent optimization to file
     params = Dict([("N", N), ("ansatz_eps", eps), ("site1_empty", site1_empty), ("start_tau", tau)])
-    jldsave(folder*"$(N)_params.jld2"; params)
+    jldsave(folder*"$(N)_$(eps)_params.jld2"; params)
 
     results["lc"] = lightcone
     
@@ -1179,7 +1179,7 @@ end
 
 
 "Function to test the scaling of the fidelity for the initialization"
-function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 1, maxiter = 20000, nruns_part2 = 1, invertMethod = invertGlobalSweep)
+function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 1, maxiter = 20000, nruns_part2 = 1, invertMethod = invertGlobalSweep, region_factor = 0)
     N = length(mps)
     isodd(N) && throw(DomainError(N, "Choose an even number for N"))
     
@@ -1222,7 +1222,6 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 
     lc_list_old = Array{Lightcone, 1}()
     lc_list2_old = Array{Lightcone, 1}()
     while tau <= max_tau
-        
         local results
         dt = @elapsed begin
             local mps_trunc, boundaries, rangesA, err_list, err1, fid_total
@@ -1232,11 +1231,11 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 
 
             # for a given tau, we already know that both the sizeAB and the spacing have to be chosen
             # so that the final state is a tensor product of pure states
-            sizeAB = 6*(tau-1)
-            spacing = 2*(tau-1)
+            sizeAB = (6+2*region_factor)*(tau-1)
+            spacing = (2+2*region_factor)*(tau-1)
             if tau == 1
-                sizeAB = 2
-                spacing = 2
+                sizeAB = 2+2*region_factor
+                spacing = 2+2*region_factor
             end
 
             if sizeAB >= N
@@ -1477,22 +1476,23 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 
             fid_total = abs2(dot(mps_final, mps))
             err_total = 1-sqrt(fid_total)
 
-            
+            @show tau
+
             # Reconstruct and return the full ansatz
             tau1 = tau
             tau2 = maximum(tau_list2)
-            tau = tau1+tau2
+            tau_tot = tau1+tau2
             sites = siteinds(mps_final)
             
             reg1_size = lc_list2[1].size
             reduced = isodd(tau2)    # WILL ONLY WORK AS LONG AS SPACING OF THE LC_LIST1 IS EVEN, WHICH IS THE DEFAULT IN OPTLIU AND CANNOT BE MODIFIED
             if reduced
                 tau2 -= 1
-                tau -= 1
+                tau_tot -= 1
             end
 
             site1_empty = isodd(reg1_size)
-            lightcone = newLightcone(sites, tau; U_array = Vector{Matrix{ComplexF64}}(undef, 0), lightbounds = (false, false), site1_empty = site1_empty)
+            lightcone = newLightcone(sites, tau_tot; U_array = Vector{Matrix{ComplexF64}}(undef, 0), lightbounds = (false, false), site1_empty = site1_empty)
 
             for j in 1:N
                 # extract gates from second part (i.e. those that need to act first on 0)
@@ -1542,16 +1542,17 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 
 
             # save lightcone to file
             best_guess = Array(lightcone)
-            jldsave(folder*"$(N)_$(tau)_ansatz.jld2"; best_guess)
+            jldsave(folder*"$(N)_$(tau_tot)_ansatz.jld2"; best_guess)
 
             # save important info for subsequent optimization to file
-            params = Dict([("N", N), ("ansatz_eps", err_total), ("site1_empty", site1_empty), ("start_tau", tau)])
-            jldsave(folder*"$(N)_$(tau)_params.jld2"; params)
+            params = Dict([("N", N), ("ansatz_eps", err_total), ("site1_empty", site1_empty), ("start_tau", tau_tot)])
+            jldsave(folder*"$(N)_$(tau_tot)_params.jld2"; params)
         end
 
-        df = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
+        df_tau = DataFrame(N=Int[], fid=Float64[], depth=Int[], time=Float64[])
         push!(df, (N=N, fid=fid_total, depth=tau, time=dt))
-        jldsave(folder*"df_$(N)_$(tau).jld2"; df)
+        push!(df_tau, (N=N, fid=fid_total, depth=tau, time=dt))
+        jldsave(folder*"df_$(N)_$(tau).jld2"; df_tau)
 
         println("Convergence obtained with depth $tau, fidelity $fid_total.")
         tau += 1
@@ -1563,111 +1564,8 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 
 
     end
     
-    return 
+    return df
 
-end
-
-
-function invertMPS1(mps::Union{MPS, MPO}, pathname::String; ansatz_eps = 0.5, invertMethod = invertGlobalSweep, maxiter = 20000)
-    N = length(mps)
-    is_mpo = isa(mps, MPO)
-
-    dt1 = @elapsed results = invertMPSLiu(mps, invertMethod; eps = ansatz_eps, maxiter = maxiter)
-    jldsave(pathname*"time_invert1_$(N)_$(ansatz_eps).jld2"; dt1)
-
-    tau1 = results["tau1"]
-    tau2 = maximum(results["tau2"])
-    tau = tau1+tau2
-    lc_list = results["lc1"]    # REMEMBER WE MUST TAKE THE DAGGER OF THIS BEFORE APPLYING IT TO ZERO
-    lc_list2 = results["lc2"]
-    ltg_map = results["ltg_map"]
-    ltg_map2 = results["ltg_map2"]
-
-    @show ltg_map, ltg_map2, tau1, tau2
-
-    mps_final = results["mps_final"]
-    sites = siteinds(mps_final)
-    
-    reg1_size = lc_list2[1].size
-    reduced = isodd(tau2)    # WILL ONLY WORK AS LONG AS SPACING OF THE LC_LIST1 IS EVEN, WHICH IS THE DEFAULT IN OPTLIU AND CANNOT BE MODIFIED
-    if reduced
-        tau2 -= 1
-        tau -= 1
-    end
-
-    site1_empty = isodd(reg1_size)
-    lightcone = newLightcone(sites, tau; U_array = Vector{Matrix{ComplexF64}}(undef, 0), lightbounds = (false, false), site1_empty = site1_empty)
-
-    for j in 1:N
-        # extract gates from second part (i.e. those that need to act first on 0)
-        reg_type2, pos2, local_site2 = ltg_map2[j]
-        lc_local2 = lc_list2[pos2]
-        gates2 = [gate for gate in lc_local2.gates_by_site[local_site2] if gate[:orientation] == "R"]
-        unitaries = [Matrix(lc_local2, gate[:pos]) for gate in gates2]   #take the unitaries from lc_list2
-        depths = [gate[:depth] for gate in gates2]
-
-        reg_type, pos, local_site = ltg_map[j]
-        if reg_type == "AB"
-            lc_local = lc_list[pos]
-            gates = [gate for gate in lc_local.gates_by_site[local_site] if gate[:orientation] == "R"]
-            if !isempty(gates)
-                unitaries1 = [copy((Matrix(lc_local, gate[:pos]))') for gate in gates]   #take the unitaries from lc_list
-                depths1 = [tau1+1-gate[:depth]+tau2 for gate in gates]
-
-                if !isempty(depths)
-                    if depths[end] == depths1[end]  # we can remove the last gate of lc2 by multipliying it with the one from lc1 above
-                        @show j
-                        unitaries1[end] = unitaries1[end]*unitaries[end]
-                        unitaries = unitaries[1:end-1]
-                        depths = depths[1:end-1]
-                    end
-                end
-                
-                unitaries = [unitaries; unitaries1]
-                depths = [depths; depths1]
-            end
-        end
-
-        for m in eachindex(depths)
-            U = unitaries[m]
-            tau_U = depths[m]
-            updateLightcone!(lightcone, U, (j, tau_U))
-        end
-    end
-
-    if is_mpo
-        zero = MPO(lightcone)
-    else
-        zero = initialize_vac(N, sites)
-        apply!(zero, lightcone)
-    end
-
-    #zero2 = initialize_vac(N, sites)
-    #apply!(zero2, lc_list2)
-
-    fid = abs(dot(zero, mps_final))
-    @assert isapprox(fid, 1)    #checks that the total lightcone reconstruction works
-
-    # save lightcone to file
-    best_guess = Array(lightcone)
-    jldsave(pathname*"$(N)_ansatz.jld2"; best_guess)
-
-    # save important info to file
-    params = Dict([("N", N), ("ansatz_eps", ansatz_eps), ("site1_empty", site1_empty), ("start_tau", tau)])
-    jldsave(pathname*"$(N)_params.jld2"; params)
-
-    # save original mps to file
-    if is_mpo
-        f = h5open(pathname*"$(N)_mpu.h5","w")
-        write(f,"mpu",mps)
-        close(f)
-    else
-        f = h5open(pathname*"$(N)_mps.h5","w")
-        write(f,"psi",mps)
-        close(f)
-    end
-    
-    return
 end
 
 
@@ -1731,15 +1629,52 @@ function invertMPS2(pathname::String, N_list::Vector{<:Integer}, eps_list::Vecto
     return
 end
 
-function invertMPSfinal(mps::MPS, pathname::String, eps::Float64; ansatz_eps = 0.5, kargs...)
+
+function invertMPSTrunc(mps::MPS, eps::Float64; invertMethod = invertGlobalSweep, maxiter = 20000, start_tau = 1)
+    
     N = length(mps)
-    invertMPS1(mps, pathname; ansatz_eps = ansatz_eps)
-    results = invertMPS2(pathname, N, eps; kargs...)
+    #_, mps_trunc, _ = truncate(mps)    # stops working after a certain N, as all variational methods do
+    mps_trunc = deepcopy(mps) 
+    for i in 1:N-1
+        cut!(mps_trunc, i)          # this works independently of N, but is not the optimal truncation when bond dimension D grows
+    end
+
+    @show real(dot(mps_trunc, mps))
+
+    orthogonalize!(mps_trunc, N)
+    sites = siteinds(mps_trunc)
+    links = linkinds(mps_trunc)
+
+    combiners1 = [combiner((sites[1], links[1]))]
+    combiners = [combiner([sites[j]; links[j-1:j]]) for j in 2:N-1]
+    combinersN = [combiner((sites[N], links[N-1]))]
+    combiners = [combiners1; combiners; combinersN]
+
+    combinedinds = [combinedind(comb) for comb in combiners]
+    tensor_list = [combiners[j]*mps_trunc[j] for j in 1:N]
+
+    Vlist = [Array{ComplexF64}(tensor_list[j], combinedinds[j]) for j in 1:N]
+
+    Ulist = [iso_to_unitary(V) for V in Vlist]
+    init_array = [kron(Ulist[2*j], Ulist[2*j-1]) for j in 1:div(N,2)]
+        
+    dt = @elapsed results = invert(mps, invertMethod; 
+                                nruns = 1, 
+                                reuse_previous = true,
+                                site1_empty = false, 
+                                eps = eps, 
+                                maxiter = maxiter, 
+                                init_array = init_array,
+                                start_tau = start_tau)
+    if !isnothing(results)
+        results["time"] = dt
+    end
+
     return results
 end
 
 
-function invertMPSTrunc(pathname::String, N_list::Vector{<:Integer}, eps_list::Vector{<:Real}; invertMethod = invertGlobalSweep, maxiter = 20000)
+function invertMPSTrunc(pathname::String, N_list::Vector{<:Integer}, eps_list::Vector{<:Real}; invertMethod = invertGlobalSweep, maxiter = 20000, start_tau = 1)
     mps_array = MPS[]
     for N in N_list
         f = h5open(pathname*"$(N)_mps.h5","r")
@@ -1778,8 +1713,10 @@ function invertMPSTrunc(pathname::String, N_list::Vector{<:Integer}, eps_list::V
                                 site1_empty = false, 
                                 eps = _eps, 
                                 maxiter = maxiter, 
-                                init_array = _init_array)
+                                init_array = _init_array,
+                                start_tau = start_tau)
         _taufinal = _results["tau"]
+        _results["time"] = _dt
         jldsave(pathname*"trunc_$(_N)_$(_eps).jld2"; _taufinal)
         jldsave(pathname*"trunc_$(_N)_$(_eps)_result.jld2"; _results)
         jldsave(pathname*"time_trunc_$(_N)_$(_eps).jld2"; _dt)
