@@ -97,7 +97,7 @@ end
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
-function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; site1_empty = false, d = 2, conv_err = 1E-8, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}
+function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; site1_empty = false, d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
@@ -279,7 +279,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
 
     end
 
-    println("Converged to fidelity $newfid with $sweep sweeps\n")
+    println("Converged to overlap $newfid with $sweep sweeps")
 
     return Dict([("lightcone", lightcone), ("overlap", newfid), ("niter", sweep)])
 
@@ -375,7 +375,7 @@ function _fgGlobalSweep(U_array::Vector{Matrix{T}}, lightcone::Lightcone, mpo::U
 end
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it"
-function invertGlobalSweep(mpo::Union{Vector{ITensor}, MPS, MPO}, tau::Integer, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; lightbounds = (false, false), site1_empty = false, maxiter = 20000, gradtol = 1E-8, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}
+function invertGlobalSweep(mpo::Union{Vector{ITensor}, MPS, MPO}, tau::Integer, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; lightbounds = (false, false), site1_empty = false, maxiter = 20000, gradtol = 1E-6, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}
     mpo = deepcopy(mpo[1:end])
     N = length(mpo)
 
@@ -475,6 +475,8 @@ function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Inde
             for i in 1:nruns
                 results_array[i]["err"] = errs[i]
                 results_array[i]["tau"] = tau
+                results_array[i]["start_tau"] = start_tau
+                results_array[i]["reuse_previous"] = reuse_previous
             end
             resdict = results_array[err_min_pos]
 

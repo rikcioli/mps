@@ -144,7 +144,7 @@ function entropy(psi::Union{MPS, MPO}, b::Integer)
 end
 
 "Truncate mps at position b until bond dimension of link (b, b+1) becomes 1"
-function cut!(psi::MPS, b::Integer; cutoff=1e-18)
+function cut!(psi::MPS, b::Integer; cutoff=1e-16)
     orthogonalize!(psi, b)
     indsb = uniqueinds(psi[b], psi[b+1])
     U, S, V = svd(psi[b]*psi[b+1], indsb, cutoff = cutoff)
