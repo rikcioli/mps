@@ -44,7 +44,7 @@ function truncate(psi::MPS; Uarr0 = nothing, maxiter = 1000, conv_err = 1e-6)
         end
 
         env_dag = conj(env_left*env_right)
-        U, S, Vdag = svd(env_dag, sites[j]; cutoff = 1e-15)
+        U, S, Vdag = svd(env_dag, sites[j])
         u, v = commonind(U, S), commonind(Vdag, S)
         newfid = real(tr(Matrix{ComplexF64}(S, (u, v))))
         mpo[j] = U * replaceind(Vdag, v, u)
@@ -116,7 +116,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
         env = conj(mpo[1]*mpo[2])
 
         inds = sites
-        U, S, Vdag = svd(env, inds; cutoff = 1e-15)
+        U, S, Vdag = svd(env, inds)
         u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity
@@ -206,7 +206,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
             env = permute(conj(env_left*env_right), gate_ji[:inds]; allow_alias = true)
 
             inds = gate_ji[:inds][1:2]
-            U, S, Vdag = svd(env, inds; cutoff = 1E-15)
+            U, S, Vdag = svd(env, inds)
             u, v = commonind(U, S), commonind(Vdag, S)
 
             # evaluate fidelity as Tr(Env*Gate), i.e. the overlap (NOT SQUARED)
@@ -394,7 +394,7 @@ function invertGlobalSweep(mpo::Union{Vector{ITensor}, MPS, MPO}, tau::Integer, 
         env = conj(mpo[1]*mpo[2])
 
         inds = sites
-        U, S, Vdag = svd(env, inds, cutoff = 1E-15)
+        U, S, Vdag = svd(env, inds)
         u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity

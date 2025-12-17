@@ -1414,7 +1414,7 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 
             for l in 1:length(boundaries)-1
                 push!(ranges, (boundaries[l]+1, boundaries[l+1]))
             end
-
+            @show ranges
 
             # construct local-to-global map for second part of inversion, could be useful later
             # WARNING: here region_n counts all regions as different, so it's gonna be A-1, BC-2, A-3, BC-4 and so on
@@ -1465,6 +1465,7 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 
             attempt_tau = tau
             local mps_final, err2, err_total
 
+
             Threads.@threads for l in eachindex(ranges)
                 _range = ranges[l]
                 _reduced_mps = reduced_mps_list[l]
@@ -1498,6 +1499,7 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 
                 mps_final = initialize_vac(N, trunc_siteinds)
                 apply!(mps_final, lc_list2)
             end
+
             apply!(mps_final, lc_list, dagger=true)
 
             fid_total = abs2(dot(mps_final, mps))
@@ -1668,8 +1670,8 @@ function invertMPS2(pathname::String, N_list::Vector{<:Integer}, start_tau_list:
 
     Threads.@threads for task in tasks
         _i, _N, _tau = task[1], task[2], task[3]
-        @show _i, _N, _tau
         _start_tau = params_array[_i]["start_tau"]
+        @show _i, _N, _tau, _start_tau
         _dt2 = @elapsed _results = invert(mps_array[_i], invertMethod; 
                                 nruns = 1, 
                                 reuse_previous = true,
