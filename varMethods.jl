@@ -433,9 +433,10 @@ end
 "Calls invertMethod on input with increasing inversion depth tau until it converges to chosen 'overlap' up to error 'eps';
 if input tau is specified (i.e. set to a non-zero integer) the fixed_tau_mode is activated, and a single inversion attempt
 with a circuit of depth tau is performed."
-function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}, invertMethod; tau = 0, eps = 1e-3, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing, maxiter = 20000, kargs...) where {T}
+function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}, invertMethod; tau = 0, eps = 1e-3, nruns = 1, overlap = 1, start_tau = 1, reuse_previous = true, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing, maxiter = 20000, folder = nothing, kargs...) where {T}
     obj = typeof(mpo)
-    print("Attempting inversion of size $(length(mpo)) $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\nMax iterations: $maxiter\n")
+    N = length(mpo)
+    print("Attempting inversion of size $N $obj with the following parameters:\nInversion method: $invertMethod\nNumber of runs: $nruns\nMax iterations: $maxiter\n")
 
     # by default the inversion runs in 
     fixed_tau_mode = true
@@ -449,26 +450,41 @@ function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Inde
     end
 
     found = false
-    besterr_history = []
+    besterr_history = Float64[]
+    time_history = Float64[]
     best_guess = init_array
     while !found
         println("\nAttempting depth $tau...")
         # choose multiprocessing method
         results_array = Array{Dict{String, Any}}(undef, nruns)
         if nruns == 1   #avoid spawning threads if nruns == 1
-            results_array[1] = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, maxiter = maxiter, kargs...)
+            dt = @elapsed res = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, maxiter = maxiter, kargs...)
+            results_array[1] = res
+            results_array[1]["time"] = dt
         else
             Threads.@threads for i in 1:nruns
-                res = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, maxiter = maxiter, kargs...)
+                _dt = @elapsed res = invertMethod(mpo, tau, input_inds, output_inds; init_array = best_guess, maxiter = maxiter, kargs...)
                 results_array[i] = res
+                results_array[i]["time"] = _dt
             end
         end
         
         errs = [abs(overlap - results["overlap"]) for results in results_array]
         err_min_pos = argmin(errs)
         err_min = errs[err_min_pos]
+
+        times = [results["time"] for results in results_array]
+        time_err_min = times[err_min_pos]
+
         println("Obtained error = $err_min")
         push!(besterr_history, err_min)
+        push!(time_history, time_err_min)
+
+        if !isnothing(folder)
+            savefile = Dict([("time", time_err_min), ("err", err_min)])
+            jldsave(folder*"$(invertMethod)_$(N)_$(eps)_$(start_tau)_$(tau).jld2"; savefile)
+        end
+
         if err_min < eps || tau > 24 || fixed_tau_mode
             found = true
             tau = results_array[err_min_pos]["lightcone"].depth
@@ -487,6 +503,7 @@ function invert(mpo::Union{Vector{ITensor}, MPS, MPO}, input_inds::Vector{<:Inde
             end
 
             resdict["err_history"] = besterr_history
+            resdict["time_history"] = time_history
             return resdict
         end
         if reuse_previous
@@ -564,7 +581,7 @@ end
 
 
 
-"Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
+"Original invertSweep code, without lightcone structure. Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
 function invertSweep(mpo::Vector{ITensor}, tau, input_inds::Vector{<:Index}; d = 2, output_inds = nothing, conv_err = 1E-6, maxiter = 1E6)
     N = length(mpo)
