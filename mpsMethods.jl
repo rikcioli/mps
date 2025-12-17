@@ -1520,6 +1520,8 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 
                 tau_tot -= 1
             end
 
+            @show tau1, tau2, tau_tot, reduced
+
             site1_empty = isodd(reg1_size)
             lightcone = newLightcone(sites, tau_tot; U_array = Vector{Matrix{ComplexF64}}(undef, 0), lightbounds = (false, false), site1_empty = site1_empty)
 
@@ -1574,6 +1576,7 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 
             jldsave(folder*"$(N)_$(tau)_ansatz.jld2"; best_guess)
 
             # save important info for subsequent optimization to file
+            @show tau_tot, reduced
             params = Dict([("N", N), ("ansatz_eps", err_total), ("site1_empty", site1_empty), ("start_tau", tau_tot)])
             jldsave(folder*"$(N)_$(tau)_params.jld2"; params)
         end
@@ -1655,11 +1658,11 @@ function invertMPS2(pathname::String, N_list::Vector{<:Integer}, eps_list::Vecto
 end
 
 # method to follow up the invertLiu with max_tau
-function invertMPS2(pathname::String, N_list::Vector{<:Integer}, start_tau_list::Vector{<:Integer}, eps::Float64; invertMethod = invertGlobalSweep, maxiter = 20000)
+function invertMPS2(pathname::String, N_list::Vector{<:Integer}, tau_list::Vector{<:Integer}, eps::Float64; invertMethod = invertGlobalSweep, maxiter = 20000)
 
-    tasks = [(i, N, tau) for (i, N) in enumerate(N_list) for tau in start_tau_list]
-    params_array = [load_object(pathname*"$(N)_$(tau)_params.jld2") for N in N_list for tau in start_tau_list]
-    ansatz_array = [[Matrix{ComplexF64}(U) for U in load_object(pathname*"$(N)_$(tau)_ansatz.jld2")] for N in N_list for tau in start_tau_list]
+    tasks = [(mps_n, N, tau) for (mps_n, N) in enumerate(N_list) for tau in tau_list]
+    params_array = [load_object(pathname*"$(N)_$(tau)_params.jld2") for N in N_list for tau in tau_list]
+    ansatz_array = [[Matrix{ComplexF64}(U) for U in load_object(pathname*"$(N)_$(tau)_ansatz.jld2")] for N in N_list for tau in tau_list]
     mps_array = MPS[]
     for N in N_list
         f = h5open(pathname*"$(N)_mps.h5","r")
@@ -1668,18 +1671,18 @@ function invertMPS2(pathname::String, N_list::Vector{<:Integer}, start_tau_list:
         push!(mps_array, mps)
     end
 
-    Threads.@threads for task in tasks
-        _i, _N, _tau = task[1], task[2], task[3]
-        _start_tau = params_array[_i]["start_tau"]
-        @show _i, _N, _tau, _start_tau
-        _dt2 = @elapsed _results = invert(mps_array[_i], invertMethod; 
+    Threads.@threads for j in eachindex(params_array)
+        _mps_n, _N, _tau = tasks[j][1], tasks[j][2], tasks[j][3]
+        _start_tau = params_array[j]["start_tau"]
+        @show _mps_n, _N, _tau, _start_tau
+        _dt2 = @elapsed _results = invert(mps_array[_mps_n], invertMethod; 
                                 nruns = 1, 
                                 reuse_previous = true,
-                                site1_empty = params_array[_i]["site1_empty"], 
+                                site1_empty = params_array[j]["site1_empty"], 
                                 eps = eps, 
                                 maxiter = maxiter,
                                 start_tau = _start_tau, 
-                                init_array = ansatz_array[_i],
+                                init_array = ansatz_array[j],
                                 folder = pathname*"invertMPS2_$(_tau)_")
         _results["time"] = _dt2
         jldsave(pathname*"invertMPS2_$(_tau)_$(_N)_$(eps)_result.jld2"; _results)

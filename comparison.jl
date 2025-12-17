@@ -68,23 +68,27 @@ end
 
 # RUN ON CLUSTER
 let
-    folder = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\mpstest\\"
+    folder = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/randMPS/mpstest/"
     N = 200
     D = 16
     psi0 = random_mps(ComplexF64, siteinds("Qubit", N); linkdims = D)
-    f = h5open(folder*"$(N)_mps.h5","r")
+    f = h5open(folder*"sweep/$(N)_mps.h5","w")
     write(f,"psi",psi0)
     close(f)
 
-    # f = h5open(folder*"$(N)_mps.h5","r")
+    f = h5open(folder*"global/$(N)_mps.h5","w")
+    write(f,"psi",psi0)
+    close(f)
+
+    # f = h5open(folder*"sweep/$(N)_mps.h5","r")
     # psi0 = read(f,"psi",MPS)
     # close(f)
 
-    mt.invertMPSLiu(psi0, 6; invertMethod = mt.invertSweepLC, folder = folder*"sweep\\")
-    mt.invertMPS2(folder*"sweep\\", [N], [0,2,3,4,5,6], 0.01; invertMethod = mt.invertSweepLC)
+    mt.invertMPSLiu(psi0, 6; invertMethod = mt.invertSweepLC, folder = folder*"sweep/")
+    mt.invertMPS2(folder*"sweep/", [N], [0,2,3,4,5,6], 0.01; invertMethod = mt.invertSweepLC)
 
-    mt.invertMPSLiu(psi0, 6; invertMethod = mt.invertGlobalSweep, folder = folder*"global\\")
-    mt.invertMPS2(folder*"sweep\\", [N], [0,2,3,4,5,6], 0.01; invertMethod = mt.invertGlobalSweep)
+    mt.invertMPSLiu(psi0, 6; invertMethod = mt.invertGlobalSweep, folder = folder*"global/")
+    mt.invertMPS2(folder*"global/", [N], [0,2,3,4,5,6], 0.01; invertMethod = mt.invertGlobalSweep)
 end
 
 
@@ -96,9 +100,9 @@ end
 ## #psi0 = random_mps(ComplexF64, siteinds("Qubit", N); linkdims = D)
 ## ## 
 ## folder = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\mpstest\\"
-## # f = h5open(folder*"$(N)_mps.h5","r")
-## # psi0 = read(f,"psi",MPS)
-## # close(f)
+## f = h5open(folder*"$(N)_mps.h5","r")
+## psi0 = read(f,"psi",MPS)
+## close(f)
 ## ## 
 ## ## # results = let N = N, psi0 = psi0
 ## ## #     res = mt.invertMPSTrunc(psi0, 0.5; start_tau = 1, invertMethod = mt.invertSweepLC, folder = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\mpstest\\")
@@ -111,7 +115,7 @@ end
 ## ## 
 ## 
 ## let
-##     mt.invertMPS2(folder, [N], [0,2,3], 0.01; invertMethod = mt.invertSweepLC)
+##     mt.invertMPS2(folder, [N], [0,2,3], 0.1; invertMethod = mt.invertSweepLC)
 ## end
 ## 
 ## res = load_object(folder*"test\\30_3_params.jld2")
