@@ -165,6 +165,8 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
     j = 2  
     sweep = 0
 
+    fid_history = Float64[]
+
     while sweep < maxiter
 
         # extract all gates touching site j
@@ -203,7 +205,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
                 env_right *= gate
             end
 
-            env = permute(conj(env_left*env_right), gate_ji[:inds]; allow_alias = true)
+            env = permute(conj(env_left*env_right), gate_ji[:inds])
 
             inds = gate_ji[:inds][1:2]
             U, S, Vdag = svd(env, inds)
@@ -213,7 +215,7 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
             newfid = real(tr(Matrix{ComplexF64}(S, (u, v))))/normalization
 
             #replace gate_ji with optimized one, both in gates_j (used in this loop) and in circuit
-            gate_ji_opt = permute(U * replaceind(Vdag, v, u), gate_ji[:inds]; allow_alias = true)
+            gate_ji_opt = permute(U * replaceind(Vdag, v, u), gate_ji[:inds])
             tensors_j[i] = gate_ji_opt
             lightcone.circuit[gate_ji[:pos]] = gate_ji_opt
         end
@@ -237,15 +239,25 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
 
         # if we arrived at the end of the sweep
         if (j==2 && first_sweep==false) || j==N-1
-            # compare the relative increase in frobenius norm
-            ratio = 1 - sqrt((1-newfid)/(1-fid))
-            #convergence occurs when fidelity after new sweep doesn't change considerably
-            if -conv_err < ratio < conv_err && first_sweep == false
-                break   
+
+            push!(fid_history, newfid)
+            if length(fid_history) > 5
+                recent = fid_history[end-4:end]
+                if (maximum(recent) - minimum(recent)) < conv_err*newfid
+                    break
+                end
             end
-            if ratio >= 0   # only register if the ratio has increased, otherwise it's useless
-                fid = newfid
-            end
+
+            # OLD TEST, NUMERICALLY UNSTABLE FOR LARGE TAU
+            ## # compare the relative increase in frobenius norm
+            ## ratio = 1 - sqrt((1-newfid)/(1-fid))
+            ## #convergence occurs when fidelity after new sweep doesn't change considerably
+            ## if -conv_err < ratio < conv_err && first_sweep == false
+            ##     break   
+            ## end
+            ## if ratio >= 0   # only register if the ratio has increased, otherwise it's useless
+            ##     fid = newfid
+            ## end
         end
 
         
