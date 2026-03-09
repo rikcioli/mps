@@ -22,6 +22,13 @@ struct Lightcone
     # positions, inds and orientations of all the gates touching each qubit
     gates_by_layer::Vector{Vector{Int64}}     # positions of all gates sorted by depth
     sites_by_gate::Vector{Tuple{Int64, Int64}}  # vector contaning all the sites each gate is acting on
+    gates::Vector{@NamedTuple{
+                        inds::NTuple{4, Index{Int64}},
+                        sites::NTuple{2, Int64},
+                        depth::Int64
+                    }}          # vector containing the data of all gates in order
+                                # probably the code can be refactored by defining a gate class that
+                                # already includes such information, we'll see
 end
 
 
@@ -95,6 +102,11 @@ function newLightcone(sites::Vector{<:Index}, depth::Int64; U_array::Union{Nothi
     gates_by_site = [@NamedTuple{inds::NTuple{4, Index{Int64}}, pos::Int64, depth::Int64, orientation::String}[] for _ in 1:sizeAB]
     gates_by_layer::Vector{Vector{Int64}} = []
     sites_by_gate::Vector{Tuple{Int64, Int64}} = []
+    gates = Array{@NamedTuple{
+                        inds::NTuple{4, Index{Int64}},
+                        sites::Tuple{Int64, Int64},
+                        depth::Int64
+                    }}(undef, n_unitaries)
     k = 1
     for i in 1:depth
         # limits for circuit indices, left limit is always 1
@@ -189,6 +201,7 @@ function newLightcone(sites::Vector{<:Index}, depth::Int64; U_array::Union{Nothi
             push!(gates_by_site[sites_involved[2]], (inds=fullinds, pos=k, depth=i, orientation="L"))
             push!(sites_by_gate, sites_involved)
             push!(layer_i_pos, k)
+            gates[k] = (inds=fullinds, sites=sites_involved, depth=i)
 
             k += 1
 
@@ -202,7 +215,7 @@ function newLightcone(sites::Vector{<:Index}, depth::Int64; U_array::Union{Nothi
     rangeA = (lightbounds[1] ? range[end][1] : 1, lightbounds[2] ? range[end][end] : sizeAB)
 
 
-    return Lightcone(circuit, inds_arr, d, sizeAB, depth, site1_empty, n_unitaries, lightbounds, sites, range, rangeA, gates_by_site, gates_by_layer, sites_by_gate)
+    return Lightcone(circuit, inds_arr, d, sizeAB, depth, site1_empty, n_unitaries, lightbounds, sites, range, rangeA, gates_by_site, gates_by_layer, sites_by_gate, gates)
 end
 
 "Update k-th unitary of lightcone in-place"
@@ -302,8 +315,9 @@ end
 If dagger is true, all the unitaries are conjugated and the order of application is inverted
 If an empty list is passed as entropy_arr karg it will be filled with half-subsystem entropies at each timestep
 (to be replaced with generic observer for time evolution if needed)"
-function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = false, cutoff = 1E-15, entropy_arr = nothing)
+function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = false, cutoff = 1E-15, extractors::Vector{<:Function} = nothing)
     N = length(mps)
+    n_lightcones = length(lightcones)
     #norm0 = norm(mps)
 
     if isa(mps, MPO)
@@ -319,6 +333,12 @@ function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = fa
         noprime!(mps)
         sites = noprime(oldsites)
     end
+
+    extractedObs = nothing
+    if !isnothing(extractors) && n_lightcones==1
+        extractedObs = [[extractor(mps) for extractor in extractors]]
+    end
+
 
     l = 1
     for lc in lightcones
@@ -362,19 +382,16 @@ function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = fa
                     U, S, V = svd(W, indsb, cutoff = cutoff)
                     mps[b] = replaceinds(U, suminds, outinds)
                     mps[b+1] = replaceinds(S*V, suminds, outinds) 
-        
-                    #norm1 = norm(mps)
-                    #if abs(norm0-norm1)>1E-14
-                    #    throw(DomainError(norm1, "MPS norm has changed during the application of lightcone of initpos $initpos"))
-                    #end
-                    if !isnothing(entropy_arr) && lc.sites_by_gate[k] == (div(size,2), div(size,2)+1) 
-                        SvN = 0.0
-                        for n in 1:dim(S, 1)
-                          p = S[n,n]^2
-                          SvN -= p * log(p)
+
+                    # extract observables during time evolution
+                    # ONLY WORKS WHEN n_lightcones = 1 FOR NOW
+                    if !isnothing(extractors) && n_lightcones==1
+                        knext = dagger ? k-1 : k+1
+                        if knext < 1 || knext > n_unitaries || lc.gates[k][:depth] != lc.gates[knext][:depth]
+                            push!(extractedObs, [extractor(mps) for extractor in extractors])
                         end
-                        push!(entropy_arr, SvN)
                     end
+
                 end
                 l += size
                 break
@@ -396,6 +413,7 @@ function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = fa
             replaceind!(mps[i], sites[i], oldsites[i])
         end
     end
+    return extractedObs
 end
 
 
