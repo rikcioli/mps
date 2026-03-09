@@ -108,13 +108,13 @@ function apply!(U::Matrix, psi::MPS, b::Integer; cutoff = 1E-15)
 end
 
 "Apply 2-qubit ITensors.ITensor U to sites b and b+1 of Vector{ITensors.ITensor} psi"
-function contract!(psi::Vector{ITensor}, U::ITensor, b; cutoff = 1E-15)
+function contract!(psi::Union{MPS, Vector{ITensor}}, U::ITensor, b::Integer; cutoff = 1E-15)
     summed_inds = commoninds(U, unioninds(psi[b], psi[b+1]))
     outinds = uniqueinds(U, summed_inds)
     W = U*psi[b]*psi[b+1]
     replaceinds!(W, outinds, summed_inds)
     indsb = uniqueinds(psi[b], psi[b+1])
-    U, S, V = svd(W, indsb, cutoff = cutoff)
+    U, S, V = svd(W, indsb; cutoff = cutoff)
     psi[b] = replaceinds(U, summed_inds, outinds)
     psi[b+1] = replaceinds(S*V, summed_inds, outinds)
 end
@@ -141,6 +141,10 @@ function entropy(psi::Union{MPS, MPO}, b::Integer)
       SvN -= p * log(p)
     end
     return SvN
+end
+
+function entropy(psi::Union{MPS, MPO})  
+    return [entropy(psi, b) for b in 1:length(psi)-1]
 end
 
 "Truncate mps at position b until bond dimension of link (b, b+1) becomes 1"
@@ -646,4 +650,10 @@ function extract_rho(block::ITensor, inds::NTuple{3, Index{Int64}})
     sqrt_rho = sqrt(alpha*rho)
 
     return sqrt_rho
+end
+
+function transfer_matrix(mps::MPS)
+    sites = siteinds(mps)
+    Tlist = [conj(mps[i])' * delta(sites[i], sites[i]') * mps[i] for i in eachindex(mps)]
+    return Tlist
 end

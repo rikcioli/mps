@@ -115,15 +115,14 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
     if N == 2   #solution is immediate via SVD
         env = conj(mpo[1]*mpo[2])
 
-        inds = sites
-        U, S, Vdag = svd(env, inds)
+        U, S, Vdag = svd(env, sites)
         u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity
         newfid = real(tr(Matrix{ComplexF64}(S, (u, v))))/normalization
         gate_ji_opt = U * replaceind(Vdag, v, u)
         lc = newLightcone(sites, 1; lightbounds = (false, false))
-        lc.circuit[1] = permute(replaceprime(gate_ji_opt, tau => 1), [inds; inds'])
+        lc.circuit[1] = permute(replaceprime(gate_ji_opt, tau => 1), [sites; sites'])
 
         println("Matrix is 2-local, converged to fidelity $newfid immediately")
         return Dict([("lightcone", lc), ("overlap", newfid), ("niter", 1)])
@@ -207,8 +206,8 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
 
             env = permute(conj(env_left*env_right), gate_ji[:inds])
 
-            inds = gate_ji[:inds][1:2]
-            U, S, Vdag = svd(env, inds)
+            gateinds = gate_ji[:inds][1:2]
+            U, S, Vdag = svd(env, gateinds)
             u, v = commonind(U, S), commonind(Vdag, S)
 
             # evaluate fidelity as Tr(Env*Gate), i.e. the overlap (NOT SQUARED)
@@ -405,8 +404,7 @@ function invertGlobalSweep(mpo::Union{Vector{ITensor}, MPS, MPO}, tau::Integer, 
     if N == 2   #solution is immediate via SVD
         env = conj(mpo[1]*mpo[2])
 
-        inds = sites
-        U, S, Vdag = svd(env, inds)
+        U, S, Vdag = svd(env, sites)
         u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity
@@ -636,8 +634,7 @@ function invertSweep(mpo::Vector{ITensor}, tau, input_inds::Vector{<:Index}; d =
         right = zero_projs[2] * mpo[2]
         env = conj(left*right)
 
-        inds = sites
-        U, S, Vdag = svd(env, inds, cutoff = 1E-14)
+        U, S, Vdag = svd(env, sites, cutoff = 1E-14)
         u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity
@@ -739,8 +736,8 @@ function invertSweep(mpo::Vector{ITensor}, tau, input_inds::Vector{<:Index}; d =
 
             env = conj(env_left*env_right)
 
-            inds = commoninds(prime(sites, tau-i), gate_ji)
-            U, S, Vdag = svd(env, inds, cutoff = 1E-15)
+            cinds = commoninds(prime(sites, tau-i), gate_ji)
+            U, S, Vdag = svd(env, cinds, cutoff = 1E-15)
             u, v = commonind(U, S), commonind(Vdag, S)
 
             # evaluate fidelity as Tr(Env*Gate), i.e. the overlap (NOT SQUARED)

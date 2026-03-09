@@ -1601,11 +1601,12 @@ function invertMPSLiu(mps::Union{MPS,MPO}, max_tau::Int; folder="", start_tau = 
 end
 
 
-function invertMPS2(pathname::String, N::Integer, eps::Float64; invertMethod = invertGlobalSweep, maxiter = 20000)
+# method to follow up the invertLiu with eps
+function invertMPS2(pathname::String, N::Integer, eps::Float64; ansatz_eps = 0.5, invertMethod = invertGlobalSweep, maxiter = 20000)
 
-    params = load_object(pathname*"$(N)_params.jld2")
+    params = load_object(pathname*"$(N)_$(ansatz_eps)_params.jld2")
     @show params
-    best_guess = load_object(pathname*"$(N)_ansatz.jld2")
+    best_guess = load_object(pathname*"$(N)_$(ansatz_eps)_ansatz.jld2")
     best_guess = [Matrix{ComplexF64}(U) for U in best_guess]
 
     f = h5open(pathname*"$(N)_mps.h5","r")
@@ -1626,10 +1627,11 @@ function invertMPS2(pathname::String, N::Integer, eps::Float64; invertMethod = i
     return results_final
 end
 
-function invertMPS2(pathname::String, N_list::Vector{<:Integer}, eps_list::Vector{<:Real}; invertMethod = invertGlobalSweep, maxiter = 20000)
+# method to follow up the invertLiu with eps
+function invertMPS2(pathname::String, N_list::Vector{<:Integer}, eps_list::Vector{<:Real}; ansatz_eps = 0.5, invertMethod = invertGlobalSweep, maxiter = 20000)
 
-    params_array = [load_object(pathname*"$(N)_params.jld2") for N in N_list]
-    ansatz_array = [[Matrix{ComplexF64}(U) for U in load_object(pathname*"$(N)_ansatz.jld2")] for N in N_list]
+    params_array = [load_object(pathname*"$(N)_$(ansatz_eps)_params.jld2") for N in N_list]
+    ansatz_array = [[Matrix{ComplexF64}(U) for U in load_object(pathname*"$(N)_$(ansatz_eps)_ansatz.jld2")] for N in N_list]
     mps_array = MPS[]
     for N in N_list
         f = h5open(pathname*"$(N)_mps.h5","r")

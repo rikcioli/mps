@@ -1,7 +1,7 @@
 include("mpsMethods.jl")
 import .MPSMethods as mt
 using ITensors, ITensorMPS
-#import Plots
+import Plots
 using LaTeXStrings, LinearAlgebra, Statistics, Random
 using CSV
 #using DataFrames, StatsPlots
@@ -67,47 +67,149 @@ end
 
 
 # RUN ON CLUSTER
-let
-    folder = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/randMPS/mpstest/"
-    N = 200
-    D = 16
-    psi0 = random_mps(ComplexF64, siteinds("Qubit", N); linkdims = D)
-    f = h5open(folder*"sweep/$(N)_mps.h5","w")
-    write(f,"psi",psi0)
-    close(f)
+# let
+#     folder = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/randMPS/mpstest/"
+#     N = 200
+#     D = 16
+#     psi0 = random_mps(ComplexF64, siteinds("Qubit", N); linkdims = D)
+#     f = h5open(folder*"sweep/$(N)_mps.h5","w")
+#     write(f,"psi",psi0)
+#     close(f)
+# 
+#     f = h5open(folder*"global/$(N)_mps.h5","w")
+#     write(f,"psi",psi0)
+#     close(f)
+# 
+#     # f = h5open(folder*"sweep/$(N)_mps.h5","r")
+#     # psi0 = read(f,"psi",MPS)
+#     # close(f)
+# 
+#     mt.invertMPSLiu(psi0, 6; invertMethod = mt.invertSweepLC, folder = folder*"sweep/")
+#     mt.invertMPS2(folder*"sweep/", [N], [0,2,3,4,5,6], 0.01; invertMethod = mt.invertSweepLC)
+# 
+#     mt.invertMPSLiu(psi0, 6; invertMethod = mt.invertGlobalSweep, folder = folder*"global/")
+#     mt.invertMPS2(folder*"global/", [N], [0,2,3,4,5,6], 0.01; invertMethod = mt.invertGlobalSweep)
+# end
 
-    f = h5open(folder*"global/$(N)_mps.h5","w")
-    write(f,"psi",psi0)
-    close(f)
 
-    # f = h5open(folder*"sweep/$(N)_mps.h5","r")
-    # psi0 = read(f,"psi",MPS)
-    # close(f)
 
-    mt.invertMPSLiu(psi0, 6; invertMethod = mt.invertSweepLC, folder = folder*"sweep/")
-    mt.invertMPS2(folder*"sweep/", [N], [0,2,3,4,5,6], 0.01; invertMethod = mt.invertSweepLC)
 
-    mt.invertMPSLiu(psi0, 6; invertMethod = mt.invertGlobalSweep, folder = folder*"global/")
-    mt.invertMPS2(folder*"global/", [N], [0,2,3,4,5,6], 0.01; invertMethod = mt.invertGlobalSweep)
+
+
+#folder = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\mpstest\\"
+
+function test_contraction(N::Integer, tau::Integer; U_array = nothing)
+
+    sites = siteinds("Qubit", N)
+    lc = mt.newLightcone(sites, tau, lightbounds=(false,false), U_array = U_array)
+
+    right_inds = reverse([prime(lc.siteinds[end-2], i) for i in 0:tau])
+
+    right_vec = [ITensor([1; 0], right_inds[1])]
+    for i in 2:2:tau
+        U, S, Vd = svd(delta(right_inds[i], right_inds[i+1]), right_inds[i])
+        push!(right_vec, U)
+        push!(right_vec, S*Vd)
+    end
+    right_mps = MPS(right_vec)
+
+    ent = Float64[]
+    max_chi = Int64[]
+    norms = Float64[]
+    for j in N-3:-1:4
+        @show j
+        if iseven(j)
+            orthogonalize!(right_mps, 1)
+            right_mps[1] = right_mps[1]*ITensor([1 0; 0 0], prime(sites[j:j+1], tau))
+        end
+
+        gates = lc.gates_by_site[j]
+        for gate in gates
+            if gate[:orientation] == "R"
+                mt.contract!(right_mps, lc.circuit[gate[:pos]], gate[:depth]; )
+            end
+        end
+
+        if isodd(j)
+            orthogonalize!(right_mps, tau+1)
+            right_mps[end] = right_mps[end]*ITensor([1 0; 0 0], sites[j:j+1])
+        end
+
+        orthogonalize!(right_mps, div(tau,2))
+        norm_j = norm(right_mps)
+        push!(norms, norm_j)
+        normalize!(right_mps)
+
+        if iseven(j)
+            push!(ent, mt.entropy(right_mps, div(tau,2))/log(2))
+            push!(max_chi, maximum(linkdims(right_mps)))
+        end
+    end
+
+    return ent, max_chi, norms
 end
 
+
+ansatz = load_object("D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\mps1\\100_ansatz.jld2")
+
+results = [test_contraction(100, tau; U_array = [mt.SWAP for _ in 1:(49*tau)]) for tau in [8, 12, 16, 20]]
+#results = [test_contraction(100, tau; U_array = [ansatz; ansatz; ansatz; ansatz][1:49*tau]) for tau in [8, 12, 16, 20]]
+
+plot = Plots.plot(title=L"N = 100", ylabel=L"S_{max}/log(2)", xlabel="l/2")
+Plots.plot!(plot, 1:length(results[1][1]), results[1][1], label=L"\tau=8")
+Plots.plot!(plot, 1:length(results[2][1]), results[2][1], label=L"\tau=12")
+Plots.plot!(plot, 1:length(results[3][1]), results[3][1], label=L"\tau=16")
+Plots.plot!(plot, 1:length(results[4][1]), results[4][1], label=L"\tau=20")
+Plots.savefig(plot, "swap.png")
+
+result = mt.invert(psi0, mt.invertSweepLC; tau=4, maxiter = 5000)
+lc = result["lightcone"]
+
+tentropies = result["tentropy"]
+tentropies = [tentropies[i][1:end] for i in eachindex(tentropies)]
+avg_tents = [mean(tentropies[i])./log(2) for i in eachindex(tentropies)]
+
+max_ent = [maximum(maximum(tentropies[i]))/log(2) for i in eachindex(tentropies)]
+
+Plots.plot(1:length(max_ent), max_ent, title=L"\tau = 10", ylabel=L"S_{max}/log(2)", xlabel="sweep")
+Plots.savefig("tau10")
+
+
+
+
+
+
+# f = h5open(folder*"$(N)_mps.h5","w")
+# write(f,"psi",psi0)
+# close(f)
+# eps_list = [0.999, 0.99, 0.9, 0.09]
 
 
 
 # check at what N the invertTrunc breaks
-## N = 30
-## D = 2
-## #psi0 = random_mps(ComplexF64, siteinds("Qubit", N); linkdims = D)
-## ## 
-## folder = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\mpstest\\"
-## f = h5open(folder*"$(N)_mps.h5","r")
-## psi0 = read(f,"psi",MPS)
-## close(f)
-## ## 
-## ## # results = let N = N, psi0 = psi0
-## ## #     res = mt.invertMPSTrunc(psi0, 0.5; start_tau = 1, invertMethod = mt.invertSweepLC, folder = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\mpstest\\")
-## ## #     res
-## ## # end
+N = 1000
+D = 2
+#psi0 = random_mps(ComplexF64, siteinds("Qubit", N); linkdims = D)
+## 
+folder = "D:\\Julia\\MyProject\\Data\\randMPS\\invertFinal\\mpstest\\"
+f = h5open(folder*"$(N)_mps.h5","r")
+psi0 = read(f,"psi",MPS)
+close(f)
+
+psi0 = let N = N
+    sites = siteinds("S=1/2", N)
+    Hamiltonian = mt.H_heisenberg(sites, -1., -1., -0.5, -0.1, -0.1)
+    energy, psi0 = mt.initialize_gs(Hamiltonian, sites; nsweeps = 10, cutoff=1e-15)
+    psi0
+end
+
+results = let N = N, psi0 = psi0
+    res = mt.invertMPSTrunc(psi0, 0.1; start_tau = 1, invertMethod = mt.invertSweepLC)
+    res
+end
+
+
+results
 ## ## 
 ## resultsLiu = let N = N, psi0 = psi0, folder = folder
 ##     mt.invertMPSLiu(psi0, 3; invertMethod = mt.invertSweepLC, folder = folder)
