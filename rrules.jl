@@ -360,6 +360,76 @@ function ChainRulesCore.rrule(::typeof(truncSimple), ψ::MPS; trunc=NamedTuple()
 end
 
 
+function truncDM(ψ::MPS; trunc=NamedTuple())
+    sites = siteinds(ψ)
+    ψdag = replace_siteinds(dag(ψ), sites')
+    envR = ψ[2]*ψdag[2]
+    rho1_ten = ψ[1]*envR*ψdag[1]
+
+    rho1 = Matrix(rho1_ten, sites[1], sites[1]')
+    D, V, ϵ = eig_trunc(rho1, trunc=trunc)
+
+    Vlinkind = Index(size(V)[2], "Link, u")
+    Vten = ITensor(V, sites[1], Vlinkind)
+
+    ψt2 = dag(Vten)*ψ[1]*ψ[2]
+    ψt1 = Vten
+
+    ψt = MPS([ψt1, ψt2])
+    return ψt
+end
+
+function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
+    sites = siteinds(ψ)
+    links = linkinds(ψ)
+    Aten = ψ[1]*ψ[2]
+
+    A = Matrix(Aten, sites[1], sites[2])
+
+    ψ1, ψ2 = qr_compact(A)  # needed in the pullback when we need to recreate the input MPS in a gauge inv way
+    ψ1ten = ITensor(ψ1, sites[1], links[1])     # can ignore this in the forward mode
+    ψ2ten = ITensor(ψ2, links[1], sites[2])
+
+    U, S, Vdg, ϵ = svd_trunc(A; trunc=trunc) # actual compression
+    @show S
+
+    uind = Index(size(U)[2], "Link, u")
+    Uten = ITensor(U, sites[1], uind)
+    SVten = ITensor(S*Vdg, uind, sites[2])
+
+    vec = [Uten, SVten]
+
+    ψt = MPS(vec)
+
+    function truncSimple_pullback(Δψt)
+
+        Δψt_mat = Δψt[1]*Δψt[2]
+        ΔU = Array{ComplexF64}(Δψt_mat*conj(SVten), sites[1], uind)
+        ΔSVdg = Array{ComplexF64}(Δψt_mat*conj(Uten), uind, sites[2])
+        ΔS = ΔSVdg*(Vdg')
+        ΔVdg = S'*ΔSVdg
+
+        ΔA = zero(A)
+        MatrixAlgebraKit.svd_trunc_pullback!(ΔA, A, (U, S, Vdg), (ΔU, ΔS, ΔVdg))
+        ΔAten = ITensor(ΔA, sites[1], sites[2])
+
+        # now we need to reconstruct the qr we used for gauge fixing, which is STRICTLY NECESSARY
+        Δψ1ten = ΔAten*conj(ψ2ten)
+        Δψ2ten = ΔAten*conj(ψ1ten)
+        Δψ1 = Array{ComplexF64}(Δψ1ten, sites[1], links[1])
+        Δψ2 = Array{ComplexF64}(Δψ2ten, links[1], sites[2])
+        Δmps = zero(A)
+        MatrixAlgebraKit.qr_pullback!(Δmps, A, (ψ1, ψ2), (Δψ1, Δψ2))
+        a, b = qr_compact(Δmps)
+        Δψ = MPS([ITensor(a, sites[1], links[1]), ITensor(b, links[1], sites[2])])
+
+        Δψ.llim = 1
+        Δψ.rlim = 3
+        return (NoTangent(), Δψ)
+    end
+    return ψt, truncSimple_pullback
+end
+
 function truncAD(psi::MPS; normalize = false, kargs...)
     N = length(psi)
     sites = siteinds(psi)
@@ -503,91 +573,6 @@ test = Zygote.gradient(truncADTO_costfunc, randomMPS(siteinds("Qubit", 2), 2))[1
 plot = test_rrule(truncADTO_point_dir()..., truncADTO_costfunc)
 
 
-# Recursive version, currently affected by the same problem as truncAD
-# meaning there are problems for ITensor(SV, lind, cind)
-function _trunc_step_rec(i, psi, lind, resvec, reserr; normalize=false, kargs...)
-    N = length(psi)
-    i > N-1 && return resvec, reserr, lind
-
-    sites = siteinds(psi)
-    links = linkinds(psi)
-
-    # last tensor in the current tuple
-    prev = resvec[i]
-
-    Aiip1_tmp1 = prev*psi[i+1]
-
-    if i > 1
-        citmp = combiner(sites[i], lind)
-        ciind = Index(size(citmp)[1], "Combiner, c$i")
-        ci = replaceind(citmp, combinedind(citmp), ciind)
-        Aiip1_tmp2 = ci*Aiip1_tmp1
-    else
-        ciind = sites[1]
-        Aiip1_tmp2 = Aiip1_tmp1
-    end
-
-    if i < N-1
-        cip1 = combiner(sites[i+1], links[i+1])
-        cip1ind = combinedind(cip1)
-        Aiip1_tensor = Aiip1_tmp2*cip1
-    else
-        cip1ind = sites[N]
-        Aiip1_tensor = Aiip1_tmp2
-    end
-
-    Aiip1 = Matrix(Aiip1_tensor, ciind, cip1ind)
-
-    Ui, Siip1, Vdgiip1, epsi = svd_trunc(Aiip1; kargs...)
-    if normalize
-        Siip1 = Siip1 / norm(Siip1)
-    end
-
-    new_lind = Index(size(Ui)[2], "Link, u")
-    Ui_tmp = ITensor(Ui, ciind, new_lind)
-    Ui_tensor = i==1 ? Ui_tmp : Ui_tmp*dag(ci)
-
-    SVip1_tmp = ITensor(Siip1*Vdgiip1, new_lind, cip1ind)
-    Svip1_tensor = i==N-1 ? SVip1_tmp : SVip1_tmp*dag(cip1)
-
-    # build new tuples – no mutation, no rebinding of old ones
-    new_resvec = [resvec[1:(i-1)]; Ui_tensor; Svip1_tensor]
-    new_reserr = [reserr; epsi]
-
-    return _trunc_step_rec(i+1, psi, new_lind, new_resvec, new_reserr; normalize, kargs...)
-end
-
-function truncMap(psi::MPS; normalize=false, kargs...)
-    N = length(psi)
-
-    resvec0 = [psi[1]]
-    reserr0 = Float64[]
-    lind0 = nothing
-
-    resvec, reserr, _ = _trunc_step_rec(1, psi, lind0, resvec0, reserr0; normalize, kargs...)
-
-    tpsi = MPS(resvec)
-    # tpsi.llim = N-1
-    # tpsi.rlim = N+1
-    # NOTE: THIS IS MUTATION, AND CANNOT BE DONE IN ZYGOTE
-    # WHAT ONE COULD DO IS TO DEFINE A MPS CONSTRUCTOR THAT LETS YOU SPECIFY LLIM AND rlim
-    # AT THE TIME OF CONSTRUCTION, AND THEN INTRODUCE A PROPER RRULE FOR THAT by adding two notangents
-    return tpsi, reserr
-end
-
-truncMap_point_dir = () -> begin
-    N = 2
-    sites = siteinds("Qubit", N)
-    truncMap_point = () -> randomMPS(sites, 2)
-    truncMap_dir = () -> randomMPS(sites, 2)
-    return truncMap_point, truncMap_dir
-end
-function truncMap_costfunc(psi::MPS)
-    tpsi, _ = truncMap(psi; normalize=false)
-    return real(inner(psi, tpsi))
-end
-plot = test_rrule(truncMap_point_dir()..., truncMap_costfunc)
-
 
 # This does NOT break when adding custom rrule for MPS, but breaks when re-adding truncsimple
 function overlap(U_array::Vector{Matrix{T}}, mps::MPS; trunc=NamedTuple()) where {T}
@@ -608,33 +593,11 @@ function overlap(U_array::Vector{Matrix{T}}, mps::MPS; trunc=NamedTuple()) where
     
     ansatz = ITensorMPS.apply(gates, zeromps)
 
-    orthogonalize!(ansatz, 2)
     #final = ansatz
     #final, err = truncAD(ansatz; normalize=false, kargs...)
+    #IMPORTANT: for truncsimple to work, ansatz has to be orthogonalized to 2
+    # but orthogonalize! is not compatible with AD -> need to find a better method
     final = truncSimple(ansatz; trunc)
-
-    return real(inner(mps, final))
-end
-
-function overlapRec(U_array::Vector{Matrix{T}}, mps::MPS; kargs...) where {T}
-
-    N = length(mps)
-    sites = siteinds(mps)
-    n_unitaries = length(U_array)
-
-    zeros = MPS(sites, ["0" for _ in 1:N])
-
-    # we prepare the values of j to use in the next section here
-    pattern = vcat([1:2:N-1; N-2:-2:2])
-    # repeat pattern as needed to match n_unitaries, then truncate to exact length
-    # if n_unitaries < length(pattern), only the first k elements are used
-    jvals = repeat(pattern, ceil(Int, n_unitaries / length(pattern)))[1:n_unitaries]
-
-    gates = [ITensor(U_array[unit_no], sites[j]', sites[j+1]', sites[j], sites[j+1]) for (unit_no, j) in enumerate(jvals)]
-    
-    ansatz = ITensorMPS.apply(gates, zeros)
-
-    final, err = truncMap(ansatz; normalize=false, kargs...)
 
     return real(inner(mps, final))
 end
