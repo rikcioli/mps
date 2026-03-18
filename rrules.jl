@@ -361,9 +361,10 @@ end
 
 
 function truncDM(ψ::MPS; trunc=NamedTuple())
+
     sites = siteinds(ψ)
-    ψdag = replace_siteinds(dag(ψ), sites')
-    envR = ψ[2]*ψdag[2]
+    ψdag = dag(ψ)'
+    envR = ψ[2]*delta(sites[2], sites[2]')*ψdag[2]
     rho1_ten = ψ[1]*envR*ψdag[1]
 
     rho1 = Matrix(rho1_ten, sites[1], sites[1]')
@@ -375,60 +376,53 @@ function truncDM(ψ::MPS; trunc=NamedTuple())
     ψt2 = dag(Vten)*ψ[1]*ψ[2]
     ψt1 = Vten
 
-    ψt = MPS([ψt1, ψt2])
+    vect = [ψt1, ψt2]
+    ψt = MPS(vect)
     return ψt
 end
 
 function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
     sites = siteinds(ψ)
-    links = linkinds(ψ)
-    Aten = ψ[1]*ψ[2]
 
-    A = Matrix(Aten, sites[1], sites[2])
+    ψdag = dag(ψ)'
+    envR = ψ[2]*delta(sites[2], sites[2]')*ψdag[2]
+    rho1_ten = ψ[1]*envR*ψdag[1]
 
-    ψ1, ψ2 = qr_compact(A)  # needed in the pullback when we need to recreate the input MPS in a gauge inv way
-    ψ1ten = ITensor(ψ1, sites[1], links[1])     # can ignore this in the forward mode
-    ψ2ten = ITensor(ψ2, links[1], sites[2])
+    rho1 = Matrix(rho1_ten, sites[1], sites[1]')
+    D, U, ϵ = eigh_trunc(rho1, trunc=trunc)
 
-    U, S, Vdg, ϵ = svd_trunc(A; trunc=trunc) # actual compression
-    @show S
+    Ulinkind = Index(size(U)[2], "Link, u")
+    Uten = ITensor(U, sites[1], Ulinkind)
 
-    uind = Index(size(U)[2], "Link, u")
-    Uten = ITensor(U, sites[1], uind)
-    SVten = ITensor(S*Vdg, uind, sites[2])
+    ψ12 = ψ[1]*ψ[2]
+    ψt2 = dag(Uten)*ψ12
+    ψt1 = Uten
 
-    vec = [Uten, SVten]
+    vect = [ψt1, ψt2]
+    ψt, MPS_pullback = ChainRulesCore.rrule(MPS, vect)
 
-    ψt = MPS(vec)
+    function truncDM_pullback(Δψt)
+        _, Δψt_vec = MPS_pullback(Δψt)  #vector to MPS
+        ΔB1, ΔB2 = Δψt_vec
+        cind = commonind(ΔB1, ΔB2)
+        ΔB1, ΔB2 = replaceind(ΔB1, cind, Ulinkind), replaceind(ΔB2, cind, Ulinkind)  #extract the two components
 
-    function truncSimple_pullback(Δψt)
+        ΔU = Array{ComplexF64}(ΔB1, sites[1], Ulinkind)     # contribution from MPS([U1, B2])
+        ΔU += Array{ComplexF64}(ψ12*conj(ΔB2), sites[1], Ulinkind)  # contribution from B2=U1|ψ⟩
+        Δrho1 = zero(rho1)
+        MatrixAlgebraKit.eigh_trunc_pullback!(Δrho1, rho1, (D, U), (ZeroTangent(), ΔU)) # rho1 to (D, U)
+  
+        Δψten_rho1 = [noprime(ITensor(Δrho1+Δrho1', sites[1]', sites[1])*ψ[1]), ψ[2]] # contribution from rho1 = Tr2(ψ)
+        Δψ_rho1 = MPS(Δψten_rho1)
+        Δψten_B2 = [Uten, ΔB2]
+        Δψ_B2 = MPS(Δψten_B2) # contribution from B2=U1|ψ⟩
+        Δψ = Δψ_rho1 + Δψ_B2 
 
-        Δψt_mat = Δψt[1]*Δψt[2]
-        ΔU = Array{ComplexF64}(Δψt_mat*conj(SVten), sites[1], uind)
-        ΔSVdg = Array{ComplexF64}(Δψt_mat*conj(Uten), uind, sites[2])
-        ΔS = ΔSVdg*(Vdg')
-        ΔVdg = S'*ΔSVdg
-
-        ΔA = zero(A)
-        MatrixAlgebraKit.svd_trunc_pullback!(ΔA, A, (U, S, Vdg), (ΔU, ΔS, ΔVdg))
-        ΔAten = ITensor(ΔA, sites[1], sites[2])
-
-        # now we need to reconstruct the qr we used for gauge fixing, which is STRICTLY NECESSARY
-        Δψ1ten = ΔAten*conj(ψ2ten)
-        Δψ2ten = ΔAten*conj(ψ1ten)
-        Δψ1 = Array{ComplexF64}(Δψ1ten, sites[1], links[1])
-        Δψ2 = Array{ComplexF64}(Δψ2ten, links[1], sites[2])
-        Δmps = zero(A)
-        MatrixAlgebraKit.qr_pullback!(Δmps, A, (ψ1, ψ2), (Δψ1, Δψ2))
-        a, b = qr_compact(Δmps)
-        Δψ = MPS([ITensor(a, sites[1], links[1]), ITensor(b, links[1], sites[2])])
-
-        Δψ.llim = 1
-        Δψ.rlim = 3
         return (NoTangent(), Δψ)
     end
-    return ψt, truncSimple_pullback
+    return ψt, truncDM_pullback
 end
+
 
 function truncAD(psi::MPS; normalize = false, kargs...)
     N = length(psi)
@@ -595,9 +589,12 @@ function overlap(U_array::Vector{Matrix{T}}, mps::MPS; trunc=NamedTuple()) where
 
     #final = ansatz
     #final, err = truncAD(ansatz; normalize=false, kargs...)
+    
     #IMPORTANT: for truncsimple to work, ansatz has to be orthogonalized to 2
     # but orthogonalize! is not compatible with AD -> need to find a better method
-    final = truncSimple(ansatz; trunc)
+    # final = truncSimple(ansatz; trunc)
+
+    final = truncDM(ansatz; trunc)
 
     return real(inner(mps, final))
 end
@@ -642,8 +639,6 @@ f = arrU -> overlap(arrU, psi; trunc=(maxrank=1,))
 gradient(f, U_array)
 
 g = arrU -> mt.project(arrU, gradient(f, arrU)[1])
-
-g(U_array)
 
 plot = testGrad(() -> genPoint(n), U -> genTanVec(U, n), arrU -> (f(arrU), g(arrU)), mt.inner, mt.retract)
 
