@@ -360,7 +360,7 @@ function ChainRulesCore.rrule(::typeof(truncSimple), ψ::MPS; trunc=NamedTuple()
 end
 
 
-function truncDM(ψ::MPS; trunc=NamedTuple())
+function truncDMsimple(ψ::MPS; trunc=NamedTuple())
 
     sites = siteinds(ψ)
     ψdag = dag(ψ)'
@@ -368,20 +368,20 @@ function truncDM(ψ::MPS; trunc=NamedTuple())
     rho1_ten = ψ[1]*envR*ψdag[1]
 
     rho1 = Matrix(rho1_ten, sites[1], sites[1]')
-    D, V, ϵ = eig_trunc(rho1, trunc=trunc)
+    D, U, ϵ = eig_trunc(rho1, trunc=trunc)
 
-    Vlinkind = Index(size(V)[2], "Link, u")
-    Vten = ITensor(V, sites[1], Vlinkind)
+    Ulinkind = Index(size(U)[2], "Link, u")
+    Uten = ITensor(U, sites[1], Ulinkind)
 
-    ψt2 = dag(Vten)*ψ[1]*ψ[2]
-    ψt1 = Vten
+    ψt2 = dag(Uten)*ψ[1]*ψ[2]
+    ψt1 = Uten
 
     vect = [ψt1, ψt2]
     ψt = MPS(vect)
     return ψt
 end
 
-function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
+function ChainRulesCore.rrule(::typeof(truncDMsimple), ψ::MPS; trunc=NamedTuple())
     sites = siteinds(ψ)
 
     ψdag = dag(ψ)'
@@ -401,7 +401,7 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
     vect = [ψt1, ψt2]
     ψt, MPS_pullback = ChainRulesCore.rrule(MPS, vect)
 
-    function truncDM_pullback(Δψt)
+    function truncDMsimple_pullback(Δψt)
         _, Δψt_vec = MPS_pullback(Δψt)  #vector to MPS
         ΔB1, ΔB2 = Δψt_vec
         cind = commonind(ΔB1, ΔB2)
@@ -419,6 +419,178 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
         Δψ = Δψ_rho1 + Δψ_B2 
 
         return (NoTangent(), Δψ)
+    end
+    return ψt, truncDM_pullback
+end
+
+function truncDM(ψ::MPS; trunc=NamedTuple())
+    N = length(ψ)
+    sites = siteinds(ψ)
+
+    envR = [ψ[N]*delta(sites[N], sites[N]')*dag(ψ[N])']
+    for j in N-1:-1:2
+      push!(envR, envR[N-j]*ψ[j]*delta(sites[j], sites[j]')*dag(ψ[j])')
+    end
+
+    vect = ITensor[]    # store tensors that make the final mps
+    errs = Float64[]    # store truncation errors
+    ilinks = Index[]    # store intermediate links
+    isites = [sites[1]]     # store intermediate site1
+    iψ = [ψ[:]]  # store intermediate ψ
+    icombiners = ITensor[]      # store intermediate combiners
+
+    for j in 1:N-1
+        ψ = iψ[j]
+        ψ1 = ψ[1]
+        site1 = isites[j]
+        rhoj_ten = ψ1*envR[N-j]*dag(ψ1)'
+
+        rhoj = Matrix(rhoj_ten, site1, site1')
+        D, U, ϵ = eig_trunc(rhoj, trunc=trunc)
+        push!(errs, ϵ)
+
+        Ulinkind = Index(size(U)[2], "Link, l=$(j)")
+        push!(ilinks, Ulinkind)
+        Uten = ITensor(U, isites[j], Ulinkind)
+        if j>1
+            push!(vect, dag(icombiners[end])*Uten)
+        else
+            push!(vect, Uten)
+        end    
+
+        if j == N-1
+            push!(vect, dag(Uten)*ψ1*ψ[2])
+        else
+            c12 = combiner(Ulinkind, sites[j+1])
+            push!(icombiners, c12)
+            ψ1new = c12*(dag(Uten)*ψ1*ψ[2])
+            push!(iψ, [ψ1new; ψ[3:end]])
+            site1new = combinedind(c12)
+            push!(isites, site1new)
+        end
+    end
+
+    ψt = MPS(vect)
+    return ψt
+end
+
+function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
+    N = length(ψ)
+    sites = siteinds(ψ)
+
+    envR = [ψ[N]*delta(sites[N], sites[N]')*dag(ψ[N])']
+    for j in N-1:-1:2
+      push!(envR, envR[N-j]*ψ[j]*delta(sites[j], sites[j]')*dag(ψ[j])')
+    end
+
+    vect = ITensor[]    # store tensors that make the final mps
+    errs = Float64[]    # store truncation errors
+    ilinks = Index[]    # store intermediate links
+    isites = [sites[1]]     # store intermediate site1
+    iψ = [ψ[:]]  # store intermediate ψ
+    icombiners = ITensor[]      # store intermediate combiners
+    ieigh_trunc = []    # store intermediate rdm and eigh_trunc results
+
+    for j in 1:N-1
+        ψ = iψ[j]
+        ψ1 = ψ[1]
+        site1 = isites[j]
+        rhoj_ten = ψ1*envR[N-j]*dag(ψ1)'
+
+        rhoj = Matrix(rhoj_ten, site1, site1')
+        D, U, ϵ = eigh_trunc(rhoj, trunc=trunc)
+        push!(ieigh_trunc, (rhoj, D, U))
+        push!(errs, ϵ)
+
+        Ulinkind = Index(size(U)[2], "Link, l=$(j)")
+        push!(ilinks, Ulinkind)
+        Uten = ITensor(U, isites[j], Ulinkind)
+        if j>1
+            push!(vect, dag(icombiners[end])*Uten)
+        else
+            push!(vect, Uten)
+        end    
+
+        if j == N-1
+            push!(vect, dag(Uten)*ψ1*ψ[2])
+        else
+            c12 = combiner(Ulinkind, sites[j+1])
+            push!(icombiners, c12)
+            ψ1new = c12*(dag(Uten)*ψ1*ψ[2])
+            push!(iψ, [ψ1new; ψ[3:end]])
+            site1new = combinedind(c12)
+            push!(isites, site1new)
+        end
+    end
+
+    ψt, MPS_pullback = ChainRulesCore.rrule(MPS, vect)
+
+    function truncDM_pullback(Δψt)
+        _, Δψt_vec = MPS_pullback(Δψt)  #vector to MPS
+        # we call its elements [ΔB1, ΔB2, ..., ΔBN-1, ΔψN] as the last element is just ΔψN
+        # every B is actually just U with split indices, that must be combined accordingly
+
+        ψ3 = iψ[3]
+        rhoj, D, U = ieigh_trunc[3]
+        site1 = isites[3]
+        Ulinkind = ilinks[3]
+        ΔB3, Δψ4 = Δψt_vec[3:4]
+        comb2 = icombiners[2]
+        #ψlast = ψ3[2] reuse this in contractions for U
+
+        ΔU = Array{ComplexF64}(comb2*ΔB3, site1, Ulinkind)     # contribution from MPS([U1, U2, U3, ψ4])
+        ΔU += Array{ComplexF64}(ψ3[1]*ψ3[2]*conj(Δψ4), site1, Ulinkind)  # contribution from |ψ4⟩=U3|ψ3⟩
+        Δrhoj = zero(rhoj)
+        MatrixAlgebraKit.eigh_trunc_pullback!(Δrhoj, rhoj, (D, U), (ZeroTangent(), ΔU)) # rhoj to (D, U)
+  
+        Δψ3ten_rhoj = [noprime(ITensor(Δrhoj+Δrhoj', site1', site1)*ψ3[1]), ψ3[2]]  # contribution from rhoj = Tr_(j+1..N)(ψ)
+        Δψ3ten_ψ4 = [ITensor(U, site1, Ulinkind), Δψ4]   #contribution from |ψ4⟩=U3|ψ3⟩
+        # check if it can be done with MPS even tho siteinds have different sizes, otherwise either we contract to a tensor or we use same linkinds
+        Δψ3_rhoj = MPS(Δψ3ten_rhoj)        
+        Δψ3_ψ4 = MPS(Δψ3ten_ψ4) # contribution from B2=U1|ψ⟩
+        Δψ3 = Δψ3_rhoj + Δψ3_ψ4
+        # decombine previous mps: this has to be done after the sum, since the sum treats them as states
+        Δψ3[1] *= dag(comb2)
+
+
+        ψ2 = iψ[2]      
+        rhoj, D, U = ieigh_trunc[2]
+        site1 = isites[2]
+        Ulinkind = ilinks[2]
+        ΔB2 = Δψt_vec[2]
+        comb1 = icombiners[1]
+
+        ΔU = Array{ComplexF64}(comb1*ΔB2, site1, Ulinkind)     # contribution from MPS([U1, U2, U3, ψ4])
+        ΔU += Array{ComplexF64}(ψ2[1]*ψ2[2]*ψ2[3]*dag(Δψ3[1])*dag(Δψ3[2]), site1, Ulinkind)  # contribution from |ψ3⟩=U2|ψ2⟩
+        Δrhoj = zero(rhoj)
+        MatrixAlgebraKit.eigh_trunc_pullback!(Δrhoj, rhoj, (D, U), (ZeroTangent(), ΔU))
+  
+        Δψ2ten_rhoj = [noprime(ITensor(Δrhoj+Δrhoj', site1', site1)*ψ2[1]); ψ2[2:end]] # contribution from rhoj = Tr_(j+1..N)(ψ)
+        Δψ2ten_ψ3 = [ITensor(U, site1, Ulinkind); Δψ3[:]]
+        Δψ2_rhoj = MPS(Δψ2ten_rhoj)
+        Δψ2_ψ3 = MPS(Δψ2ten_ψ3)
+        Δψ2 = Δψ2_rhoj + Δψ2_ψ3
+        Δψ2[1] *= dag(comb1)
+
+
+        ψ1 = iψ[1]      
+        rhoj, D, U = ieigh_trunc[1]
+        site1 = isites[1]
+        Ulinkind = ilinks[1]
+        ΔB1 = Δψt_vec[1]
+
+        ΔU = Array{ComplexF64}(ΔB1, site1, Ulinkind)     # contribution from MPS([U1, U2, U3, ψ4])
+        ΔU += Array{ComplexF64}(ψ1[1]*ψ1[2]*ψ1[3]*ψ1[4]*dag(Δψ2[1])*dag(Δψ2[2])*dag(Δψ2[3]), site1, Ulinkind)  # contribution from |ψ2⟩=U1|ψ1⟩
+        Δrhoj = zero(rhoj)
+        MatrixAlgebraKit.eigh_trunc_pullback!(Δrhoj, rhoj, (D, U), (ZeroTangent(), ΔU))
+  
+        Δψ1ten_rhoj = [noprime(ITensor(Δrhoj+Δrhoj', site1', site1)*ψ1[1]); ψ1[2:end]] # contribution from rhoj = Tr_(j+1..N)(ψ)
+        Δψ1ten_ψ2 = [ITensor(U, site1, Ulinkind); Δψ2[:]]
+        Δψ1_rhoj = MPS(Δψ1ten_rhoj)
+        Δψ1_ψ2 = MPS(Δψ1ten_ψ2)
+        Δψ1 = Δψ1_rhoj + Δψ1_ψ2
+
+        return (NoTangent(), Δψ1)
     end
     return ψt, truncDM_pullback
 end
@@ -634,6 +806,10 @@ psi = randomMPS(ComplexF64, siteinds("Qubit", 2), 2)
 U_array = [random_unitary(4)]
 n = length(U_array)
 
+psi = randomMPS(ComplexF64, siteinds("Qubit", 4), 2)
+truncDM(psi)
+U_array = [random_unitary(4) for _ in 1:2]
+n = length(U_array)
 
 f = arrU -> overlap(arrU, psi; trunc=(maxrank=1,))
 gradient(f, U_array)
