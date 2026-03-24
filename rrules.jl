@@ -1,3 +1,4 @@
+using MKL
 include("mpsMethods.jl")
 import .MPSMethods as mt
 import Plots
@@ -46,25 +47,6 @@ function testGrad(genPoint::Function, genTanVec::Function, computeCostGrad::Func
     return plot
 end
 
-
-# function mps_from_tangent(t, ψ)
-#     data = [isnothing(t.data[i]) ? 0*ψ[i] : t.data[i] for i in eachindex(ψ)]
-#     return MPS(data)
-# end
-# 
-# function ITensorMPS.convert(::Type{MPS},
-#     t::Tangent{<:Any,<:NamedTuple{(:data,:llim,:rlim)}})
-# 
-#     data = t.data
-#     ψ = MPS(data)
-#     ψ.llim = 0
-#     ψ.rlim = length(data)+1
-#     return ψ
-# end
-
-# function ITensorMPS.convert(::Type{MPS}, M::Tangent{Any, @NamedTuple{data::Vector{ITensor}, llim::ZeroTangent, rlim::ZeroTangent}})
-#     return MPS(M[1])
-# end
  
 # function ChainRulesCore.rrule(::Type{Matrix{T}}, x::ITensor, rowinds, colinds) where {T}
 #     y = Matrix{T}(x, rowinds, colinds)
@@ -113,35 +95,6 @@ end
 
 
 
-# Technically not needed since already present in ITensorMPS
-# BUT ACTUALLY the one present in ITensorMPS also performs projection onto gauge inv subspace
-# function ChainRulesCore.rrule(::Type{MPS}, x::Vector{ITensor})
-#     ψ = MPS(x)
-#     function pullback(ψbar)
-#         ψbar = unthunk(ψbar)
-#         x̄ = ψbar.data
-#         return (NoTangent(), x̄)
-#     end
-#     return ψ, pullback
-# end
-
-# function ChainRulesCore.rrule(::typeof(getindex), ψ::MPS, i::Int)
-#     y = ψ[i]
-#     function pullback(ȳ)
-#         ȳ = unthunk(ȳ)
-#         N = length(ψ)
-#         databar = Vector{ITensor}(undef, N)
-#         for j in 1:N
-#             databar[j] = ITensor(inds(ψ[j]))
-#         end
-#         databar[i] = ȳ
-#         ψbar = MPS(databar)
-#         ψbar.llim = ψ.llim
-#         ψbar.rlim = ψ.rlim
-#         return (NoTangent(), ψbar, NoTangent())
-#     end
-#     return y, pullback
-# end
 
 
 
@@ -423,13 +376,17 @@ function ChainRulesCore.rrule(::typeof(truncDMsimple), ψ::MPS; trunc=NamedTuple
     return ψt, truncDM_pullback
 end
 
+
 function truncDM(ψ::MPS; trunc=NamedTuple())
+    if length(trunc) == 0
+        trunc = (maxrank=maxlinkdim(ψ),)
+    end
     N = length(ψ)
     sites = siteinds(ψ)
 
     envR = [ψ[N]*delta(sites[N], sites[N]')*dag(ψ[N])']
     for j in N-1:-1:2
-      push!(envR, envR[N-j]*ψ[j]*delta(sites[j], sites[j]')*dag(ψ[j])')
+        push!(envR, envR[N-j]*ψ[j]*delta(sites[j], sites[j]')*dag(ψ[j])')
     end
 
     vect = ITensor[]    # store tensors that make the final mps
@@ -471,12 +428,19 @@ function truncDM(ψ::MPS; trunc=NamedTuple())
     end
 
     ψt = MPS(vect)
+
     return ψt
 end
 
+
 function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
+    maxrank = maxlinkdim(ψ)
+    if length(trunc) == 0
+        trunc = (maxrank=maxrank,)
+    end
     N = length(ψ)
     sites = siteinds(ψ)
+    links = linkinds(ψ)
 
     envR = [ψ[N]*delta(sites[N], sites[N]')*dag(ψ[N])']
     for j in N-1:-1:2
@@ -490,6 +454,7 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
     iψ = [ψ[:]]  # store intermediate ψ
     icombiners = ITensor[]      # store intermediate combiners
     ieigh_trunc = []    # store intermediate rdm and eigh_trunc results
+    iψ12::Vector{Vector{ITensor}} = []    # store ψ[1] and ψ[2]
 
     for j in 1:N-1
         ψ = iψ[j]
@@ -511,6 +476,8 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
             push!(vect, Uten)
         end    
 
+        push!(iψ12, ψ[1:2])
+
         if j == N-1
             push!(vect, dag(Uten)*ψ1*ψ[2])
         else
@@ -530,67 +497,61 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
         # we call its elements [ΔB1, ΔB2, ..., ΔBN-1, ΔψN] as the last element is just ΔψN
         # every B is actually just U with split indices, that must be combined accordingly
 
-        ψ3 = iψ[3]
-        rhoj, D, U = ieigh_trunc[3]
-        site1 = isites[3]
-        Ulinkind = ilinks[3]
-        ΔB3, Δψ4 = Δψt_vec[3:4]
-        comb2 = icombiners[2]
-        #ψlast = ψ3[2] reuse this in contractions for U
+        Δψj_MPS = MPS([Δψt_vec[N]])
+        local Δψj_rhoj, Δψj_ψjp1
+        local contrj, contrjp1
+        for j in N-1:-1:1
+            ψj = iψ[j]  
+            ψj12 = iψ12[j]
+            rhoj, D, U = ieigh_trunc[j]
+            site1 = isites[j]
+            Ulinkind = ilinks[j]
+            ΔBj = Δψt_vec[j]
+            if j>1
+                combj = icombiners[j-1]
+            end
 
-        ΔU = Array{ComplexF64}(comb2*ΔB3, site1, Ulinkind)     # contribution from MPS([U1, U2, U3, ψ4])
-        ΔU += Array{ComplexF64}(ψ3[1]*ψ3[2]*conj(Δψ4), site1, Ulinkind)  # contribution from |ψ4⟩=U3|ψ3⟩
-        Δrhoj = zero(rhoj)
-        MatrixAlgebraKit.eigh_trunc_pullback!(Δrhoj, rhoj, (D, U), (ZeroTangent(), ΔU)) # rhoj to (D, U)
-  
-        Δψ3ten_rhoj = [noprime(ITensor(Δrhoj+Δrhoj', site1', site1)*ψ3[1]), ψ3[2]]  # contribution from rhoj = Tr_(j+1..N)(ψ)
-        Δψ3ten_ψ4 = [ITensor(U, site1, Ulinkind), Δψ4]   #contribution from |ψ4⟩=U3|ψ3⟩
-        # check if it can be done with MPS even tho siteinds have different sizes, otherwise either we contract to a tensor or we use same linkinds
-        Δψ3_rhoj = MPS(Δψ3ten_rhoj)        
-        Δψ3_ψ4 = MPS(Δψ3ten_ψ4) # contribution from B2=U1|ψ⟩
-        Δψ3 = Δψ3_rhoj + Δψ3_ψ4
-        # decombine previous mps: this has to be done after the sum, since the sum treats them as states
-        Δψ3[1] *= dag(comb2)
+            ΔU = Array{ComplexF64}(j>1 ? combj*ΔBj : ΔBj, site1, Ulinkind)     # contribution from MPS([U1, U2, U3, ψ4])
+            # now we need to add the contribution from |ψjp1⟩=Uj|ψj⟩, that is the contribution of Δψjp1 to ΔUj
+            # which is obtained by multiplying ψj[1] with contrj ≡ contract(ψj[2:end], Δψjp1).
 
+            if j==N-1
+                # for j=N-1 this is simply
+                contrj = ψj12[2]*dag(Δψt_vec[N])
+            else
+                # contrj can be constructed recursively by splitting Δψjp1 into Δψjp1_rhojp1 and Δψjp1_ψjp2
+                # the first one is only present when j<N-1, as there's no reduced density matrix computed at the last step
+                # it can be computed by reusing the right environment defined in the forward pass
+                contr_rhoj = ψj12[2]*dag(prime!(Δψj_rhoj, links[j+1]))*envR[N-j-1]
 
-        ψ2 = iψ[2]      
-        rhoj, D, U = ieigh_trunc[2]
-        site1 = isites[2]
-        Ulinkind = ilinks[2]
-        ΔB2 = Δψt_vec[2]
-        comb1 = icombiners[1]
+                # the second one can be defined recursively in terms of contrjp1
+                contr_ψjp1 = ψj12[2]*dag(Δψj_ψjp1)*contrjp1
 
-        ΔU = Array{ComplexF64}(comb1*ΔB2, site1, Ulinkind)     # contribution from MPS([U1, U2, U3, ψ4])
-        ΔU += Array{ComplexF64}(ψ2[1]*ψ2[2]*ψ2[3]*dag(Δψ3[1])*dag(Δψ3[2]), site1, Ulinkind)  # contribution from |ψ3⟩=U2|ψ2⟩
-        Δrhoj = zero(rhoj)
-        MatrixAlgebraKit.eigh_trunc_pullback!(Δrhoj, rhoj, (D, U), (ZeroTangent(), ΔU))
-  
-        Δψ2ten_rhoj = [noprime(ITensor(Δrhoj+Δrhoj', site1', site1)*ψ2[1]); ψ2[2:end]] # contribution from rhoj = Tr_(j+1..N)(ψ)
-        Δψ2ten_ψ3 = [ITensor(U, site1, Ulinkind); Δψ3[:]]
-        Δψ2_rhoj = MPS(Δψ2ten_rhoj)
-        Δψ2_ψ3 = MPS(Δψ2ten_ψ3)
-        Δψ2 = Δψ2_rhoj + Δψ2_ψ3
-        Δψ2[1] *= dag(comb1)
+                # sum the two as they have the same inds
+                contrj = contr_rhoj + contr_ψjp1
+            end
+            ΔU += Array{ComplexF64}(ψj12[1]*contrj, site1, Ulinkind)
 
+            Δrhoj = zero(rhoj)
+            MatrixAlgebraKit.eigh_trunc_pullback!(Δrhoj, rhoj, (D, U), (ZeroTangent(), ΔU))     # pullback of eigh_trunc
+    
+            Δψj_rhoj = noprime(ITensor(Δrhoj+Δrhoj', site1', site1)*ψj12[1]) # contribution from rhoj = Tr_(j+1..N)(ψ)
+            Δψj_ψjp1 = ITensor(U, site1, Ulinkind)    #contribution from |ψj+1⟩=Uj|ψj⟩
 
-        ψ1 = iψ[1]      
-        rhoj, D, U = ieigh_trunc[1]
-        site1 = isites[1]
-        Ulinkind = ilinks[1]
-        ΔB1 = Δψt_vec[1]
+            Δψj_MPS_rhoj = MPS([Δψj_rhoj; ψj[2:end]])
+            Δψj_MPS_ψjp1 = MPS([Δψj_ψjp1; Δψj_MPS[:]])
+            Δψj_MPS = Δψj_MPS_rhoj + Δψj_MPS_ψjp1
 
-        ΔU = Array{ComplexF64}(ΔB1, site1, Ulinkind)     # contribution from MPS([U1, U2, U3, ψ4])
-        ΔU += Array{ComplexF64}(ψ1[1]*ψ1[2]*ψ1[3]*ψ1[4]*dag(Δψ2[1])*dag(Δψ2[2])*dag(Δψ2[3]), site1, Ulinkind)  # contribution from |ψ2⟩=U1|ψ1⟩
-        Δrhoj = zero(rhoj)
-        MatrixAlgebraKit.eigh_trunc_pullback!(Δrhoj, rhoj, (D, U), (ZeroTangent(), ΔU))
-  
-        Δψ1ten_rhoj = [noprime(ITensor(Δrhoj+Δrhoj', site1', site1)*ψ1[1]); ψ1[2:end]] # contribution from rhoj = Tr_(j+1..N)(ψ)
-        Δψ1ten_ψ2 = [ITensor(U, site1, Ulinkind); Δψ2[:]]
-        Δψ1_rhoj = MPS(Δψ1ten_rhoj)
-        Δψ1_ψ2 = MPS(Δψ1ten_ψ2)
-        Δψ1 = Δψ1_rhoj + Δψ1_ψ2
-
-        return (NoTangent(), Δψ1)
+            if j>1
+                # decombine previous tensors: this has to be done after the sum of MPS, since the sum treats them as states
+                Δψj_rhoj *= dag(combj)
+                Δψj_ψjp1 *= dag(combj)
+                Δψj_MPS[1] *= dag(combj)
+            end
+            contrjp1 = contrj
+        end
+        
+        return (NoTangent(), Δψj_MPS)
     end
     return ψt, truncDM_pullback
 end
@@ -739,8 +700,6 @@ test = Zygote.gradient(truncADTO_costfunc, randomMPS(siteinds("Qubit", 2), 2))[1
 plot = test_rrule(truncADTO_point_dir()..., truncADTO_costfunc)
 
 
-
-# This does NOT break when adding custom rrule for MPS, but breaks when re-adding truncsimple
 function overlap(U_array::Vector{Matrix{T}}, mps::MPS; trunc=NamedTuple()) where {T}
 
     N = length(mps)
@@ -753,22 +712,22 @@ function overlap(U_array::Vector{Matrix{T}}, mps::MPS; trunc=NamedTuple()) where
     pattern = vcat([1:2:N-1; N-2:-2:2])
     # repeat pattern as needed to match n_unitaries, then truncate to exact length
     # if n_unitaries < length(pattern), only the first k elements are used
-    jvals = repeat(pattern, ceil(Int, n_unitaries / length(pattern)))[1:n_unitaries]
+    jvals = repeat(pattern, ceil(Int, n_unitaries/length(pattern)))[1:n_unitaries]
 
     gates = [ITensor(U_array[unit_no], sites[j]', sites[j+1]', sites[j], sites[j+1]) for (unit_no, j) in enumerate(jvals)]
     
-    ansatz = ITensorMPS.apply(gates, zeromps)
+    n_twolayers = div(n_unitaries, N-1)
+    if mod(n_unitaries, N-1) > 0
+        n_twolayers += 1
+    end
+    #@show n_twolayers
+    for j in 1:n_twolayers
+        evolvedmps = ITensorMPS.apply(gates[1+(j-1)*(N-1) : min(j*(N-1), n_unitaries)], zeromps)
+        # make sure we don't truncate a product state -> need to check what happens for variable bond dim
+        zeromps = truncDM(evolvedmps; trunc)
+    end
 
-    #final = ansatz
-    #final, err = truncAD(ansatz; normalize=false, kargs...)
-    
-    #IMPORTANT: for truncsimple to work, ansatz has to be orthogonalized to 2
-    # but orthogonalize! is not compatible with AD -> need to find a better method
-    # final = truncSimple(ansatz; trunc)
-
-    final = truncDM(ansatz; trunc)
-
-    return real(inner(mps, final))
+    return real(inner(mps, zeromps))
 end
 
 
@@ -801,17 +760,13 @@ function testGrad(genPoint::Function, genTanVec::Function, computeCostGrad::Func
     return plot
 end
 
+
 # TEST OVERLAP
-psi = randomMPS(ComplexF64, siteinds("Qubit", 2), 2)
-U_array = [random_unitary(4)]
-n = length(U_array)
-
 psi = randomMPS(ComplexF64, siteinds("Qubit", 4), 2)
-truncDM(psi)
-U_array = [random_unitary(4) for _ in 1:2]
+U_array = [random_unitary(4) for _ in 1:3];
 n = length(U_array)
 
-f = arrU -> overlap(arrU, psi; trunc=(maxrank=1,))
+f = arrU -> overlap(arrU, psi; trunc=(maxrank=2, ))
 gradient(f, U_array)
 
 g = arrU -> mt.project(arrU, gradient(f, arrU)[1])
@@ -820,3 +775,73 @@ plot = testGrad(() -> genPoint(n), U -> genTanVec(U, n), arrU -> (f(arrU), g(arr
 
 U = random_unitary(4)
 svd_trunc(U; trunc=(maxrank=2,))
+
+
+
+result_time = begin
+    times1 = Float64[]
+    times2 = Float64[]
+    for N in 2:2:100
+        tvals1 = Float64[]
+        tvals2 = Float64[]
+        for _ in 1:100
+            psi = randomMPS(ComplexF64, siteinds("Qubit", N), 2)
+            t1 = @elapsed truncDM(psi, trunc=(maxrank=1,))
+            t2 = @elapsed truncate!(psi, maxdim=1)
+            push!(tvals1, t1)
+            push!(tvals2, t2)
+        end
+        push!(times1, sum(tvals1)/100)
+        push!(times2, sum(tvals2)/100)
+    end
+    times1, times2
+end
+plot = Plots.plot(2:2:100, result_time[1], label="truncDM")
+Plots.plot!(plot, 2:2:100, result_time[2], label="truncate")
+
+
+
+result_trunc = begin
+    overlapDM = Float64[]
+    overlapIT = Float64[]
+    for N in 2:2:50
+        dm = Float64[]
+        it = Float64[]
+        for _ in 1:100
+            psi = randomMPS(ComplexF64, siteinds("Qubit", N), 32)
+            psit1 = truncDM(psi, trunc=(maxrank=2,))
+            psit2 = truncate(psi, maxdim=2)
+            push!(dm, real(inner(psit1, psi)))
+            push!(it, real(inner(psit2, psi)))
+        end
+        push!(overlapDM, sum(dm)/100)
+        push!(overlapIT, sum(it)/100)
+    end
+    overlapDM, overlapIT
+end
+plot = Plots.plot(2:2:50, result_trunc[1], label="truncDM", xlabel=L"$N$", ylabel=L"$\langle \psi |\psi_t\rangle$")
+Plots.plot!(plot, 2:2:50, result_trunc[2], label="truncate", yscale=:log)
+
+
+result_time_scaling = begin
+    f = psi -> real(inner(truncDM(psi, trunc=(maxrank=2,)), psi))
+    trunc_time = Float64[]
+    trunc_grad_time = Float64[]
+    for N in 2:2:50
+        @show N
+        times = Float64[]
+        grad_times = Float64[]
+        for _ in 1:100
+            psi = randomMPS(ComplexF64, siteinds("Qubit", N), 8)
+            t1 = @elapsed f(psi)
+            t2 = @elapsed gradient(f, psi)
+            push!(times, t1)
+            push!(grad_times, t2)
+        end
+        push!(trunc_time, sum(times)/100)
+        push!(trunc_grad_time, sum(grad_times)/100)
+    end
+    trunc_time, trunc_grad_time
+end
+plot = Plots.plot(2:2:50, result_time_scaling[1], label="truncDM_time", xlabel=L"$N$", ylabel=L"$\langle \psi |\psi_t\rangle$")
+Plots.plot!(plot, 2:2:50, result_time_scaling[2], label="grad_truncDM_time")
