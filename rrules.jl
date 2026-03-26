@@ -691,23 +691,7 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
         # we call its elements [ΔB1, ΔB2, ..., ΔBN-1, ΔψN] as the last element is just ΔψN
         # every B is actually just U with split indices, that must be combined accordingly
 
-        ΔψN_pad = Δψt_vec[N] # we already prepare the last element of the returned Δψj_MPS
-        # by padding this last ITensor with zeros
-        linkfull = links[N-1]
-        linktrunc = ilinks[N-1]
-        inddiff = linkfull.space - linktrunc.space
-
-        if inddiff > 0     # pad only if needed, otherwise just replace index
-            linkcomp = Index(inddiff, "Link_comp, l=$(N-1)")
-            tencomp = ITensor(linkcomp, sites[N])
-            ΔψN_pad = directsum(linkfull, ΔψN_pad => linktrunc, tencomp => linkcomp)
-        else
-            ΔψN_pad = replaceind(ΔψN_pad, linktrunc, linkfull)
-        end
-
-        # this is the last element of the result, can be computed by unrolling the MPS sum
-        Δψj_MPS = [ΔψN_pad + (N-1)*iψ12[N-1][2]]  
-
+        Δψj_MPS = MPS([Δψt_vec[N]])
         local Δψj_rhoj, Δψj_ψjp1
         local contrj, contrjp1
         for j in N-1:-1:1
@@ -748,57 +732,20 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
             Δψj_rhoj = noprime(ITensor(Δrhoj+Δrhoj', site1', site1)*ψj12[1]) # contribution from rhoj = Tr_(j+1..N)(ψ)
             Δψj_ψjp1 = ITensor(U, site1, Ulinkind)    #contribution from |ψj+1⟩=Uj|ψj⟩
 
-            #Δψj_MPS_rhoj = [Δψj_rhoj; ψj[2:end]]
-            #Δψj_MPS_ψjp1 = [Δψj_ψjp1; Δψj_MPS[:]]
+            Δψj_MPS_rhoj = MPS([Δψj_rhoj; ψj[2:end]])
+            Δψj_MPS_ψjp1 = MPS([Δψj_ψjp1; Δψj_MPS[:]])
+            Δψj_MPS = Δψj_MPS_rhoj + Δψj_MPS_ψjp1
 
             if j>1
+                # decombine previous tensors: this has to be done after the sum of MPS, since the sum treats them as states
                 Δψj_rhoj *= dag(combj)
                 Δψj_ψjp1 *= dag(combj)
+                Δψj_MPS[1] *= dag(combj)
             end
-
-            # now we need to sum them together by padding with zeros the link in Δψj_MPS_ψjp1 if needed
-            # at step j, first we pad the truncated linkinds on the right if needed
-            # this is only required for Δψj_ψjp1, ad Δψj_rhoj has the full right linkind
-            Δψj_ψjp1_pad = Δψj_ψjp1
-            linkfullR = links[j]
-            linktruncR = Ulinkind
-            # NOTE: THIS MAY BE NEGATIVE IF INPUT MPS HAS SOME BOND DIM SMALLER THAN REQUIRED TRUNC -> NEED TO FIX
-            inddiffR = linkfullR.space - linktruncR.space   
-            if inddiffR > 0
-                linkcompR = Index(inddiffR, "Link_comp, l=$(j)")
-                tencompR = j>1 ? ITensor(ilinks[j-1], sites[j], linkcompR) : ITensor(sites[j], linkcompR)
-                Δψj_ψjp1_pad = directsum(linkfullR, Δψj_ψjp1 => linktruncR, tencompR => linkcompR)
-            else
-                Δψj_ψjp1_pad = replaceind(Δψj_ψjp1, linktruncR, linkfullR)
-            end
-
-            Δψj_rhoj_pad = Δψj_rhoj
-            if j>1
-                # now we pad the links on the left for both Δψj_ψjp1_pad and Δψj_rhoj_pad
-                linkfullL = links[j-1]
-                linktruncL = ilinks[j-1]
-                inddiffL = linkfullL.space - linktruncL.space
-                if inddiffL > 0
-                    linkcompL = Index(inddiffL, "Link_comp, l=$(j-1)")
-                    tencompL = ITensor(linkcompL, sites[j], linkfullR)  # remember we already padded the right link
-                    Δψj_ψjp1_pad = directsum(linkfullL, Δψj_ψjp1_pad => linktruncL, tencompL => linkcompL)
-                    Δψj_rhoj_pad = directsum(linkfullL, Δψj_rhoj => linktruncL, tencompL => linkcompL)
-                else
-                    Δψj_ψjp1_pad = replaceind(Δψj_ψjp1_pad, linktruncL, linkfullL)
-                    Δψj_rhoj_pad = replaceind(Δψj_rhoj, linktruncL, linkfullL)
-                end
-            end
-            
-            Δψj_MPS_j = Δψj_ψjp1_pad + Δψj_rhoj_pad 
-            if j>1
-                Δψj_MPS_j += (j-1)*iψ12[j-1][2]
-            end
-            pushfirst!(Δψj_MPS, Δψj_MPS_j)
-
-            contrjp1 = contrj   # update contrj for next step
+            contrjp1 = contrj
         end
         
-        return (NoTangent(), MPS(Δψj_MPS))
+        return (NoTangent(), Δψj_MPS)
     end
     return ψt, truncDM_pullback
 end
