@@ -273,7 +273,6 @@ function ChainRulesCore.rrule(::typeof(truncSimple), ψ::MPS; trunc=NamedTuple()
     ψ2ten = ITensor(ψ2, links[1], sites[2])
 
     U, S, Vdg, ϵ = svd_trunc(A; trunc=trunc) # actual compression
-    @show S
 
     uind = Index(size(U)[2], "Link, u")
     Uten = ITensor(U, sites[1], uind)
@@ -310,6 +309,201 @@ function ChainRulesCore.rrule(::typeof(truncSimple), ψ::MPS; trunc=NamedTuple()
         return (NoTangent(), Δψ)
     end
     return ψt, truncSimple_pullback
+end
+
+function OGtest(ψ::MPS)
+    N = length(ψ)
+    return orthogonalize(ψ, N)
+end
+
+# This actually works, since we do not propagate the gradient in the gauge dependent directions
+function ChainRulesCore.rrule(::typeof(OGtest), ψ::MPS)
+    N = length(ψ)
+    function OGtest_pullback(Δψ)
+        return (NoTangent(), Δψ)
+    end
+    return orthogonalize(ψ, N), OGtest_pullback
+end
+
+# function to orthogonalize an mps to the right that is compatible with AD
+function OGR(ψ::MPS)
+    N = length(ψ)
+    sites = siteinds(ψ)
+    links = linkinds(ψ)
+
+    WLRten_current = ψ[1:2]
+    WLRlist::Vector{Vector{Matrix{ComplexF64}}} = []
+    Wlist = Matrix{ComplexF64}[]
+    QRlist = []
+    QRmidinds = Index[]
+    combs::Vector{Vector{ITensor}} = []
+    combinds = []
+    vec_final = ITensor[]
+
+    for j in 1:N-1
+        WLten, WRten = WLRten_current
+        combs_j = ITensor[]
+        if j > 1
+            combL = combiner(sites[j], QRmidinds[j-1])
+            push!(combs_j, combL)
+            cLind = combinedind(combL)
+            WLten = combL*WLten
+        else
+            cLind = sites[1]
+        end
+        if j < N-1
+            combR = combiner(sites[j+1], links[j+1])
+            push!(combs_j, combR)
+            cRind = combinedind(combR)
+            WRten = WRten*combR
+        else
+            cRind = sites[N]
+        end
+        push!(combs, combs_j)   # store combiners for pullback
+        push!(combinds, (cLind, cRind))     # store combined inds
+        # convert WLten and WRten into matrices and store them for pullback
+        push!(WLRlist, [Array{ComplexF64}(WLten, cLind, links[j]), Array{ComplexF64}(WRten, links[j], cRind)])
+
+        W = Matrix(WLten*WRten, cLind, cRind)
+        push!(Wlist, W)
+        U, R = qr_compact(W)
+        push!(QRlist, (U, R))
+
+        middle_ind = Index(size(U)[2], "Link, u")
+        push!(QRmidinds, middle_ind)
+        Uten = ITensor(U, cLind, middle_ind)
+        Rten = ITensor(R, middle_ind, cRind)
+        
+        Uten = j==1 ? Uten : Uten*dag(combL)
+        Rten = j==N-1 ? Rten : Rten*dag(combR)
+
+        push!(vec_final, Uten)
+        if j==N-1
+            push!(vec_final, Rten)
+        else
+            WLRten_current = [Rten, ψ[j+2]]
+        end
+    end
+
+    ψog = MPS(vec_final)
+    ψog.llim = N-1
+    ψog.rlim = N+1
+
+    return ψog
+end
+
+
+function ChainRulesCore.rrule(::typeof(OGR), ψ::MPS)
+    N = length(ψ)
+    sites = siteinds(ψ)
+    links = linkinds(ψ)
+
+    WLRten_current = ψ[1:2]
+    WLRlist::Vector{Vector{Matrix{ComplexF64}}} = []
+    Wlist = Matrix{ComplexF64}[]
+    QRlist = []
+    QRmidinds = Index[]
+    combs::Vector{Vector{ITensor}} = []
+    combinds = []
+    vec_final = ITensor[]
+
+    for j in 1:N-1
+        WLten, WRten = WLRten_current
+        combs_j = ITensor[]
+        if j > 1
+            combL = combiner(sites[j], QRmidinds[j-1])
+            push!(combs_j, combL)
+            cLind = combinedind(combL)
+            WLten = combL*WLten
+        else
+            cLind = sites[1]
+        end
+        if j < N-1
+            combR = combiner(sites[j+1], links[j+1])
+            push!(combs_j, combR)
+            cRind = combinedind(combR)
+            WRten = WRten*combR
+        else
+            cRind = sites[N]
+        end
+        push!(combs, combs_j)   # store combiners for pullback
+        push!(combinds, (cLind, cRind))     # store combined inds
+        # convert WLten and WRten into matrices and store them for pullback
+        push!(WLRlist, [Array{ComplexF64}(WLten, cLind, links[j]), Array{ComplexF64}(WRten, links[j], cRind)])
+
+        W = Matrix(WLten*WRten, cLind, cRind)
+        push!(Wlist, W)
+        U, R = qr_compact(W)
+        push!(QRlist, (U, R))
+
+        middle_ind = Index(size(U)[2], "Link, u")
+        push!(QRmidinds, middle_ind)
+        Uten = ITensor(U, cLind, middle_ind)
+        Rten = ITensor(R, middle_ind, cRind)
+        
+        Uten = j==1 ? Uten : Uten*dag(combL)
+        Rten = j==N-1 ? Rten : Rten*dag(combR)
+
+        push!(vec_final, Uten)
+        if j==N-1
+            push!(vec_final, Rten)
+        else
+            WLRten_current = [Rten, ψ[j+2]]
+        end
+    end
+
+    ψog, MPS_pullback = ChainRulesCore.rrule(MPS, vec_final)
+    ψog.llim = N-1
+    ψog.rlim = N+1
+
+    function truncOGR_pullback(Δψog)
+
+        _, Δψog_vec = MPS_pullback(Δψog)
+
+        ΔRten = Δψog_vec[N]
+        Δψ_vec = ITensor[]
+        for j in N-1:-1:1
+            @show j
+            combs_j = combs[j]
+            combinds_j = combinds[j]
+            QRmidind_j = QRmidinds[j]
+            WL, WR = WLRlist[j]
+            W = Wlist[j]
+            U, R = QRlist[j]
+
+            # something breaks here, adjoints of qr_pullback are not correct as they are now
+            ΔUten = Δψog_vec[j]
+            ΔUten = j==1 ? ΔUten : ΔUten*combs_j[1]
+            ΔU = Array{ComplexF64}(ΔUten, combinds_j[1], QRmidind_j)
+            ΔR = Array{ComplexF64}(ΔRten, QRmidind_j, combinds_j[2])
+
+            ΔW = zero(W)
+            MatrixAlgebraKit.qr_pullback!(ΔW, W, (U, R), (ΔU, ΔR))
+
+            ΔWL, ΔWR = ΔW*WR', WL'*ΔW
+
+            ΔWRten = ITensor(ΔWR, links[j], combinds_j[2])
+            if j<N-1
+                ΔWRten = j==1 ? ΔWRten*dag(combs_j[1]) : ΔWRten*dag(combs_j[2])     # just because if j==1 there's only one combiner and it's the right one
+            end
+            pushfirst!(Δψ_vec, ΔWRten) # this goes into the final mps
+            ΔWLten = ITensor(ΔWL, combinds_j[1], links[j])
+            ΔWLten = j==1 ? ΔWLten : ΔWLten*dag(combs_j[1]) # this gets decombined and is prepared for next step
+
+            # update for the next step
+            if j>1
+                ΔRten = j==2 ? ΔWLten*combs[j-1][1] : ΔWLten*combs[j-1][2]    # just because if j==2 combs[j-1] only has the right combiner (THIS NEEDS TO CHANGE)
+            else
+                pushfirst!(Δψ_vec, ΔWLten)
+            end
+        end
+        Δψ = MPS(Δψ_vec)
+        Δψ.llim = ψ.llim
+        Δψ.rlim = ψ.rlim    #if it was normalized, the adjoint should be too in theory
+
+        return (NoTangent(), Δψ)
+    end
+    return ψog, truncOGR_pullback
 end
 
 
@@ -467,7 +661,7 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
         push!(ieigh_trunc, (rhoj, D, U))
         push!(errs, ϵ)
 
-        Ulinkind = Index(size(U)[2], "Link, l=$(j)")
+        Ulinkind = Index(size(U)[2], "Link_trunc, l=$(j)")
         push!(ilinks, Ulinkind)
         Uten = ITensor(U, isites[j], Ulinkind)
         if j>1
@@ -497,7 +691,23 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
         # we call its elements [ΔB1, ΔB2, ..., ΔBN-1, ΔψN] as the last element is just ΔψN
         # every B is actually just U with split indices, that must be combined accordingly
 
-        Δψj_MPS = MPS([Δψt_vec[N]])
+        ΔψN_pad = Δψt_vec[N] # we already prepare the last element of the returned Δψj_MPS
+        # by padding this last ITensor with zeros
+        linkfull = links[N-1]
+        linktrunc = ilinks[N-1]
+        inddiff = linkfull.space - linktrunc.space
+
+        if inddiff > 0     # pad only if needed, otherwise just replace index
+            linkcomp = Index(inddiff, "Link_comp, l=$(N-1)")
+            tencomp = ITensor(linkcomp, sites[N])
+            ΔψN_pad = directsum(linkfull, ΔψN_pad => linktrunc, tencomp => linkcomp)
+        else
+            ΔψN_pad = replaceind(ΔψN_pad, linktrunc, linkfull)
+        end
+
+        # this is the last element of the result, can be computed by unrolling the MPS sum
+        Δψj_MPS = [ΔψN_pad + (N-1)*iψ12[N-1][2]]  
+
         local Δψj_rhoj, Δψj_ψjp1
         local contrj, contrjp1
         for j in N-1:-1:1
@@ -538,20 +748,57 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
             Δψj_rhoj = noprime(ITensor(Δrhoj+Δrhoj', site1', site1)*ψj12[1]) # contribution from rhoj = Tr_(j+1..N)(ψ)
             Δψj_ψjp1 = ITensor(U, site1, Ulinkind)    #contribution from |ψj+1⟩=Uj|ψj⟩
 
-            Δψj_MPS_rhoj = MPS([Δψj_rhoj; ψj[2:end]])
-            Δψj_MPS_ψjp1 = MPS([Δψj_ψjp1; Δψj_MPS[:]])
-            Δψj_MPS = Δψj_MPS_rhoj + Δψj_MPS_ψjp1
+            #Δψj_MPS_rhoj = [Δψj_rhoj; ψj[2:end]]
+            #Δψj_MPS_ψjp1 = [Δψj_ψjp1; Δψj_MPS[:]]
 
             if j>1
-                # decombine previous tensors: this has to be done after the sum of MPS, since the sum treats them as states
                 Δψj_rhoj *= dag(combj)
                 Δψj_ψjp1 *= dag(combj)
-                Δψj_MPS[1] *= dag(combj)
             end
-            contrjp1 = contrj
+
+            # now we need to sum them together by padding with zeros the link in Δψj_MPS_ψjp1 if needed
+            # at step j, first we pad the truncated linkinds on the right if needed
+            # this is only required for Δψj_ψjp1, ad Δψj_rhoj has the full right linkind
+            Δψj_ψjp1_pad = Δψj_ψjp1
+            linkfullR = links[j]
+            linktruncR = Ulinkind
+            # NOTE: THIS MAY BE NEGATIVE IF INPUT MPS HAS SOME BOND DIM SMALLER THAN REQUIRED TRUNC -> NEED TO FIX
+            inddiffR = linkfullR.space - linktruncR.space   
+            if inddiffR > 0
+                linkcompR = Index(inddiffR, "Link_comp, l=$(j)")
+                tencompR = j>1 ? ITensor(ilinks[j-1], sites[j], linkcompR) : ITensor(sites[j], linkcompR)
+                Δψj_ψjp1_pad = directsum(linkfullR, Δψj_ψjp1 => linktruncR, tencompR => linkcompR)
+            else
+                Δψj_ψjp1_pad = replaceind(Δψj_ψjp1, linktruncR, linkfullR)
+            end
+
+            Δψj_rhoj_pad = Δψj_rhoj
+            if j>1
+                # now we pad the links on the left for both Δψj_ψjp1_pad and Δψj_rhoj_pad
+                linkfullL = links[j-1]
+                linktruncL = ilinks[j-1]
+                inddiffL = linkfullL.space - linktruncL.space
+                if inddiffL > 0
+                    linkcompL = Index(inddiffL, "Link_comp, l=$(j-1)")
+                    tencompL = ITensor(linkcompL, sites[j], linkfullR)  # remember we already padded the right link
+                    Δψj_ψjp1_pad = directsum(linkfullL, Δψj_ψjp1_pad => linktruncL, tencompL => linkcompL)
+                    Δψj_rhoj_pad = directsum(linkfullL, Δψj_rhoj => linktruncL, tencompL => linkcompL)
+                else
+                    Δψj_ψjp1_pad = replaceind(Δψj_ψjp1_pad, linktruncL, linkfullL)
+                    Δψj_rhoj_pad = replaceind(Δψj_rhoj, linktruncL, linkfullL)
+                end
+            end
+            
+            Δψj_MPS_j = Δψj_ψjp1_pad + Δψj_rhoj_pad 
+            if j>1
+                Δψj_MPS_j += (j-1)*iψ12[j-1][2]
+            end
+            pushfirst!(Δψj_MPS, Δψj_MPS_j)
+
+            contrjp1 = contrj   # update contrj for next step
         end
         
-        return (NoTangent(), Δψj_MPS)
+        return (NoTangent(), MPS(Δψj_MPS))
     end
     return ψt, truncDM_pullback
 end
@@ -725,6 +972,7 @@ function overlap(U_array::Vector{Matrix{T}}, mps::MPS; trunc=NamedTuple()) where
         evolvedmps = ITensorMPS.apply(gates[1+(j-1)*(N-1) : min(j*(N-1), n_unitaries)], zeromps)
         # make sure we don't truncate a product state -> need to check what happens for variable bond dim
         zeromps = truncDM(evolvedmps; trunc)
+        #zeromps = OGtest(evolvedmps)   #check if OGR works
     end
 
     return real(inner(mps, zeromps))
@@ -766,15 +1014,17 @@ psi = randomMPS(ComplexF64, siteinds("Qubit", 4), 2)
 U_array = [random_unitary(4) for _ in 1:3];
 n = length(U_array)
 
-f = arrU -> overlap(arrU, psi; trunc=(maxrank=2, ))
+f = arrU -> overlap(arrU, psi; trunc=(maxrank=2,))
 gradient(f, U_array)
 
 g = arrU -> mt.project(arrU, gradient(f, arrU)[1])
 
 plot = testGrad(() -> genPoint(n), U -> genTanVec(U, n), arrU -> (f(arrU), g(arrU)), mt.inner, mt.retract)
 
-U = random_unitary(4)
-svd_trunc(U; trunc=(maxrank=2,))
+psiog = OGR(psi)
+f = psi -> real(inner(OGR(psi), psi))
+f(psi)
+gradient(f, psi)
 
 
 
