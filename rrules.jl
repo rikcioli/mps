@@ -572,16 +572,19 @@ end
 
 
 function truncDM(ψ::MPS; trunc=NamedTuple())
+    orthogonalize!(ψ, 1)
     if length(trunc) == 0
         trunc = (maxrank=maxlinkdim(ψ),)
     end
     N = length(ψ)
     sites = siteinds(ψ)
+    links = linkinds(ψ)
 
-    envR = [ψ[N]*delta(sites[N], sites[N]')*dag(ψ[N])']
-    for j in N-1:-1:2
-        push!(envR, envR[N-j]*ψ[j]*delta(sites[j], sites[j]')*dag(ψ[j])')
-    end
+    #envR = [ψ[N]*delta(sites[N], sites[N]')*dag(ψ[N])']
+    #for j in N-1:-1:2
+    #    push!(envR, envR[N-j]*ψ[j]*delta(sites[j], sites[j]')*dag(ψ[j])')
+    #end
+    envR = [delta(links[j], links[j]') for j in N-1:-1:1]
 
     vect = ITensor[]    # store tensors that make the final mps
     errs = Float64[]    # store truncation errors
@@ -628,6 +631,7 @@ end
 
 
 function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
+    orthogonalize!(ψ, 1)
     maxrank = maxlinkdim(ψ)
     if length(trunc) == 0
         trunc = (maxrank=maxrank,)
@@ -636,10 +640,14 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
     sites = siteinds(ψ)
     links = linkinds(ψ)
 
-    envR = [ψ[N]*delta(sites[N], sites[N]')*dag(ψ[N])']
-    for j in N-1:-1:2
-      push!(envR, envR[N-j]*ψ[j]*delta(sites[j], sites[j]')*dag(ψ[j])')
-    end
+    ## old one, needed only if mps is not orthonormal
+    # envR = [ψ[N]*delta(sites[N], sites[N]')*dag(ψ[N])']
+    # for j in N-1:-1:2
+    #   push!(envR, envR[N-j]*ψ[j]*delta(sites[j], sites[j]')*dag(ψ[j])')
+    # end
+    ## instead we orthogonalize first and then insert deltas for the environment
+    envR = [delta(links[j], links[j]') for j in N-1:-1:1]
+
 
     vect = ITensor[]    # store tensors that make the final mps
     errs = Float64[]    # store truncation errors
@@ -651,10 +659,10 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
     iψ12::Vector{Vector{ITensor}} = []    # store ψ[1] and ψ[2]
 
     for j in 1:N-1
-        ψ = iψ[j]
-        ψ1 = ψ[1]
+        ψj = iψ[j]
+        ψj1 = ψj[1]
         site1 = isites[j]
-        rhoj_ten = ψ1*envR[N-j]*dag(ψ1)'
+        rhoj_ten = ψj1*envR[N-j]*dag(ψj1)'
 
         rhoj = Matrix(rhoj_ten, site1, site1')
         D, U, ϵ = eigh_trunc(rhoj, trunc=trunc)
@@ -670,15 +678,15 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
             push!(vect, Uten)
         end    
 
-        push!(iψ12, ψ[1:2])
+        push!(iψ12, ψj[1:2])
 
         if j == N-1
-            push!(vect, dag(Uten)*ψ1*ψ[2])
+            push!(vect, dag(Uten)*ψj1*ψj[2])
         else
             c12 = combiner(Ulinkind, sites[j+1])
             push!(icombiners, c12)
-            ψ1new = c12*(dag(Uten)*ψ1*ψ[2])
-            push!(iψ, [ψ1new; ψ[3:end]])
+            ψ1new = c12*(dag(Uten)*ψj1*ψj[2])
+            push!(iψ, [ψ1new; ψj[3:end]])
             site1new = combinedind(c12)
             push!(isites, site1new)
         end
@@ -691,11 +699,11 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
         # we call its elements [ΔB1, ΔB2, ..., ΔBN-1, ΔψN] as the last element is just ΔψN
         # every B is actually just U with split indices, that must be combined accordingly
 
-        Δψj_MPS = MPS([Δψt_vec[N]])
         local Δψj_rhoj, Δψj_ψjp1
         local contrj, contrjp1
+        Δψj_rhoj_list = ITensor[]
+        Δψj_ψjp1_list = [Δψt_vec[N]]
         for j in N-1:-1:1
-            ψj = iψ[j]  
             ψj12 = iψ12[j]
             rhoj, D, U = ieigh_trunc[j]
             site1 = isites[j]
@@ -716,7 +724,7 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
                 # contrj can be constructed recursively by splitting Δψjp1 into Δψjp1_rhojp1 and Δψjp1_ψjp2
                 # the first one is only present when j<N-1, as there's no reduced density matrix computed at the last step
                 # it can be computed by reusing the right environment defined in the forward pass
-                contr_rhoj = ψj12[2]*dag(prime!(Δψj_rhoj, links[j+1]))*envR[N-j-1]
+                contr_rhoj = ψj12[2]*dag(prime(Δψj_rhoj, links[j+1]))*envR[N-j-1]
 
                 # the second one can be defined recursively in terms of contrjp1
                 contr_ψjp1 = ψj12[2]*dag(Δψj_ψjp1)*contrjp1
@@ -732,20 +740,45 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
             Δψj_rhoj = noprime(ITensor(Δrhoj+Δrhoj', site1', site1)*ψj12[1]) # contribution from rhoj = Tr_(j+1..N)(ψ)
             Δψj_ψjp1 = ITensor(U, site1, Ulinkind)    #contribution from |ψj+1⟩=Uj|ψj⟩
 
-            Δψj_MPS_rhoj = MPS([Δψj_rhoj; ψj[2:end]])
-            Δψj_MPS_ψjp1 = MPS([Δψj_ψjp1; Δψj_MPS[:]])
-            Δψj_MPS = Δψj_MPS_rhoj + Δψj_MPS_ψjp1
-
             if j>1
                 # decombine previous tensors: this has to be done after the sum of MPS, since the sum treats them as states
                 Δψj_rhoj *= dag(combj)
                 Δψj_ψjp1 *= dag(combj)
-                Δψj_MPS[1] *= dag(combj)
             end
+
+            push!(Δψj_rhoj_list, Δψj_rhoj)
+            push!(Δψj_ψjp1_list, Δψj_ψjp1)
+
             contrjp1 = contrj
         end
+
+        # Reconstruct the final adjoint as a finite state machine
+        Δψ_vect = ITensor[]
+        links_sum = []
+
+        l1t, l1 = ilinks[1], links[1]
+        ls1 = directsum(l1t, l1)
+        push!(links_sum, ls1)
+        T1 = directsum(ls1, Δψj_ψjp1_list[N] => l1t, Δψj_rhoj_list[N-1] => l1)
+        push!(Δψ_vect, T1)
+
+        for j in 2:N-1
+            lsjm1 = links_sum[j-1]
+            Tj_col1 = directsum(lsjm1, Δψj_ψjp1_list[N-j+1] => ilinks[j-1], ITensor(ComplexF64, links[j-1], sites[j], ilinks[j]) => links[j-1]) 
+            Tj_col2 = directsum(lsjm1, Δψj_rhoj_list[N-j] => ilinks[j-1], ψ[j] => links[j-1])
+
+            lsj = directsum(ilinks[j], links[j])
+            push!(links_sum, lsj)
+            Tj = directsum(lsj, Tj_col1 => ilinks[j], Tj_col2 => links[j]) 
+            push!(Δψ_vect, Tj)
+        end
+
+        TN = directsum(links_sum[N-1], Δψj_ψjp1_list[1] => ilinks[N-1], ψ[N] => links[N-1])
+        push!(Δψ_vect, TN)
+
+        Δψ_MPS = MPS(Δψ_vect)
         
-        return (NoTangent(), Δψj_MPS)
+        return (NoTangent(), Δψ_MPS)
     end
     return ψt, truncDM_pullback
 end
@@ -957,11 +990,11 @@ end
 
 
 # TEST OVERLAP
-psi = randomMPS(ComplexF64, siteinds("Qubit", 4), 2)
-U_array = [random_unitary(4) for _ in 1:3];
+psi = randomMPS(ComplexF64, siteinds("Qubit", 4), 1)
+U_array = [kron(random_unitary(2), random_unitary(2)) for _ in 1:2];
 n = length(U_array)
 
-f = arrU -> overlap(arrU, psi; trunc=(maxrank=2,))
+f = arrU -> overlap(arrU, psi; trunc=(maxrank=2, atol=1e-15))
 gradient(f, U_array)
 
 g = arrU -> mt.project(arrU, gradient(f, arrU)[1])
