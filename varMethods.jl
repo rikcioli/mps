@@ -94,7 +94,6 @@ function truncate(psi::MPS; Uarr0 = nothing, maxiter = 1000, conv_err = 1e-6)
 end
 
 
-
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
 If no output_inds are given the object is assumed to be a state, and a projection onto |0> is inserted"
 function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; site1_empty = false, d = 2, conv_err = 1E-6, maxiter = 1E5, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}
@@ -297,6 +296,8 @@ function invertSweepLC(mpo::Union{Vector{ITensor}, MPS, MPO}, tau, input_inds::V
 end
 
 
+
+
 "Cost function and gradient for invertGlobalSweep optimization"
 function _fgGlobalSweep(U_array::Vector{Matrix{T}}, lightcone::Lightcone, mpo::Union{Vector{ITensor}, MPS, MPO}; normalization::Real = 1.0) where {T}
     updateLightcone!(lightcone, U_array)
@@ -384,6 +385,8 @@ function _fgGlobalSweep(U_array::Vector{Matrix{T}}, lightcone::Lightcone, mpo::U
     return cost, riem_grad
 
 end
+
+
 
 "Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it"
 function invertGlobalSweep(mpo::Union{Vector{ITensor}, MPS, MPO}, tau::Integer, input_inds::Vector{<:Index}, output_inds::Vector{<:Index}; lightbounds = (false, false), site1_empty = false, maxiter = 20000, gradtol = 1E-6, normalization = 1, init_array::Union{Nothing, Vector{Matrix{T}}} = nothing)::Dict{String, Any} where {T}
@@ -569,26 +572,6 @@ function invert(mpo::MPO, invertMethod; kargs...)
     return results
 end
 
-"Combines invertSweepLC with invertGlobalSweep for ITensorsMPS.MPS or ITensorsMPS.MPO objects"
-function invertCombined(object::Union{MPS, MPO}; kargs...)
-    results_sweep = invert(object, invertSweepLC; kargs...)
-    lc = results_sweep["lightcone"]
-    arrU0 = Array(lc)
-
-    results_global = invert(object, invertGlobalSweep; init_array = arrU0, kargs...)
-    return results_global
-end
-
-"Combines invertSweepLC with invertGlobalSweep for Vector{ITensor} objects"
-function invertCombined(object::Vector{ITensor}, sites, outinds; kargs...)
-    results_sweep = invert(object, input_inds, output_inds, invertSweepLC; kargs...)
-    lc = results_sweep["lightcone"]
-    arrU0 = Array(lc)
-
-    results_global = invert(object, input_inds, output_inds, invertGlobalSweep; init_array = arrU0, kargs...)
-    return results_global
-end
-
 
 
 "Original invertSweep code, without lightcone structure. Given a Vector{ITensor} 'mpo', construct the depth-tau brickwork circuit of 2-qu(d)it unitaries that approximates it;
@@ -634,7 +617,7 @@ function invertSweep(mpo::Vector{ITensor}, tau, input_inds::Vector{<:Index}; d =
         right = zero_projs[2] * mpo[2]
         env = conj(left*right)
 
-        U, S, Vdag = svd(env, sites, cutoff = 1E-14)
+        U, S, Vdag = svd(env, sites)
         u, v = commonind(U, S), commonind(Vdag, S)
 
         # evaluate fidelity
@@ -737,7 +720,7 @@ function invertSweep(mpo::Vector{ITensor}, tau, input_inds::Vector{<:Index}; d =
             env = conj(env_left*env_right)
 
             cinds = commoninds(prime(sites, tau-i), gate_ji)
-            U, S, Vdag = svd(env, cinds, cutoff = 1E-15)
+            U, S, Vdag = svd(env, cinds)
             u, v = commonind(U, S), commonind(Vdag, S)
 
             # evaluate fidelity as Tr(Env*Gate), i.e. the overlap (NOT SQUARED)

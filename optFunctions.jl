@@ -1,3 +1,14 @@
+function random_unitary(N::Int)
+    x = (randn(N,N) + randn(N,N)*im) / sqrt(2)
+    f = qr(x)
+    diagR = sign.(real(diag(f.R)))
+    diagR[diagR.==0] .= 1
+    diagRm = diagm(diagR)
+    u = f.Q * diagRm
+    
+    return u
+end 
+
 #this function fixes the phases; each column of a unitary has an arbitrary phase
 # by choosing the phase ϕ_i to be the phase of the largest entry in the i'th column
 function fix_phase(U)

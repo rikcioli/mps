@@ -1,7 +1,7 @@
 include("rrules.jl")
 include("optFunctions.jl")
-#include("mpsMethods.jl")
-#import .MPSMethods as mt
+include("mpsMethods.jl")
+import .MPSMethods as mt
 import Plots
 using ITensors, ITensorMPS
 using LaTeXStrings, LinearAlgebra
@@ -51,11 +51,10 @@ end
 
 
 
-function prepareCostGradGlobalSweep()
-    N = 10
-    sites = siteinds("Qubit",N)
-    mps = mt.random_mps(sites, linkdims=2)
-    lc = mt.newLightcone(sites, 2; lightbounds=(false,false));
+function prepareCostGradGlobalSweep(U_array, mps)
+    N = length(mps)
+    sites = siteinds(mps)
+    lc = mt.newLightcone(sites, 2; U_array=U_array, lightbounds=(false,false));
     n = lc.n_unitaries
     
     mps = conj(mps)
@@ -83,7 +82,7 @@ function prepareCostGradGlobalSweep()
         replaceind!(mpo[i], tempinds[i], sites[i])
     end
 
-    return lc, mpo
+    return (lc, mpo[:])
 end
 
 lc, mpo = prepareCostGradGlobalSweep()
@@ -93,17 +92,22 @@ plot = testGrad(() -> genPoint(n), U -> genTanVec(U, n), arrU -> mt._fgGlobalSwe
 
 
 # TEST OVERLAP
-psi = randomMPS(ComplexF64, siteinds("Qubit", 4), 1)
-U_array = [kron(random_unitary(2), random_unitary(2)) for _ in 1:2];
+psi = randomMPS(ComplexF64, siteinds("Qubit", 30), 8)
+U_array = [kron(random_unitary(2), random_unitary(2)) for _ in 1:29];
 n = length(U_array)
 
 f = arrU -> overlap(arrU, psi; trunc=(maxrank=2,))
+@profview overlap(U_array, psi; trunc=(maxrank=2,))
 gradient(f, U_array)
 
 g = arrU -> project(arrU, gradient(f, arrU)[1])
 plot = testGrad(() -> genPoint(n), U -> genTanVec(U, n), arrU -> (f(arrU), g(arrU)), inner, retract)
 
-
+using Profile
+let psi=psi
+    func = psi -> real(ITensorMPS.inner(truncDM(psi, trunc=(maxrank=2,)), psi))
+    @profview gradient(func, psi)
+end
 
 
 result_time = begin
@@ -175,8 +179,41 @@ plot = Plots.plot(2:2:50, result_time_scaling[1], label="truncDM_time", xlabel=L
 Plots.plot!(plot, 2:2:50, result_time_scaling[2], label="grad_truncDM_time")
 
 
+overlap_time_scaling = begin
+    func = (arrU, psi) -> overlap(arrU, psi; trunc=(maxrank=2,))
+    fgGlobal = (arrU, psi) -> mt._fgGlobalSweep(arrU, prepareCostGradGlobalSweep(arrU, psi)...)
+    times = Float64[]
+    grad_times = Float64[]
+    timesGlobalSweep = Float64[]
+    grad_timesGlobalSweep = Float64[]
+    for N in 2:2:50
+        @show N
+        times_N = Float64[]
+        grad_times_N = Float64[]
+        times_glob_N = Float64[]
+        for _ in 1:100
+            psi = randomMPS(ComplexF64, siteinds("Qubit", N), 8)
+            arrU = [random_unitary(4) for _ in 1:(N-1)]
+            f = arrU -> func(arrU, psi)
+            fg = arrU -> fgGlobal(arrU, psi)
+            t1 = @elapsed f(arrU)
+            t2 = @elapsed gradient(f, arrU)
+            t3 = @elapsed fg(arrU)
+            push!(times_N, t1)
+            push!(grad_times_N, t2)
+            push!(times_glob_N, t3)
+        end
+        push!(times, sum(times_N)/100)
+        push!(grad_times, sum(grad_times_N)/100)
+        push!(timesGlobalSweep, sum(times_glob_N)/100)
+    end
+    times, grad_times, timesGlobalSweep
+end
+plot = Plots.plot(2:2:50, overlap_time_scaling[1], label="overlap_time", xlabel=L"$N$", ylabel=L"$t \ (s)$")
+Plots.plot!(plot, 2:2:50, overlap_time_scaling[2], label="grad_overlap_time")
+Plots.plot!(plot, 2:2:50, overlap_time_scaling[3], label="global_sweep_time")
 
-
+test
 ### mpo = MPO([ITensor((1.0+0.0im)*mt.Id, sites[i]', sites[i]) for i in 1:N])
 ### mpo = MPO(lc)
 ### 
@@ -318,57 +355,3 @@ Plots.plot!(plot, 2:2:50, result_time_scaling[2], label="grad_truncDM_time")
 ### Plots.plot(tvals, E.(tvals), yscale=:log10, xscale=:log10, legend=:bottomright)
 ### Plots.plot!(tvals, tvals .^2, yscale=:log10, xscale=:log10, label=L"O(t^2)")
 ### Plots.plot!(tvals, tvals, yscale=:log10, xscale=:log10, label=L"O(t)")
-
-
-
-
-function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
-    sites = siteinds(ψ)
-    links = linkinds(ψ)
-    # Try the following: first we orthogonalize the mps to the closest endpoint, say 1 here
-    ψ12 = ψ[1]*ψ[2]
-    ψ1, ψ2 = lq_compact(ψ12)  # needed in the pullback when we need to recreate the input MPS in a gauge inv way
-    ψ1ten = ITensor(ψ1, sites[1], links[1])     # can ignore this in the forward mode
-    ψ2ten = ITensor(ψ2, links[1], sites[2])
-    ψvec = [ψ1ten, ψ2ten]
-    
-    # now we proceed as usual, but using the fact that the mps is orthogonalized to avoid computing environments
-    ψvecdag = [dag(A)' for A in ψvec]
-    envR = delta(links[1], links[1]')
-    rho1_ten = ψvec[1]*envR*ψvecdag[1]
-
-    rho1 = Matrix(rho1_ten, sites[1], sites[1]')
-    D, U, ϵ = eigh_trunc(rho1, trunc=trunc)
-
-    Ulinkind = Index(size(U)[2], "Link, u")
-    Uten = ITensor(U, sites[1], Ulinkind)
-
-    ψt2 = dag(Uten)*ψ12
-    ψt1 = Uten
-
-    vect = [ψt1, ψt2]
-    ψt, MPS_pullback = ChainRulesCore.rrule(MPS, vect)
-
-    function truncDM_pullback(Δψt)
-        _, Δψt_vec = MPS_pullback(Δψt)  #vector to MPS
-        ΔB1, ΔB2 = Δψt_vec
-        cind = commonind(ΔB1, ΔB2)
-        ΔB1, ΔB2 = replaceind(ΔB1, cind, Ulinkind), replaceind(ΔB2, cind, Ulinkind)  #extract the two components
-
-        ΔU = Array{ComplexF64}(ΔB1, sites[1], Ulinkind)     # contribution from MPS([U1, B2])
-        ΔU += Array{ComplexF64}(ψ12*conj(ΔB2), sites[1], Ulinkind)  # contribution from B2=U1|ψ⟩
-        Δrho1 = zero(rho1)
-        MatrixAlgebraKit.eigh_trunc_pullback!(Δrho1, rho1, (D, U), (ZeroTangent(), ΔU)) # rho1 to (D, U)
-
-        Δψ1 = Δrho1*ψ1   # contribution from rho1 = Tr2(ψ)
-        Δψrho1 = Array{ComplexF64}(Δψten_rho1, sites[1]', sites[2])     # conversion to matrix to prepare for pullback
-        ΔψB2 = Array{ComplexF64}(Uten*ΔB2, sites[1], sites[2])
-        Δψ = Δψrho1 + ΔψB2
-
-
-        Δψ += MPS(Uten*ΔB2, sites) # contribution from B2=U1|ψ⟩
-
-        return (NoTangent(), Δψ)
-    end
-    return ψt, truncDM_pullback
-end

@@ -315,7 +315,7 @@ end
 If dagger is true, all the unitaries are conjugated and the order of application is inverted
 If an empty list is passed as entropy_arr karg it will be filled with half-subsystem entropies at each timestep
 (to be replaced with generic observer for time evolution if needed)"
-function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = false, cutoff = 1E-15, extractors::Vector{<:Function} = nothing)
+function apply!(mps::Union{MPS, MPO}, lightcones::Vector{Lightcone}; dagger = false, cutoff = 1E-15, extractors::Union{Vector{<:Function}, Nothing} = nothing)
     N = length(mps)
     n_lightcones = length(lightcones)
     #norm0 = norm(mps)
