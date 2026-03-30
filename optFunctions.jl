@@ -1,5 +1,3 @@
-
-
 #this function fixes the phases; each column of a unitary has an arbitrary phase
 # by choosing the phase ϕ_i to be the phase of the largest entry in the i'th column
 function fix_phase(U)
@@ -36,6 +34,10 @@ function skew(arrX::Vector{<:Matrix})
     return map(skew, arrX)
 end
 
+function project(U::Matrix{T}, D::Matrix{T}) where {T}
+    return U * skew(U' * D)
+end
+
 "Project arbitrary array of unitaries arrD onto the tangent space at arrU"
 function project(arrU::Vector{<:Matrix}, arrD::Vector{<:Matrix})
     #return (arrD .- (arrU .* [D' for D in arrD] .* arrU))/2
@@ -57,6 +59,19 @@ end
 
 function extractU(arrM::Vector{<:Matrix})
     return map(extractU, arrM)
+end
+
+function retract(U::Matrix{T}, X::Matrix{T}, t::Float64) where {T}
+    U_unitary = extractU(U)
+    U = U_unitary
+
+    Uinv = U'
+    X_id = Uinv * X
+    X_id = skew(X_id)
+
+    U_new = U * exp(t*X_id)
+    X_new = U_new * X_id
+    return U_new, X_new
 end
 
 
@@ -102,6 +117,13 @@ function inner(arrU::Vector{<:Matrix}, arrX::Vector{<:Matrix}, arrY::Vector{<:Ma
 end
 function inner(arrX::Vector{<:Matrix}, arrY::Vector{<:Matrix})
     return real(tr(arrX'*arrY))
+end
+
+function inner(U::Matrix{T}, X::Matrix{T}, Y::Matrix{T}) where {T}
+    return real(tr(X'*Y))
+end
+function inner(X::Matrix{T}, Y::Matrix{T}) where {T}
+    return real(tr(X'*Y))
 end
 
 #parallel transport
