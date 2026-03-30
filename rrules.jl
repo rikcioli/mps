@@ -432,18 +432,18 @@ function truncDM(ψ::MPS; trunc=NamedTuple())
     #for j in N-1:-1:2
     #    push!(envR, envR[N-j]*ψ[j]*delta(sites[j], sites[j]')*dag(ψ[j])')
     #end
-    envR = [delta(links[j], links[j]') for j in N-1:-1:1]
+    envR = [delta(ComplexF64, links[j], links[j]') for j in N-1:-1:1]
 
     vect = ITensor[]    # store tensors that make the final mps
     errs = Float64[]    # store truncation errors
     ilinks = Index[]    # store intermediate links
     isites = [sites[1]]     # store intermediate site1
-    iψ = [ψ[:]]  # store intermediate ψ
+    iψ12 = [ψ[1:2]]
+
     icombiners = ITensor[]      # store intermediate combiners
 
     for j in 1:N-1
-        ψ = iψ[j]
-        ψ1 = ψ[1]
+        ψ1, ψ2 = iψ12[j]
         site1 = isites[j]
         rhoj_ten = ψ1*envR[N-j]*dag(ψ1)'
 
@@ -461,12 +461,12 @@ function truncDM(ψ::MPS; trunc=NamedTuple())
         end    
 
         if j == N-1
-            push!(vect, dag(Uten)*ψ1*ψ[2])
+            push!(vect, dag(Uten)*ψ1*ψ2)
         else
             c12 = combiner(Ulinkind, sites[j+1])
             push!(icombiners, c12)
-            ψ1new = c12*(dag(Uten)*ψ1*ψ[2])
-            push!(iψ, [ψ1new; ψ[3:end]])
+            ψ1new = c12*(dag(Uten)*ψ1*ψ2)
+            push!(iψ12, [ψ1new; ψ[j+2]])
             site1new = combinedind(c12)
             push!(isites, site1new)
         end
@@ -502,16 +502,14 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
 
     vect = ITensor[]    # store tensors that make the final mps
     errs = Float64[]    # store truncation errors
-    ilinks = Index[]    # store intermediate links
+    ilinks = Index[]    # store intermediate (truncated) links
     isites = [sites[1]]     # store intermediate site1
-    iψ = [ψ[:]]  # store intermediate ψ
     icombiners = ITensor[]      # store intermediate combiners
     ieigh_trunc = Tuple{Matrix{ComplexF64}, Diagonal{Float64, Vector{Float64}}, Matrix{ComplexF64}}[]    # store intermediate rdm and eigh_trunc results
-    iψ12::Vector{Vector{ITensor}} = []    # store ψ[1] and ψ[2]
+    iψ12 = [ψ[1:2]]    # store ψ[1] and ψ[2]
 
     for j in 1:N-1
-        ψj = iψ[j]
-        ψj1 = ψj[1]
+        ψj1, ψj2 = iψ12[j]
         site1 = isites[j]
         rhoj_ten = ψj1*envR[N-j]*dag(ψj1)'
 
@@ -529,15 +527,13 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
             push!(vect, Uten)
         end    
 
-        push!(iψ12, ψj[1:2])
-
         if j == N-1
-            push!(vect, dag(Uten)*ψj1*ψj[2])
+            push!(vect, dag(Uten)*ψj1*ψj2)
         else
             c12 = combiner(Ulinkind, sites[j+1])
             push!(icombiners, c12)
-            ψ1new = c12*(dag(Uten)*ψj1*ψj[2])
-            push!(iψ, [ψ1new; ψj[3:end]])
+            ψ1new = c12*(dag(Uten)*ψj1*ψj2)
+            push!(iψ12, [ψ1new; ψ[j+2]])
             site1new = combinedind(c12)
             push!(isites, site1new)
         end
@@ -762,7 +758,7 @@ end
 
 
 
-function overlap(U_array::Vector{Matrix{T}}, mps::MPS; trunc=NamedTuple()) where {T}
+function overlap(U_array::Vector{<:Matrix}, mps::MPS; trunc=NamedTuple())
 
     N = length(mps)
     sites = siteinds(mps)
