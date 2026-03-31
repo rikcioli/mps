@@ -416,15 +416,26 @@ end
 
 
 function truncDM(ψ::MPS; trunc=NamedTuple())
+    N = length(ψ)
     orthogonalize!(ψ, 1)
-    maxrank = maxlinkdim(ψ)
-    if !haskey(trunc, :maxrank)
-        trunc = (trunc..., maxrank=maxrank)
+    maxranks = linkdims(ψ)
+    if maximum(maxranks) == 1
+        return ψ
+    end
+    if haskey(trunc, :maxrank)
+        # remove maxrank from trunc tuple
+        kwarg_maxrank = trunc[:maxrank]
+        if maximum(maxranks) < kwarg_maxrank    # if it's equal it's a truncated orthogonalization, which could be useful
+            return ψ, Δψt -> (NoTangent(), Δψt)
+        end
+        trunc = (; filter(p -> first(p) != :maxrank, collect(pairs(trunc)))...)
+        # choose for maxranks the minimum between input one and linkdims
+        maxranks = [min(kwarg_maxrank, maxranks[j]) for j in 1:N-1]
     end
     if !haskey(trunc, :atol)
-        trunc = (trunc..., atol=1e-15)
+        trunc = (trunc..., atol=eps())
     end
-    N = length(ψ)
+
     sites = siteinds(ψ)
     links = linkinds(ψ)
 
@@ -448,7 +459,7 @@ function truncDM(ψ::MPS; trunc=NamedTuple())
         rhoj_ten = ψ1*envR[N-j]*dag(ψ1)'
 
         rhoj = Matrix{ComplexF64}(rhoj_ten, site1, site1')
-        _, U, ϵ = eig_trunc(rhoj, trunc=trunc)
+        _, U, ϵ = eigh_trunc(rhoj, trunc=(trunc..., maxrank=maxranks[j]))
         push!(errs, ϵ)
 
         Ulinkind = Index(size(U)[2], "Link, l=$(j)")
@@ -473,21 +484,33 @@ function truncDM(ψ::MPS; trunc=NamedTuple())
     end
 
     ψt = MPS(vect)
+    ψt.llim = N-1
+    ψt.rlim = N+1
 
     return ψt
 end
 
 
 function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
+    N = length(ψ)
     orthogonalize!(ψ, 1)
-    maxrank = maxlinkdim(ψ)
-    if !haskey(trunc, :maxrank)
-        trunc = (trunc..., maxrank=maxrank)
+    maxranks = linkdims(ψ)
+    if maximum(maxranks) == 1
+        return ψ, Δψt -> (NoTangent(), Δψt)
+    end
+    if haskey(trunc, :maxrank)
+        # remove maxrank from trunc tuple
+        kwarg_maxrank = trunc[:maxrank]
+        if maximum(maxranks) < kwarg_maxrank    # if it's equal it's a truncated orthogonalization, which could be useful
+            return ψ, Δψt -> (NoTangent(), Δψt)
+        end
+        trunc = (; filter(p -> first(p) != :maxrank, collect(pairs(trunc)))...)
+        # choose for maxranks the minimum between input one and linkdims
+        maxranks = [min(kwarg_maxrank, maxranks[j]) for j in 1:N-1]
     end
     if !haskey(trunc, :atol)
-        trunc = (trunc..., atol=1e-15)
+        trunc = (trunc..., atol=eps())
     end
-    N = length(ψ)
     sites = siteinds(ψ)
     links = linkinds(ψ)
 
@@ -514,7 +537,7 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
         rhoj_ten = ψj1*envR[N-j]*dag(ψj1)'
 
         rhoj = Matrix{ComplexF64}(rhoj_ten, site1, site1')
-        D, U, ϵ = eigh_trunc(rhoj, trunc=trunc)
+        D, U, ϵ = eigh_trunc(rhoj, trunc=(trunc..., maxrank=maxranks[j]))
         push!(ieigh_trunc, (rhoj, D, U))
         push!(errs, ϵ)
 
@@ -540,6 +563,8 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
     end
 
     ψt, MPS_pullback = ChainRulesCore.rrule(MPS, vect)
+    ψt.llim = N-1
+    ψt.rlim = N+1
 
     function truncDM_pullback(Δψt)
         _, Δψt_vec = MPS_pullback(Δψt)  #vector to MPS
