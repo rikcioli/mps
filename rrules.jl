@@ -1,7 +1,8 @@
 using ITensors, ITensorMPS
 using LinearAlgebra
-using MatrixAlgebraKit
 using ChainRulesCore
+import MatrixAlgebraKit as MAK
+using MatrixAlgebraKit
 
 const Id = (1.0+0.0im)*[1.0 0; 0 1.0]
 const X = (1.0+0.0im)*[0 1.0 ; 1.0 0]
@@ -14,6 +15,60 @@ Psm[2,:,:] = X
 Psm[3,:,:] = Z
 Psm[4,:,:] = Y
 const Ps = deepcopy(Psm)
+
+
+"Redefining eigh_trunc_pullback in MatrixAlgebraKit to account for degeneracies across the cut"
+function eigh_trunc_pullback!(
+        ΔA::AbstractMatrix, A, DV, ΔDV;
+        degeneracy_atol::Real = MAK.default_pullback_rank_atol(DV[1]),
+        gauge_atol::Real = MAK.default_pullback_gauge_atol(ΔDV[2])
+    )
+
+    # Basic size checks and determination
+    Dmat, V = DV
+    D = diagview(Dmat)
+    ΔDmat, ΔV = ΔDV
+    (n, p) = size(V)
+    p == length(D) || throw(DimensionMismatch())
+    (n, n) == size(ΔA) || throw(DimensionMismatch())
+
+    if !MAK.iszerotangent(ΔV)
+        (n, p) == size(ΔV) || throw(DimensionMismatch())
+        VᴴΔV = V' * ΔV
+        aVᴴΔV = MAK.project_antihermitian!(VᴴΔV)
+
+        mask = abs.(D' .- D) .< degeneracy_atol
+        Δgauge = norm(view(aVᴴΔV, mask))
+        Δgauge ≤ gauge_atol ||
+            @warn "`eigh` cotangents sensitive to gauge choice: (|Δgauge| = $Δgauge)"
+
+        aVᴴΔV .*= MAK.inv_safe.(D' .- D, degeneracy_atol)
+
+        if !MAK.iszerotangent(ΔDmat)
+            ΔDvec = MAK.diagview(ΔDmat)
+            p == length(ΔDvec) || throw(DimensionMismatch())
+            MAK.diagview(aVᴴΔV) .+= real.(ΔDvec)
+        end
+
+        Z = V * aVᴴΔV
+
+        # add contribution from orthogonal complement
+        W = MAK.qr_null(V)
+        WᴴΔV = W' * ΔV
+        
+        X = sylvester(W'*A*W, -Dmat, WᴴΔV)
+        Z = mul!(Z, W, X, 1, 1)
+
+        # put everything together: symmetrize for hermitian case
+        ΔA = mul!(ΔA, Z, V', 1 // 2, 1)
+        ΔA = mul!(ΔA, V, Z', 1 // 2, 1)
+    elseif !MAK.iszerotangent(ΔDmat)
+        ΔDvec = MAK.diagview(ΔDmat)
+        p == length(ΔDvec) || throw(DimensionMismatch())
+        ΔA = mul!(ΔA, V * Diagonal(real(ΔDvec)), V', 1, 1)
+    end
+    return ΔA
+end
 
 
 function truncDM(ψ::MPS; trunc=NamedTuple())
@@ -93,6 +148,7 @@ end
 
 
 function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
+    println("Beginning forward pass")
     N = length(ψ)
     orthogonalize!(ψ, 1)
     maxranks = linkdims(ψ)
@@ -139,7 +195,9 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
         rhoj_ten = ψj1*envR[N-j]*dag(ψj1)'
 
         rhoj = Matrix{ComplexF64}(rhoj_ten, site1, site1')
+        @show j
         D, U, ϵ = eigh_trunc(rhoj, trunc=(trunc..., maxrank=maxranks[j]))
+        @show typeof(D)
         push!(ieigh_trunc, (rhoj, D, U))
         push!(errs, ϵ)
 
@@ -177,7 +235,9 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
         local contrj::ITensor, contrjp1::ITensor
         Δψj_rhoj_list = ITensor[]
         Δψj_ψjp1_list::Vector{ITensor} = [Δψt_vec[N]]
+        println("Entering pullback")
         for j in N-1:-1:1
+            @show j
             ψj12 = iψ12[j]
             rhoj, D, U = ieigh_trunc[j]
             site1 = isites[j]
@@ -209,9 +269,334 @@ function ChainRulesCore.rrule(::typeof(truncDM), ψ::MPS; trunc=NamedTuple())
             ΔU += Array{ComplexF64}(ψj12[1]*contrj, site1, Ulinkind)
 
             Δrhoj = zero(rhoj)
-            MatrixAlgebraKit.eigh_trunc_pullback!(Δrhoj, rhoj, (D, U), (ZeroTangent(), ΔU))     # pullback of eigh_trunc
+            eigh_trunc_pullback!(Δrhoj, rhoj, (D, U), (ZeroTangent(), ΔU))     # pullback of eigh_trunc
     
             Δψj_rhoj = noprime(ITensor(Δrhoj+Δrhoj', site1', site1)*ψj12[1]) # contribution from rhoj = Tr_(j+1..N)(ψ)
+            Δψj_ψjp1 = ITensor(U, site1, Ulinkind)    #contribution from |ψj+1⟩=Uj|ψj⟩
+
+            if j>1
+                # decombine previous tensors: this has to be done after the sum of MPS, since the sum treats them as states
+                Δψj_rhoj *= dag(combj)
+                Δψj_ψjp1 *= dag(combj)
+            end
+
+            push!(Δψj_rhoj_list, Δψj_rhoj)
+            push!(Δψj_ψjp1_list, Δψj_ψjp1)
+
+            contrjp1 = contrj
+        end
+
+        # Reconstruct the final adjoint as a finite state machine
+        Δψ_vect = ITensor[]
+
+        l1t, l1 = ilinks[1], links[1]
+        ls1 = directsum(l1t, l1)
+        links_sum = [ls1]
+        T1 = directsum(ls1, Δψj_ψjp1_list[N] => l1t, Δψj_rhoj_list[N-1] => l1)
+        push!(Δψ_vect, T1)
+
+        for j in 2:N-1
+            lsjm1 = links_sum[j-1]
+            Tj_col1 = directsum(lsjm1, Δψj_ψjp1_list[N-j+1] => ilinks[j-1], ITensor(ComplexF64, links[j-1], sites[j], ilinks[j]) => links[j-1]) 
+            Tj_col2 = directsum(lsjm1, Δψj_rhoj_list[N-j] => ilinks[j-1], ψ[j] => links[j-1])
+
+            lsj = directsum(ilinks[j], links[j])
+            push!(links_sum, lsj)
+            Tj = directsum(lsj, Tj_col1 => ilinks[j], Tj_col2 => links[j]) 
+            push!(Δψ_vect, Tj)
+        end
+
+        TN = directsum(links_sum[N-1], Δψj_ψjp1_list[1] => ilinks[N-1], ψ[N] => links[N-1])
+        push!(Δψ_vect, TN)
+
+        Δψ_MPS = MPS(Δψ_vect)
+        
+        return (NoTangent(), Δψ_MPS)
+    end
+    return ψt, truncDM_pullback
+end
+
+
+function truncPauliMPS(ψ::MPS; truncS=NamedTuple(), truncA=NamedTuple())
+    N = length(ψ)
+    maxranks_S = linkdims(ψ)
+    maxranks_A = maxranks_S
+    if maximum([maxranks_S; maxranks_A]) == 1
+        return ψ
+    end
+
+    if haskey(truncS, :maxrank)
+        # remove maxrank from trunc tuple
+        kwarg_maxrank = truncS[:maxrank]
+
+        truncS = (; filter(p -> first(p) != :maxrank, collect(pairs(truncS)))...)
+        # choose for maxranks the minimum between input one and linkdims
+        maxranks_S = [min(kwarg_maxrank, maxranks_S[j]) for j in 1:N-1]
+    end
+    if !haskey(truncS, :atol)
+        truncS = (truncS..., atol=eps())
+    end
+
+    if haskey(truncA, :maxrank)
+        kwarg_maxrank = truncA[:maxrank]
+        truncA = (; filter(p -> first(p) != :maxrank, collect(pairs(truncA)))...)
+        maxranks_A = [min(kwarg_maxrank, maxranks_A[j]) for j in 1:N-1]
+    end
+    if !haskey(truncA, :atol)
+        truncA = (truncA..., atol=eps())
+    end
+
+    sites = siteinds(ψ)
+    links = linkinds(ψ)
+
+    envR = [ψ[N]*delta(sites[N], sites[N]')*dag(ψ[N])']
+    for j in N-1:-1:2
+        push!(envR, envR[N-j]*ψ[j]*delta(sites[j], sites[j]')*dag(ψ[j])')
+    end
+
+    vect = ITensor[]    # store tensors that make the final mps
+    errsS = Float64[]    # store truncation errors for symmetric part
+    errsA = Float64[]
+    ilinks = Index[]    # store intermediate links
+    isites = [sites[1]]     # store intermediate site1
+    iψ12 = [ψ[1:2]]
+    
+    icombiners = ITensor[]      # store intermediate combiners
+    
+    Symm = [1., 1., 1., -1.]
+    isymm = [diag_itensor(Symm, sites[1]'', sites[1])]  # store intermediate swap symmetry
+    for j in 1:N-1
+        ψ1, ψ2 = iψ12[j]
+        site1 = isites[j]
+        rhoj_ten = ψ1*envR[N-j]*dag(ψ1)'
+        Symmj = isymm[j]
+
+        ΠS_ten = (Symmj+delta(site1'', site1))/2
+        ΠA_ten = (-Symmj+delta(site1'', site1))/2
+
+        rhoj_Sten = mapprime(ΠS_ten*rhoj_ten*ΠS_ten', 2 => 0, 3 => 1)
+        rhoj_Aten = mapprime(ΠA_ten*rhoj_ten*ΠA_ten', 2 => 0, 3 => 1)
+
+        rhoj_S = Matrix{ComplexF64}(rhoj_Sten, site1, site1')
+        _, Us, ϵ = eigh_trunc(rhoj_S, trunc=(truncS..., maxrank=maxranks_S[j]))
+        push!(errsS, ϵ)
+
+        rhoj_A = Matrix{ComplexF64}(rhoj_Aten, site1, site1')
+        _, Ua, ϵ = eigh_trunc(rhoj_A, trunc=(truncA..., maxrank=maxranks_A[j]))
+        push!(errsA, ϵ)
+
+        U = hcat(Us, Ua)
+        Ulinkind = Index(size(U)[2], "Link, l=$(j)")
+
+        push!(ilinks, Ulinkind)
+        Uten = ITensor(Us, site1, Ulinkind)
+
+        if j>1
+            push!(vect, dag(icombiners[end])*Uten)
+        else
+            push!(vect, Uten)
+        end    
+
+        if j == N-1
+            push!(vect, dag(Uten)*ψ1*ψ2)
+        else
+            c12 = combiner(Ulinkind, sites[j+1])
+            push!(icombiners, c12)
+            ψ1new = c12*(dag(Uten)*ψ1*ψ2)
+            push!(iψ12, [ψ1new; ψ[j+2]])
+            site1new = combinedind(c12)
+            push!(isites, site1new)
+
+            Sred = dag(Uten)''*Symmj*Uten
+            Snew = Sred*diag_itensor(Symm, sites[j+1]'', sites[j+1])    # kronecker product of the pull through and the new site one
+            Snew = c12''*Snew*c12
+            push!(isymm, Snew)
+        end
+    end
+
+    ψt = MPS(vect)
+    ψt.llim = N-1
+    ψt.rlim = N+1
+
+    return ψt
+end
+
+
+function ChainRulesCore.rrule(::typeof(truncPauliMPS), ψ::MPS; truncS=NamedTuple(), truncA=NamedTuple())
+    N = length(ψ)
+    maxranks_S = linkdims(ψ)
+    maxranks_A = maxranks_S
+    if maximum([maxranks_S; maxranks_A]) == 1
+        return ψ
+    end
+
+    if haskey(truncS, :maxrank)
+        # remove maxrank from trunc tuple
+        kwarg_maxrank = truncS[:maxrank]
+
+        truncS = (; filter(p -> first(p) != :maxrank, collect(pairs(truncS)))...)
+        # choose for maxranks the minimum between input one and linkdims
+        maxranks_S = [min(kwarg_maxrank, maxranks_S[j]) for j in 1:N-1]
+    end
+    if !haskey(truncS, :atol)
+        truncS = (truncS..., atol=eps())
+    end
+
+    if haskey(truncA, :maxrank)
+        kwarg_maxrank = truncA[:maxrank]
+        truncA = (; filter(p -> first(p) != :maxrank, collect(pairs(truncA)))...)
+        maxranks_A = [min(kwarg_maxrank, maxranks_A[j]) for j in 1:N-1]
+    end
+    if !haskey(truncA, :atol)
+        truncA = (truncA..., atol=eps())
+    end
+
+    sites = siteinds(ψ)
+    links = linkinds(ψ)
+
+    envR = [ψ[N]*delta(sites[N], sites[N]')*dag(ψ[N])']
+    for j in N-1:-1:2
+      push!(envR, envR[N-j]*ψ[j]*delta(sites[j], sites[j]')*dag(ψ[j])')
+    end
+
+    vect = ITensor[]    # store tensors that make the final mps
+    errsS = Float64[]    # store truncation errors
+    errsA = Float64[]
+    ilinks = Index[]    # store intermediate (truncated) links
+    isites = [sites[1]]     # store intermediate site1
+    icombiners = ITensor[]      # store intermediate combiners
+    ieigh_trunc = Tuple{Matrix{ComplexF64}, Diagonal{Float64, Vector{Float64}}, Matrix{ComplexF64}}[]    # store intermediate rdm and eigh_trunc results
+    iψ12 = [ψ[1:2]]    # store ψ[1] and ψ[2]
+
+
+    Symm = [1., 1., 1., -1.]
+    isymm = [diag_itensor(Symm, sites[1]'', sites[1])]  # store intermediate swap symmetry
+    for j in 1:N-1
+        ψj1, ψj2 = iψ12[j]
+        site1 = isites[j]
+        rhoj_ten = ψj1*envR[N-j]*dag(ψj1)'
+
+        Symmj = isymm[j]
+
+        ΠS_ten = (Symmj+delta(site1'', site1))/2
+        ΠA_ten = (-Symmj+delta(site1'', site1))/2
+
+        rhoj_Sten = mapprime(ΠS_ten*rhoj_ten*ΠS_ten', 2 => 0, 3 => 1)
+        rhoj_Aten = mapprime(ΠA_ten*rhoj_ten*ΠA_ten', 2 => 0, 3 => 1)
+
+        rhoj_S = Matrix{ComplexF64}(rhoj_Sten, site1, site1')
+        Ds, Us, ϵ = eigh_trunc(rhoj_S, trunc=(truncS..., maxrank=maxranks_S[j]))
+        push!(errsS, ϵ)
+
+        rhoj_A = Matrix{ComplexF64}(rhoj_Aten, site1, site1')
+        Da, Ua, ϵ = eigh_trunc(rhoj_A, trunc=(truncA..., maxrank=maxranks_A[j]))
+        push!(errsA, ϵ)
+
+        U = hcat(Us, Ua)
+        push!(ieigh_trunc, (rhoj_S, rhoj_A, Ds, Us, Da, Ua, U))
+
+        Ulinkind = Index(size(U)[2], "Link_trunc, l=$(j)")
+        push!(ilinks, Ulinkind)
+        Uten = ITensor(U, site1, Ulinkind)
+        if j>1
+            push!(vect, dag(icombiners[end])*Uten)
+        else
+            push!(vect, Uten)
+        end    
+
+        if j == N-1
+            push!(vect, dag(Uten)*ψj1*ψj2)
+        else
+            c12 = combiner(Ulinkind, sites[j+1])
+            push!(icombiners, c12)
+            ψ1new = c12*(dag(Uten)*ψj1*ψj2)
+            push!(iψ12, [ψ1new; ψ[j+2]])
+            site1new = combinedind(c12)
+            push!(isites, site1new)
+
+            Sred = dag(Uten)''*Symmj*Uten   # symmetry operator has to go through Udag
+            Snew = Sred*diag_itensor(Symm, sites[j+1]'', sites[j+1])    # kronecker product of the pull through and the new site one
+            Snew = c12''*Snew*c12
+            push!(isymm, Snew)
+        end
+    end
+
+    ψt, MPS_pullback = ChainRulesCore.rrule(MPS, vect)
+    ψt.llim = N-1
+    ψt.rlim = N+1
+
+    function truncPauliMPS_pullback(Δψt)
+        _, Δψt_vec = MPS_pullback(Δψt)  #vector to MPS
+        # we call its elements [ΔB1, ΔB2, ..., ΔBN-1, ΔψN] as the last element is just ΔψN
+        # every B is actually just U with split indices, that must be combined accordingly
+
+        local Δψj_rhoj::ITensor, Δψj_ψjp1::ITensor
+        local contrj::ITensor, contrjp1::ITensor
+        local ΔSymmj::ITensor
+        Δψj_rhoj_list = ITensor[]
+        Δψj_ψjp1_list::Vector{ITensor} = [Δψt_vec[N]]
+        println("Entering pullback")
+        for j in N-1:-1:1
+            ψj12 = iψ12[j]
+            rhoj_S, rhoj_A, Ds, Us, Da, Ua, U = ieigh_trunc[j]
+            site1 = isites[j]
+            Ulinkind = ilinks[j]
+            ΔBj = Δψt_vec[j]
+            if j>1
+                combj = icombiners[j-1]
+            end
+            Symmj = isymm[j]
+            ΠS_ten = (Symmj+delta(site1'', site1))/2
+            ΠA_ten = (-Symmj+delta(site1'', site1))/2
+
+            ΔU = Array{ComplexF64}(j>1 ? combj*ΔBj : ΔBj, site1, Ulinkind)     # contribution from MPS([U1, U2, U3, ψ4])
+            # now we need to add the contribution from |ψjp1⟩=Uj|ψj⟩, that is the contribution of Δψjp1 to ΔUj
+            # which is obtained by multiplying ψj[1] with contrj ≡ contract(ψj[2:end], Δψjp1).
+
+            if j==N-1
+                # for j=N-1 this is simply
+                contrj = ψj12[2]*dag(Δψt_vec[N])
+            else
+                # contrj can be constructed recursively by splitting Δψjp1 into Δψjp1_rhojp1 and Δψjp1_ψjp2
+                # the first one is only present when j<N-1, as there's no reduced density matrix computed at the last step
+                # it can be computed by reusing the right environment defined in the forward pass
+                contr_rhoj = ψj12[2]*dag(prime(Δψj_rhoj, links[j+1]))*envR[N-j-1]
+
+                # the second one can be defined recursively in terms of contrjp1
+                contr_ψjp1 = ψj12[2]*dag(Δψj_ψjp1)*contrjp1
+
+                # sum the two as they have the same inds
+                contrj = contr_rhoj + contr_ψjp1
+            end
+            ΔU += Array{ComplexF64}(ψj12[1]*contrj, site1, Ulinkind)
+
+            if j<N-1    # then ΔU recieves an additional contribution from the symmetry op at step j+1
+                Uten = ITensor(U, site1, Ulinkind)
+                Symm_ten = diag_itensor(Symm, sites[j+1]'', sites[j+1])
+                ΔU += Array{ComplexF64}(Symmj*Uten*2*real(ΔSymmj*Symm_ten), site1, Ulinkind)   # here ΔSymmj is from previous step (j+1)
+                # and the product ΔSymmj*Symm_ten is needed to invert the kron product used to extend the symmetry in the forward pass
+            end
+
+            ΔUs = @view U[:, 1:size(Us,2)]
+            ΔUa = @view U[:, 1:size(Ua,2)]
+
+            Δrhoj_S = zero(rhoj_S)
+            eigh_trunc_pullback!(Δrhoj_S, rhoj_S, (Ds, Us), (ZeroTangent(), ΔUs))     # pullback of eigh_trunc
+            Δrhoj_Sten = ITensor(Δrhoj_S, site1, site1')
+            
+            Δrhoj_A = zero(rhoj_A)
+            eigh_trunc_pullback!(Δrhoj_A, rhoj_A, (Da, Ua), (ZeroTangent(), ΔUa))
+            Δrhoj_Aten = ITensor(Δrhoj_A, site1, site1')
+
+            # recombine the two into Δrhoj (in ITensor form)
+            Δrhoj_ten = mapprime(ΠS_ten*Δrhoj_Sten*ΠS_ten' + ΠA_ten*Δrhoj_Aten*ΠA_ten', 2 => 0, 3 => 1)
+
+            # adjoint of symmetry (needed for ΔU_j-1)
+            ΔSymmj = real(((Δrhoj_Sten'')*ΠS_ten' + (Δrhoj_Aten'')*ΠA_ten')*rhoj)
+            ΔSymmj = dag(combj'')*ΔSymmj*combj
+
+            # adjoints of ψj
+            Δψj_rhoj = noprime((Δrhoj_ten+dag(Δrhoj_ten))*ψj12[1]) # contribution from rhoj = Tr_(j+1..N)(ψ)
             Δψj_ψjp1 = ITensor(U, site1, Ulinkind)    #contribution from |ψj+1⟩=Uj|ψj⟩
 
             if j>1
