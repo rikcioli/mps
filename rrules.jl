@@ -186,7 +186,7 @@ function ChainRulesCore.rrule(::typeof(ITensorMPS.orthogonalize), ψ::Vector{<:I
 
     maxranks = [link.space for link in links]
     if maximum(maxranks) == 1
-        return ψ
+        return ψ, Δψ -> (NoTangent(), Δψ, NoTangent())
     end
     if haskey(trunc, :maxrank)
         # remove maxrank from trunc tuple
