@@ -132,7 +132,7 @@ function ITensorMPS.orthogonalize(ψ::Vector{<:ITensor}, b::Int; current_center 
     cog = current_center
     Ulinkinds = Index[]
 
-    ψfinal = copy(ψ)
+    cache = Array{ITensor, 1}(undef, b-cog+1)
     WLten_new = ψ[cog]
     for j in cog:b-1
         WLten = WLten_new
@@ -163,12 +163,13 @@ function ITensorMPS.orthogonalize(ψ::Vector{<:ITensor}, b::Int; current_center 
         Uten = j==1 ? Uten : Uten*dag(combL)
         Rten = j==N-1 ? Rten : Rten*dag(combR)
 
-        ψfinal[j] = Uten
+        cache[j-cog+1] = Uten
         WLten_new = Rten
         if j==b-1
-            ψfinal[b] = Rten
+            cache[b-cog] = Rten
         end
     end
+    ψfinal = vcat(ψ[1:cog-1], cache, ψ[b+1:end])
 
     return ψfinal
 end
@@ -211,7 +212,7 @@ function ChainRulesCore.rrule(::typeof(ITensorMPS.orthogonalize), ψ::Vector{<:I
     combs::Vector{@NamedTuple{cL::ITensor, cR::ITensor}} = []
     combinds = []
 
-    ψfinal = copy(ψ)
+    ψcache = Array{ITensor, 1}(undef, b-cog+1)
     WLten_new = ψ[cog]
     for j in cog:b-1
         WLten = WLten_new
@@ -254,16 +255,17 @@ function ChainRulesCore.rrule(::typeof(ITensorMPS.orthogonalize), ψ::Vector{<:I
         Uten = j==1 ? Uten : Uten*dag(combL)
         Rten = j==N-1 ? Rten : Rten*dag(combR)
 
-        ψfinal[j] = Uten
+        ψcache[j-cog+1] = Uten
         WLten_new = Rten
         if j==b-1
-            ψfinal[b] = Rten
+            ψcache[b-cog+1] = Rten
         end
     end
+    ψfinal = vcat(ψ[1:cog-1], ψcache, ψ[b+1:end])
 
     function orthogonalize_pullback(Δψfinal)
 
-        Δψ = copy(Δψfinal)
+        Δψcache = Array{ITensor, 1}(undef, b-cog+1)
         ΔRten_new = Δψfinal[b]
         for j in b-1:-1:cog
             combs_j = combs[j]
@@ -288,16 +290,18 @@ function ChainRulesCore.rrule(::typeof(ITensorMPS.orthogonalize), ψ::Vector{<:I
 
             ΔWRten = ITensor(ΔWR, links[j], combinds_j[:cRind])
             ΔWRten = j==N-1 ? ΔWRten : ΔWRten*dag(combs_j[:cR])
-            Δψ[j+1] = ΔWRten
+            Δψcache[j-cog+2] = ΔWRten
 
             ΔWLten = ITensor(ΔWL, combinds_j[:cLind], links[j])
             ΔWLten = j==1 ? ΔWLten : ΔWLten*dag(combs_j[:cL]) 
             ΔRten_new = ΔWLten
             if j==cog
-                Δψ[cog] = ΔWLten
+                Δψcache[1] = ΔWLten
             end
         end
 
+        Δψ = vcat(Δψfinal[1:cog-1], Δψcache, Δψfinal[b+1:end])
+        
         return (NoTangent(), Δψ, NoTangent())
     end
     return ψfinal, orthogonalize_pullback

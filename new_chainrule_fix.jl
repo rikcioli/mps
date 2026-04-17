@@ -6,22 +6,40 @@ using Zygote
 using Plots
 using ChainRulesCore
 
-
-function genPoint(N::Int)
-    # generate random point on M
-    U0 = [[random_left_isometry(2, 2)]; 
-            [random_left_isometry(4, 2) for _ in 2:N-1]; 
-            [randn(ComplexF64, 2, 2)]]
-    return U0
+"Returns bond dimension of link connecting sites j and j+1"
+function bonddim(N::Int, χ::Int, j::Int)
+    return min(2^j, χ, 2^(N-j))
 end
 
-function genTanVec(arrU)
-    N = length(arrU)
-    arrV = [[randn(ComplexF64, 2, 2)]; 
-            [randn(ComplexF64, 4, 2) for _ in 2:N-1]; 
-            [randn(ComplexF64, 2, 2)]]
-    arrV = projectMixed(arrU, arrV, N)
-    arrV /= sqrt(inner(arrV, arrV))
+function genPoint(N::Int, χ::Int, b::Int)
+    # generate random point on M
+    bond = j -> bonddim(N, χ, j)
+
+    local U
+    if b == 1
+        U1 = randn(ComplexF64, 2, bond(1))
+        U1 /= norm(U1)
+        UR = [random_right_isometry(bond(j-1), 2*bond(j)) for j in 2:N]
+        U = vcat([U1], UR)
+    elseif b == N
+        UL = [random_left_isometry(bond(j-1)*2, bond(j)) for j in 1:N-1]
+        UN = randn(ComplexF64, bond(N-1), 2)
+        UN /= norm(UN)
+        U = vcat(UL, [UN])
+    else
+        UL = [random_left_isometry(bond(j-1)*2, bond(j)) for j in 1:b-1]
+        UC = randn(ComplexF64, bond(b-1), 2, bond(b))
+        UC /= norm(UC)
+        UR = [random_right_isometry(bond(j-1), 2*bond(j)) for j in b+1:N]
+        U = vcat(UL, [UC], UR)
+    end
+    return U
+end
+
+function genTanVec(arrU, b::Int)
+    arrV = [randn(ComplexF64, size(U)) for U in arrU]    
+    arrV = projectMixed(arrU, arrV, b)
+    arrV /= sqrt(innerMixed(arrV, arrV))
 end
 
 function testGrad(genPoint::Function, genTanVec::Function, computeCostGrad::Function, inner::Function, retract::Function)
@@ -40,35 +58,40 @@ end
 
 
 
+# CHECK GRADIENT
+N = 4; χ = 2; ogc = 4
+V_array = genPoint(N, χ, ogc)
 
-V_array = genPoint(4)
-psi = vecToITensor(V_array, 4)
-
-function cost(arrV::Vector{<:Matrix})
-    psi = vecToITensor(arrV, 4)
-    psi = orthogonalize(psi, 4)
-    return norm(psi, 4)
+function cost(arrV::Vector{<:AbstractArray}, b::Int)
+    psi = vecToITensor(arrV, b)
+    psi = orthogonalize(psi, b)
+    return norm(psi, b)
 end
 
-function cost_simple(arrV::Vector{<:Matrix})
-    return real(tr(arrV[1]' * arrV[1] + arrV[2]' * arrV[2] + arrV[3]' * arrV[3] + arrV[4]' * arrV[4]))
-end
-cost_simple(V_array)
-gradient(cost_simple, V_array)[1]
-fRgrad(cost_simple, V_array)
+tpsi = vecToITensor(V_array, 4)
+orthogonalize(tpsi, 4)
 
 fRgrad = (func, arrV) -> begin
     N = length(arrV)
     fU, gU = withgradient(func, arrV)
     gU = gU[1]
-    riemG = projectMixed(arrV, gU, N) 
+    riemG = projectMixed(arrV, gU, 4) 
     return fU, riemG
 end
 
-fRgrad(cost, V_array)
+cost_ogcfix = arrV -> cost(arrV, 4)
+cost(V_array, 4)
+gradient(cost_ogcfix, V_array)
+fRgrad(cost_ogcfix, V_array)
 
-function retractMixed4(arrA, arrD, t)
+
+function retractMixedFixed(arrA, arrD, t)
     return retractMixed(arrA, arrD, t, 4)
 end
 
-testGrad(() -> genPoint(4), genTanVec, arrV -> fRgrad(cost, arrV), inner, retractMixed4)
+
+testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), arrV -> fRgrad(cost_ogcfix, arrV), innerMixed, retractMixedFixed)
+
+
+
+# CHECK SCALING
