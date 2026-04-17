@@ -11,6 +11,7 @@ function bonddim(N::Int, χ::Int, j::Int)
     return min(2^j, χ, 2^(N-j))
 end
 
+# WATCH OUT: THIS IS STILL NOT GAUGE FIXED, YOU NEED TO FIX A PERMUTATION OF THE BASIS STATES VIA QR
 function genPoint(N::Int, χ::Int, b::Int)
     # generate random point on M
     bond = j -> bonddim(N, χ, j)
@@ -59,8 +60,16 @@ end
 
 
 # CHECK GRADIENT
-N = 4; χ = 2; ogc = 4
+N = 4; χ = 4; ogc = 1
 V_array = genPoint(N, χ, ogc)
+
+fRgrad = (func, arrV) -> begin
+    N = length(arrV)
+    fU, gU = withgradient(func, arrV)
+    gU = gU[1]
+    riemG = projectMixed(arrV, gU, ogc) 
+    return fU, riemG
+end
 
 function cost(arrV::Vector{<:AbstractArray}, b::Int)
     psi = vecToITensor(arrV, b)
@@ -68,30 +77,79 @@ function cost(arrV::Vector{<:AbstractArray}, b::Int)
     return norm(psi, b)
 end
 
-tpsi = vecToITensor(V_array, 4)
-orthogonalize(tpsi, 4)
+tpsi = vecToITensor(V_array, ogc)
+tpsi_og = orthogonalize(tpsi, ogc)
+tpsi_og2 = orthogonalize(tpsi_og, ogc)
 
-fRgrad = (func, arrV) -> begin
-    N = length(arrV)
-    fU, gU = withgradient(func, arrV)
-    gU = gU[1]
-    riemG = projectMixed(arrV, gU, 4) 
-    return fU, riemG
+cost(V_array, ogc)
+gradient(cost, V_array, ogc)
+cost_ogc = arrV -> cost(arrV, ogc)
+G_array = gradient(cost_ogc, V_array)[1]
+
+@code_warntype projectMixed(V_array, G_array, ogc) 
+fRgrad(cost_ogc, V_array)
+
+
+function retractMixed_ogc(arrA, arrD, t)
+    return retractMixed(arrA, arrD, t, ogc)
 end
 
-cost_ogcfix = arrV -> cost(arrV, 4)
-cost(V_array, 4)
-gradient(cost_ogcfix, V_array)
-fRgrad(cost_ogcfix, V_array)
+testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), arrV -> fRgrad(cost_ogc, arrV), innerMixed, retractMixed_ogc)
 
 
-function retractMixedFixed(arrA, arrD, t)
-    return retractMixed(arrA, arrD, t, 4)
+# CHECK SCALING WITH N
+Nrange = 4:2:50
+results = let cost = cost, Nrange=Nrange
+    χ = 2; ogc = 1 
+    ftimes = Float64[]
+    gtimes = Float64[]
+    for N in Nrange
+        ftime_N = Float64[]
+        gtime_N = Float64[]
+        for _ in 1:100
+            V_array = genPoint(N, χ, ogc)
+            ftime = @elapsed cost(V_array, ogc)
+            gtime = @elapsed gradient(cost, V_array, ogc)
+            push!(ftime_N, ftime)
+            push!(gtime_N, gtime)
+        end
+        push!(ftimes, sum(ftime_N)/100)
+        push!(gtimes, sum(gtime_N)/100)
+    end
+    ftimes, gtimes    
 end
 
+Plots.plot(xlabel="N", ylabel="t (s)")
+Plots.plot(Nrange, results[1], label="tf")
+Plots.plot!(Nrange, results[2], label="tg")
 
-testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), arrV -> fRgrad(cost_ogcfix, arrV), innerMixed, retractMixedFixed)
 
+# CHECK SCALING WITH Chi
+chirange = 2 .^(1:8)
+results = let cost = cost, chirange=chirange
+    N = 50; ogc = 1 
+    ftimes = Float64[]
+    gtimes = Float64[]
+    for χ in chirange
+        @show χ
+        ftime_χ = Float64[]
+        gtime_χ = Float64[]
+        for _ in 1:100
+            V_array = genPoint(N, χ, ogc)
+            ftime = @elapsed cost(V_array, ogc)
+            gtime = @elapsed gradient(cost, V_array, ogc)
+            push!(ftime_χ, ftime)
+            push!(gtime_χ, gtime)
+        end
+        push!(ftimes, sum(ftime_χ)/100)
+        push!(gtimes, sum(gtime_χ)/100)
+    end
+    ftimes, gtimes    
+end
 
-
-# CHECK SCALING
+Plots.plot(xlabel="chi", ylabel="t (s)")
+Plots.plot!(chirange, results[1], label="tf")
+Plots.plot!(chirange, results[2], label="tg")
+Plots.plot!(chirange, 3e-5*chirange, yscale=:log10, xscale=:log10, label="O(chi)")
+Plots.plot!(chirange, 1e-5*chirange .^2, yscale=:log10, xscale=:log10, label="O(chi^2)")
+Plots.plot!(chirange, 1e-7*chirange .^3, yscale=:log10, xscale=:log10, label="O(chi^3)", legend=:bottomright)
