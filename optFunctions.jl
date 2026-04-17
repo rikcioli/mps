@@ -287,7 +287,7 @@ function retractMixed(arrA::Vector{<:AbstractArray}, arrD::Vector{<:AbstractArra
     for j in 1:ogc-1
         Anew[j], Dnew[j] = retractL(arrA[j], arrD[j], t)
     end
-    Anew[ogc], Dnew[ogc] = (arrA[ogc] + t*arrD[ogc], arrD)
+    Anew[ogc], Dnew[ogc] = (arrA[ogc] + t*arrD[ogc], arrD[ogc])
     for j in ogc+1:length(arrD)
         Anew[j], Dnew[j] = retractR(arrA[j], arrD[j], t)
     end
