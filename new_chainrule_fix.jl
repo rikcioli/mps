@@ -6,6 +6,7 @@ using Zygote
 using Plots
 using ChainRulesCore
 
+
 "Returns bond dimension of link connecting sites j and j+1"
 function bonddim(N::Int, χ::Int, j::Int)
     return min(2^j, χ, 2^(N-j))
@@ -72,13 +73,22 @@ fRgrad = (func, arrV) -> begin
 end
 
 function cost(arrV::Vector{<:AbstractArray}, b::Int)
+    N = length(arrV)
     psi = vecToITensor(arrV, b)
-    psi = orthogonalize(psi, b)
-    return norm(psi, b)
+    psi = orthogonalize_mine(psi, N; current_center=b, trunc=(maxrank=2,))
+    return norm(psi, N)
 end
 
+function cost2(arrV::Vector{<:AbstractArray}, b::Int)
+    N = length(arrV)
+    psi = vecToITensor(arrV, b)
+    psi = orthogonalize_mine(psi, N; current_center=b, trunc=(maxrank=2,))
+    return norm(psi, N)
+end
+
+
 tpsi = vecToITensor(V_array, ogc)
-tpsi_og = orthogonalize(tpsi, ogc)
+tpsi_og = orthogonalize_mine(tpsi, ogc)
 tpsi_og2 = orthogonalize(tpsi_og, ogc)
 
 cost(V_array, ogc)
@@ -100,28 +110,40 @@ testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), arrV -> fRgra
 # CHECK SCALING WITH N
 Nrange = 4:2:50
 results = let cost = cost, Nrange=Nrange
-    χ = 2; ogc = 1 
+    χ = 8; ogc = 1 
     ftimes = Float64[]
     gtimes = Float64[]
+    ftimes2 = Float64[]
+    gtimes2 = Float64[]
     for N in Nrange
         ftime_N = Float64[]
         gtime_N = Float64[]
+        ftime_N2 = Float64[]
+        gtime_N2 = Float64[]
         for _ in 1:100
             V_array = genPoint(N, χ, ogc)
             ftime = @elapsed cost(V_array, ogc)
             gtime = @elapsed gradient(cost, V_array, ogc)
+            ftime2 = @elapsed cost2(V_array, ogc)
+            gtime2 = @elapsed gradient(cost2, V_array, ogc)
             push!(ftime_N, ftime)
             push!(gtime_N, gtime)
+            push!(ftime_N2, ftime2)
+            push!(gtime_N2, gtime2)
         end
         push!(ftimes, sum(ftime_N)/100)
         push!(gtimes, sum(gtime_N)/100)
+        push!(ftimes2, sum(ftime_N2)/100)
+        push!(gtimes2, sum(gtime_N2)/100)
     end
-    ftimes, gtimes    
+    ftimes, gtimes, ftimes2, gtimes2  
 end
 
 Plots.plot(xlabel="N", ylabel="t (s)")
 Plots.plot(Nrange, results[1], label="tf")
 Plots.plot!(Nrange, results[2], label="tg")
+Plots.plot(Nrange, results[3], label="tf2")
+Plots.plot!(Nrange, results[4], label="tg2")
 
 
 # CHECK SCALING WITH Chi
