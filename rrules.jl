@@ -28,7 +28,9 @@ function ChainRulesCore.rrule(::Type{Array{T}}, x::ITensor, linds, rinds) where 
     return y, Array_pullback
 end
 
-function SVDcontract(tensors::Vector{ITensor}, linds; move=:right, kargs...)
+"Given an array of ITensors, contracts all of them in left-associative order
+and computes a truncated SVD of the results with the left indices given by linds."
+function SVDcontract(tensors::Vector{ITensor}, linds; move_ogc=:right, kargs...)
     M_ten = reduce(*, tensors)
     rinds = uniqueinds(M_ten, linds)
 
@@ -38,11 +40,11 @@ function SVDcontract(tensors::Vector{ITensor}, linds; move=:right, kargs...)
     M = reshape(M, prod(ldims), prod(rdims))
     U, S, Vdg = svd_trunc(M; kargs...)
     
-    bondind = move==:right ? Index(size(U)[2], "Link_trunc, u") : Index(size(Vdg)[1], "Link_trunc, v")
+    bondind = move_ogc==:right ? Index(size(U)[2], "Link_trunc, u") : Index(size(Vdg)[1], "Link_trunc, v")
 
-    M1 = move==:right ? U : U*S
+    M1 = move_ogc==:right ? U : U*S
     M1 = reshape(M1, tuple(ldims..., space(bondind)))
-    M2 = move==:right ? S*Vdg : Vdg
+    M2 = move_ogc==:right ? S*Vdg : Vdg
     M2 = reshape(M2, tuple(space(bondind), rdims...))
 
     M1_ten = ITensor(M1, linds..., bondind)
@@ -51,7 +53,7 @@ function SVDcontract(tensors::Vector{ITensor}, linds; move=:right, kargs...)
     return (M1_ten, M2_ten)
 end
 
-function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{ITensor}, linds; move=:right, kargs...)
+function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{ITensor}, linds; move_ogc=:right, kargs...)
     prods = cumprod(tensors)
     M_ten = prods[end]
     rinds = uniqueinds(M_ten, linds)
@@ -62,11 +64,11 @@ function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{ITensor}, l
     M = reshape(M, prod(ldims), prod(rdims))
     U, S, Vdg = svd_trunc(M; kargs...)
     
-    bondind = move==:right ? Index(size(U)[2], "Link_trunc, u") : Index(size(Vdg)[1], "Link_trunc, v")
+    bondind = move_ogc==:right ? Index(size(U)[2], "Link_trunc, u") : Index(size(Vdg)[1], "Link_trunc, v")
 
-    M1 = move==:right ? U : U*S
+    M1 = move_ogc==:right ? U : U*S
     M1 = reshape(M1, tuple(ldims..., space(bondind)))
-    M2 = move==:right ? S*Vdg : Vdg
+    M2 = move_ogc==:right ? S*Vdg : Vdg
     M2 = reshape(M2, tuple(space(bondind), rdims...))
 
     M1_ten = ITensor(M1, linds..., bondind)
@@ -82,7 +84,7 @@ function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{ITensor}, l
         ΔM2 = reshape(ΔM2, space(bondind), prod(rdims))
 
         local ΔU, ΔS, ΔVdg
-        if move==:right
+        if move_ogc==:right
             ΔU = ΔM1 
             ΔS = ΔM2*Vdg'
             ΔVdg = S'*ΔM2
@@ -423,29 +425,44 @@ function ChainRulesCore.rrule(::typeof(ITensorMPS.orthogonalize), ψ::Vector{<:I
     return ψfinal, orthogonalize_pullback
 end
 
+function is_orthogonal(psi::Vector{ITensor}, ogc::Int)
+    N = length(psi)
+    links = linkinds(MPS(psi))
+    for j in 1:ogc-1
+        UdgU = (conj(psi[j])*delta(links[j], links[j]'))*psi[j]
+        norm(UdgU - delta(links[j], links[j]')) > 1e-12 && return false
+    end
+    for j in ogc+1:N
+        VVdg = (delta(links[j-1], links[j-1]')*conj(psi[j]))*psi[j]
+        norm(VVdg - delta(links[j-1], links[j-1]')) > 1e-12 && return false
+    end
+    return true
+end
 
-# function to orthogonalize an mps to the right that is compatible with AD
-function orthogonalize_mine(ψ::Vector{<:ITensor}, b::Int; current_center = 1, trunc=NamedTuple())
-    @assert b>=current_center
+# function to orthogonalize an mps that is compatible with AD
+function move_center(ψ::Vector{<:ITensor}, b0::Int, b::Int; check_b0=true, trunc=NamedTuple())
+    if check_b0
+        !is_orthogonal(ψ, b0) && throw(ErrorException("ψ is NOT orthogonal at b0"))
+    end
 
-    if b==current_center
+    cog = b0
+    if b==cog
         return ψ
     end
+    to_right = b>cog  # left-to-right mode
 
     N = length(ψ)
     sites = siteinds(MPS(ψ))
     links = linkinds(MPS(ψ))
 
+    # Preparing the maxranks for svd trunc
     maxranks = [link.space for link in links]
     if maximum(maxranks) == 1
         return ψ
     end
     if haskey(trunc, :maxrank)
-        # remove maxrank from trunc tuple
         kwarg_maxrank = trunc[:maxrank]
-        if maximum(maxranks) < kwarg_maxrank    # if it's equal it's a truncated orthogonalization, which could be useful
-            return ψ
-        end
+        # remove maxrank from trunc tuple
         trunc = (; filter(p -> first(p) != :maxrank, collect(pairs(trunc)))...)
         # choose for maxranks the minimum between input one and linkdims
         maxranks = [min(kwarg_maxrank, maxranks[j]) for j in 1:N-1]
@@ -454,51 +471,75 @@ function orthogonalize_mine(ψ::Vector{<:ITensor}, b::Int; current_center = 1, t
         trunc = (trunc..., atol=eps())
     end
 
-    cog = current_center
-    Ulinkinds = Index[]
+    
+    cache = Array{ITensor, 1}(undef, abs(b-cog)+1)
+    Rten_new = ψ[cog]
+    local ψfinal
+    if to_right
+        Ulinkinds = Index[]
+        for j in cog:b-1
+            WLten = Rten_new
+            WRten = ψ[j+1]
 
-    cache = Array{ITensor, 1}(undef, b-cog+1)
-    WLten_new = ψ[cog]
-    for j in cog:b-1
-        WLten = WLten_new
-        WRten = ψ[j+1]
+            linds = if j > cog
+                (sites[j], Ulinkinds[j-cog])
+            else
+                cog==1 ? (sites[j],) : (sites[j], links[cog-1]) 
+            end
+            W1, W2 = SVDcontract([WLten, WRten], linds; move_ogc=:right, trunc=(trunc..., maxrank=maxranks[j]))
+            push!(Ulinkinds, commonind(W1, W2))
 
-        linds = j > 1 ? (sites[j], Ulinkinds[j-1]) : (sites[j],)
-        W1, W2 = SVDcontract([WLten, WRten], linds; move=:right, trunc=(trunc..., maxrank=maxranks[j]))
-        push!(Ulinkinds, commonind(W1, W2))
-
-        cache[j-cog+1] = W1
-        WLten_new = W2
-        if j==b-1
-            cache[end] = W2
+            cache[j-cog+1] = W1
+            Rten_new = W2
+            if j==b-1
+                cache[end] = W2
+            end
         end
+        ψfinal = vcat(ψ[1:cog-1], cache, ψ[b+1:end])
+        
+    else
+        for j in cog-1:-1:b
+            WLten = ψ[j]
+            WRten = Rten_new
+
+            linds = j > 1 ? (sites[j], links[j-1]) : (sites[j],)
+            W1, W2 = SVDcontract([WLten, WRten], linds; move_ogc=:left, trunc=(trunc..., maxrank=maxranks[j]))
+
+            Rten_new = W1
+            cache[j-b+2] = W2
+            if j==b
+                cache[1] = W1
+            end
+        end
+        ψfinal = vcat(ψ[1:b-1], cache, ψ[cog+1:end])
     end
-    ψfinal = vcat(ψ[1:cog-1], cache, ψ[b+1:end])
 
     return ψfinal
 end
 
-function ChainRulesCore.rrule(::typeof(orthogonalize_mine), ψ::Vector{<:ITensor}, b::Int; current_center = 1, trunc=NamedTuple())
-    @assert b>=current_center
-
-    if b==current_center
-        return ψ, Δψ -> (NoTangent(), Δψ, NoTangent())
+function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::Int, b::Int; check_b0=true, trunc=NamedTuple())
+    if check_b0
+        !is_orthogonal(ψ, b0) && throw(ErrorException("ψ is NOT orthogonal at b0"))
     end
+
+    cog = b0
+    if b==cog
+        return ψ
+    end
+    to_right = b>cog  # left-to-right mode
 
     N = length(ψ)
     sites = siteinds(MPS(ψ))
     links = linkinds(MPS(ψ))
 
+    # Preparing the maxranks for svd trunc
     maxranks = [link.space for link in links]
     if maximum(maxranks) == 1
-        return ψ, Δψ -> (NoTangent(), Δψ, NoTangent())
+        return ψ
     end
     if haskey(trunc, :maxrank)
-        # remove maxrank from trunc tuple
         kwarg_maxrank = trunc[:maxrank]
-        if maximum(maxranks) < kwarg_maxrank    # if it's equal it's a truncated orthogonalization, which could be useful
-            return ψ
-        end
+        # remove maxrank from trunc tuple
         trunc = (; filter(p -> first(p) != :maxrank, collect(pairs(trunc)))...)
         # choose for maxranks the minimum between input one and linkdims
         maxranks = [min(kwarg_maxrank, maxranks[j]) for j in 1:N-1]
@@ -507,52 +548,92 @@ function ChainRulesCore.rrule(::typeof(orthogonalize_mine), ψ::Vector{<:ITensor
         trunc = (trunc..., atol=eps())
     end
 
-    cog = current_center
-    Ulinkinds = Index[]
+    
+    cache = Array{ITensor, 1}(undef, abs(b-cog)+1)
+    backs = Function[]
+    Rten_new = ψ[cog]
+    local ψfinal
+    if to_right
+        Ulinkinds = Index[]
+        for j in cog:b-1
+            WLten = Rten_new
+            WRten = ψ[j+1]
 
-    ψcache = Array{ITensor, 1}(undef, b-cog+1)
-    WLten_new = ψ[cog]
-    backs = []
-    for j in cog:b-1
-        WLten = WLten_new
-        WRten = ψ[j+1]
+            linds = if j > cog
+                (sites[j], Ulinkinds[j-cog])
+            else
+                cog==1 ? (sites[j],) : (sites[j], links[cog-1]) 
+            end
+            SVDcontract_j = (tensors, leftinds) -> SVDcontract(tensors, leftinds; move_ogc=:right, trunc=(trunc..., maxrank=maxranks[j]))
+            (W1, W2), back_j = Zygote.pullback(SVDcontract_j, [WLten, WRten], linds)
+            push!(backs, back_j)
+            push!(Ulinkinds, commonind(W1, W2))
 
-        linds = j > 1 ? (sites[j], Ulinkinds[j-1]) : (sites[j],)
-        SVDcontract_j = (tensors, leftinds) -> SVDcontract(tensors, leftinds; move=:right, trunc=(trunc..., maxrank=maxranks[j]))
-        (W1, W2), back_j = Zygote.pullback(SVDcontract_j, [WLten, WRten], linds)
-        push!(backs, back_j)
-        push!(Ulinkinds, commonind(W1, W2))
-
-        ψcache[j-cog+1] = W1
-        WLten_new = W2
-        if j==b-1
-            ψcache[end] = W2
-        end
-    end
-    ψfinal = vcat(ψ[1:cog-1], ψcache, ψ[b+1:end])
-
-    function orthogonalize_pullback(Δψfinal)
-
-        Δψcache = Array{ITensor, 1}(undef, b-cog+1)
-        ΔW2_new = Δψfinal[b]
-        for j in b-1:-1:cog
-            ΔW1 = Δψfinal[j]
-            ΔW2 = ΔW2_new
-
-            (ΔWL, ΔWR), _ = backs[j]((ΔW1, ΔW2))
-
-            Δψcache[j-cog+2] = ΔWR
-            ΔW2_new = ΔWL
-            if j==cog
-                Δψcache[1] = ΔWL
+            cache[j-cog+1] = W1
+            Rten_new = W2
+            if j==b-1
+                cache[end] = W2
             end
         end
-
-        Δψ = vcat(Δψfinal[1:cog-1], Δψcache, Δψfinal[b+1:end])
+        ψfinal = vcat(ψ[1:cog-1], cache, ψ[b+1:end])
         
-        return (NoTangent(), Δψ, NoTangent())
+    else
+        for j in cog-1:-1:b
+            WLten = ψ[j]
+            WRten = Rten_new
+
+            linds = j > 1 ? (sites[j], links[j-1]) : (sites[j],)
+            SVDcontract_j = (tensors, leftinds) -> SVDcontract(tensors, leftinds; move_ogc=:left, trunc=(trunc..., maxrank=maxranks[j]))
+            (W1, W2), back_j = Zygote.pullback(SVDcontract_j, [WLten, WRten], linds)
+            push!(backs, back_j)
+
+            Rten_new = W1
+            cache[j-b+2] = W2
+            if j==b
+                cache[1] = W1
+            end
+        end
+        ψfinal = vcat(ψ[1:b-1], cache, ψ[cog+1:end])
     end
-    return ψfinal, orthogonalize_pullback
+
+    function move_center_pullback(Δψfinal)
+
+        Δψcache = Array{ITensor, 1}(undef, abs(b-cog)+1)
+        ΔR_new = Δψfinal[b]
+        local Δψ
+        if to_right
+            for j in b-1:-1:cog
+                ΔW1 = Δψfinal[j]
+                ΔW2 = ΔR_new
+
+                (ΔWL, ΔWR), _ = backs[j-cog+1]((ΔW1, ΔW2))  # start from the last
+
+                Δψcache[j-cog+2] = ΔWR
+                ΔR_new = ΔWL
+                if j==cog
+                    Δψcache[1] = ΔWL
+                end
+            end
+            Δψ = vcat(Δψfinal[1:cog-1], Δψcache, Δψfinal[b+1:end])
+        else
+            for j in b:cog-1
+                ΔW1 = ΔR_new
+                ΔW2 = Δψfinal[j+1]
+
+                (ΔWL, ΔWR), _ = backs[cog-j]((ΔW1, ΔW2)) # start from the last again, since pullbacks are appended
+
+                Δψcache[j-b+1] = ΔWL
+                ΔR_new = ΔWR
+                if j==cog-1
+                    Δψcache[end] = ΔWR
+                end
+            end
+            Δψ = vcat(Δψfinal[1:b-1], Δψcache, Δψfinal[cog+1:end])
+        end
+        
+        return (NoTangent(), Δψ, NoTangent(), NoTangent())
+    end
+    return ψfinal, move_center_pullback
 end
 
 
