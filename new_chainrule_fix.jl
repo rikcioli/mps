@@ -5,6 +5,7 @@ using LaTeXStrings
 using Zygote
 using Plots
 using ChainRulesCore
+using Test
 
 
 "Returns bond dimension of link connecting sites j and j+1"
@@ -59,10 +60,106 @@ function testGrad(genPoint::Function, genTanVec::Function, computeCostGrad::Func
 end
 
 
+function test_genPoint()
+    N = 4; χ = 4;
+    for ogc in 1:4
+        V_array = genPoint(N, χ, ogc)
+        for j in 1:ogc-1
+            U = V_array[j]
+            if norm(U'*U - I) > 1e-12
+                return false
+            end
+        end
+        for j in ogc+1:N
+            V = V_array[j]
+            if norm(V*V' - I) > 1e-12
+                return false
+            end
+        end
+    end
+    return true
+end
+
+
+function ordered_inds(psi::Vector{ITensor})
+    N = length(psi)
+    sites = siteinds(MPS(psi))
+    links = linkinds(MPS(psi))
+    inds1 = [(sites[1], links[1])]
+    indsbulk = [(links[j-1], sites[j], links[j]) for j in 2:N-1]
+    indsN = [(links[N-1], sites[N])]
+
+    inds_all = [inds1; indsbulk; indsN]
+    return inds_all
+end
+
+
+function test_vecToITensor()
+    N = 8; χ = 8
+    for ogc in 1:N
+        V_arr = genPoint(N, χ, ogc)
+        psi = vecToITensor(V_arr, ogc)
+        !is_orthogonal(psi, ogc) && return false
+    end
+    return true
+end
+
+"Check orthogonality"
+function test_move_center()
+    N = 8; χ = 8
+    for ogc in 1:N
+        V_arr = genPoint(N, χ, ogc)
+        psi = vecToITensor(V_arr, ogc)
+        psi = move_center(psi, ogc, N; check_b0=true)
+        for ogc_final in 1:N
+            psi_final = move_center(psi, N, ogc_final; check_b0=true)
+            !is_orthogonal(psi_final, ogc_final) && return false
+        end
+    end
+    return true
+end
+
+"Check directly against ITensor orthogonalize, tensor by tensor, modulo phases"
+function test_move2()
+    N = 8; χ = 8
+    for ogc in 1:N
+        V_arr = genPoint(N, χ, ogc)
+        psi = vecToITensor(V_arr, ogc)
+        psi = move_center(psi, ogc, N)
+        psi = move_center(psi, N, 1)
+
+        psi_mps = MPS(psi)
+        orthogonalize!(psi_mps, N)
+        orthogonalize!(psi_mps, 1)
+
+        for ogc_final in 1:N
+            psi_final = move_center(psi, 1, ogc_final)
+            inds_final = ordered_inds(psi_final)
+            psi_tensors = [Array{ComplexF64}(psi_final[j], inds_final[j]) for j in 1:N]
+
+            psi_mps_final = orthogonalize(psi_mps, ogc_final)
+            inds_mps_final = ordered_inds(psi_mps_final[1:N])
+            psi_mps_tensors = [Array{ComplexF64}(psi_mps_final[j], inds_mps_final[j]) for j in 1:N]
+
+            # tensors should be the same up to overall phase set by chosen decomposition
+            # for move_center it's svd, for orthogonalize it's probably qr
+            sum(norm.([abs.(mat) for mat in psi_tensors] .- [abs.(mat) for mat in psi_mps_tensors])) > 1e-12 && return false
+        end
+    end
+    return true
+end
+
+@test test_genPoint()
+@test test_vecToITensor()
+@test test_move_center()
+@test test_move2()
+
 
 # CHECK GRADIENT
+
 N = 4; χ = 4; ogc = 1
 V_array = genPoint(N, χ, ogc)
+
 
 fRgrad = (func, arrV) -> begin
     N = length(arrV)
@@ -72,31 +169,18 @@ fRgrad = (func, arrV) -> begin
     return fU, riemG
 end
 
-function cost(arrV::Vector{<:AbstractArray}, b::Int)
+function cost(arrV::Vector{<:AbstractArray}, ogc::Int)
     N = length(arrV)
-    psi = vecToITensor(arrV, b)
-    psi = orthogonalize_mine(psi, N; current_center=b, trunc=(maxrank=2,))
+    psi = vecToITensor(arrV, ogc)
+    psi = move_center(psi, ogc, N; check_b0=false, trunc=(maxrank=2,))
     return norm(psi, N)
 end
 
-function cost2(arrV::Vector{<:AbstractArray}, b::Int)
-    N = length(arrV)
-    psi = vecToITensor(arrV, b)
-    psi = orthogonalize_mine(psi, N; current_center=b, trunc=(maxrank=2,))
-    return norm(psi, N)
-end
-
-
-tpsi = vecToITensor(V_array, ogc)
-tpsi_og = orthogonalize_mine(tpsi, ogc)
-tpsi_og2 = orthogonalize(tpsi_og, ogc)
 
 cost(V_array, ogc)
 gradient(cost, V_array, ogc)
 cost_ogc = arrV -> cost(arrV, ogc)
 G_array = gradient(cost_ogc, V_array)[1]
-
-@code_warntype projectMixed(V_array, G_array, ogc) 
 fRgrad(cost_ogc, V_array)
 
 
@@ -142,7 +226,7 @@ end
 Plots.plot(xlabel="N", ylabel="t (s)")
 Plots.plot(Nrange, results[1], label="tf")
 Plots.plot!(Nrange, results[2], label="tg")
-Plots.plot(Nrange, results[3], label="tf2")
+Plots.plot!(Nrange, results[3], label="tf2")
 Plots.plot!(Nrange, results[4], label="tg2")
 
 

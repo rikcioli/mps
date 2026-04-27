@@ -117,12 +117,26 @@ end
 
 
 function vecToITensor(V::Vector{<:AbstractArray}, ogc)
+    
     N = length(V)
     V = copy.(V) # eliminates adjoint type before converting to ITensor
+
     sites = siteinds("Qubit", N)
     dimlinksL = [size(V[j], 2) for j in 1:ogc-1]
     dimlinksR = [size(V[j], 1) for j in ogc+1:N]
     dimlinks = [dimlinksL; dimlinksR]
+
+    @assert size(V[1]) == (2, dimlinks[1])
+    for j in 2:ogc-1
+        @assert size(V[j]) == (dimlinks[j-1]*2, dimlinks[j])
+    end
+    if 1<ogc<N
+        @assert size(V[ogc]) == (dimlinks[ogc-1], 2, dimlinks[ogc])
+    end
+    for j in ogc+1:N-1
+        @assert size(V[j]) == (dimlinks[j-1], 2*dimlinks[j])
+    end
+    @assert size(V[N]) == (dimlinks[N-1], 2)
 
     links = [Index(dimlinks[j], "Link, l=$j") for j in 1:N-1]
 
@@ -147,6 +161,18 @@ function ChainRulesCore.rrule(::typeof(vecToITensor), V::Vector{<:AbstractArray}
     dimlinksL = [size(V[j], 2) for j in 1:ogc-1]
     dimlinksR = [size(V[j], 1) for j in ogc+1:N]
     dimlinks = [dimlinksL; dimlinksR]
+
+    @assert size(V[1]) == (2, dimlinks[1])
+    for j in 2:ogc-1
+        @assert size(V[j]) == (dimlinks[j-1]*2, dimlinks[j])
+    end
+    if 1<ogc<N
+        @assert size(V[ogc]) == (dimlinks[ogc-1], 2, dimlinks[ogc])
+    end
+    for j in ogc+1:N-1
+        @assert size(V[j]) == (dimlinks[j-1], 2*dimlinks[j])
+    end
+    @assert size(V[N]) == (dimlinks[N-1], 2)
 
     links = [Index(dimlinks[j], "Link, l=$j") for j in 1:N-1]
 
@@ -216,214 +242,6 @@ function ChainRulesCore.rrule(::typeof(norm2), ψ::Vector{ITensor}, ogc::Int)
     return nrm2, norm_pullback
 end
 
-# function to orthogonalize an mps to the right that is compatible with AD
-function ITensorMPS.orthogonalize(ψ::Vector{<:ITensor}, b::Int; current_center = 1, trunc=NamedTuple())
-    @assert b>=current_center
-
-    if b==current_center
-        return ψ
-    end
-
-    N = length(ψ)
-    sites = siteinds(MPS(ψ))
-    links = linkinds(MPS(ψ))
-
-    maxranks = [link.space for link in links]
-    if maximum(maxranks) == 1
-        return ψ
-    end
-    if haskey(trunc, :maxrank)
-        # remove maxrank from trunc tuple
-        kwarg_maxrank = trunc[:maxrank]
-        if maximum(maxranks) < kwarg_maxrank    # if it's equal it's a truncated orthogonalization, which could be useful
-            return ψ
-        end
-        trunc = (; filter(p -> first(p) != :maxrank, collect(pairs(trunc)))...)
-        # choose for maxranks the minimum between input one and linkdims
-        maxranks = [min(kwarg_maxrank, maxranks[j]) for j in 1:N-1]
-    end
-    if !haskey(trunc, :atol)
-        trunc = (trunc..., atol=eps())
-    end
-
-    cog = current_center
-    Ulinkinds = Index[]
-
-    cache = Array{ITensor, 1}(undef, b-cog+1)
-    WLten_new = ψ[cog]
-    for j in cog:b-1
-        WLten = WLten_new
-        WRten = ψ[j+1]
-
-        if j > 1
-            combL = combiner(sites[j], Ulinkinds[j-1])
-            cLind = combinedind(combL)
-            WLten = combL*WLten
-        else
-            cLind = sites[1]
-        end
-        if j < N-1
-            combR = combiner(sites[j+1], links[j+1])
-            cRind = combinedind(combR)
-            WRten = WRten*combR
-        else
-            cRind = sites[N]
-        end
-        
-        W = Matrix(WLten*WRten, cLind, cRind)
-        U, S, Vdg = svd_trunc(W; trunc=(trunc..., maxrank=maxranks[j]))
-
-        Ulinkind = Index(size(U)[2], "Link, u")
-        push!(Ulinkinds, Ulinkind)
-        Uten = ITensor(U, cLind, Ulinkind)
-        Rten = ITensor(S*Vdg, Ulinkind, cRind)
-        
-        Uten = j==1 ? Uten : Uten*dag(combL)
-        Rten = j==N-1 ? Rten : Rten*dag(combR)
-
-        cache[j-cog+1] = Uten
-        WLten_new = Rten
-        if j==b-1
-            cache[end] = Rten
-        end
-    end
-    ψfinal = vcat(ψ[1:cog-1], cache, ψ[b+1:end])
-
-    return ψfinal
-end
-
-
-function ChainRulesCore.rrule(::typeof(ITensorMPS.orthogonalize), ψ::Vector{<:ITensor}, b::Int; current_center = 1, trunc=NamedTuple())
-    @assert b>=current_center
-    if b==current_center
-        return ψ, Δψ -> (NoTangent(), Δψ, NoTangent())
-    end
-
-    N = length(ψ)
-    sites = siteinds(MPS(ψ))
-    links = linkinds(MPS(ψ))
-
-    maxranks = [link.space for link in links]
-    if maximum(maxranks) == 1
-        return ψ, Δψ -> (NoTangent(), Δψ, NoTangent())
-    end
-    if haskey(trunc, :maxrank)
-        # remove maxrank from trunc tuple
-        kwarg_maxrank = trunc[:maxrank]
-        if maximum(maxranks) < kwarg_maxrank    # if it's equal it's a truncated orthogonalization, which could be useful
-            return ψ
-        end
-        trunc = (; filter(p -> first(p) != :maxrank, collect(pairs(trunc)))...)
-        # choose for maxranks the minimum between input one and linkdims
-        maxranks = [min(kwarg_maxrank, maxranks[j]) for j in 1:N-1]
-    end
-    if !haskey(trunc, :atol)
-        trunc = (trunc..., atol=eps())
-    end
-
-    cog = current_center
-
-    WLRlist::Vector{Vector{Matrix{ComplexF64}}} = []
-    Wlist = Matrix{ComplexF64}[]
-    USVlist = []
-    Ulinkinds = Index[]
-    combs::Vector{@NamedTuple{cL::ITensor, cR::ITensor}} = []
-    combinds = []
-
-    ψcache = Array{ITensor, 1}(undef, b-cog+1)
-    WLten_new = ψ[cog]
-    for j in cog:b-1
-        WLten = WLten_new
-        WRten = ψ[j+1]
-        combs_j = ITensor[]
-        if j > 1
-            combL = combiner(sites[j], Ulinkinds[j-1])
-            push!(combs_j, combL)
-            cLind = combinedind(combL)
-            WLten = combL*WLten
-        else
-            cLind = sites[1]
-            push!(combs_j, ITensor(1))
-        end
-        if j < N-1
-            combR = combiner(sites[j+1], links[j+1])
-            push!(combs_j, combR)
-            cRind = combinedind(combR)
-            WRten = WRten*combR
-        else
-            cRind = sites[N]
-            push!(combs_j, ITensor(1))
-        end
-        
-        push!(combs, (cL=combs_j[1], cR=combs_j[2]))   # store combiners for pullback
-        push!(combinds, (cLind=cLind, cRind=cRind))     # store combined inds
-        # convert WLten and WRten into matrices and store them for pullback
-        push!(WLRlist, [Array{ComplexF64}(WLten, cLind, links[j]), Array{ComplexF64}(WRten, links[j], cRind)])
-
-        W = Matrix(WLten*WRten, cLind, cRind)
-        push!(Wlist, W)
-        U, S, Vdg = svd_trunc(W; trunc=(trunc..., maxrank=maxranks[j]))
-        push!(USVlist, (U, S, Vdg))
-
-        Ulinkind = Index(size(U)[2], "Link_trunc, l=$j")
-        push!(Ulinkinds, Ulinkind)
-        Uten = ITensor(U, cLind, Ulinkind)
-        Rten = ITensor(S*Vdg, Ulinkind, cRind)
-        
-        Uten = j==1 ? Uten : Uten*dag(combL)
-        Rten = j==N-1 ? Rten : Rten*dag(combR)
-
-        ψcache[j-cog+1] = Uten
-        WLten_new = Rten
-        if j==b-1
-            ψcache[b-cog+1] = Rten
-        end
-    end
-    ψfinal = vcat(ψ[1:cog-1], ψcache, ψ[b+1:end])
-
-    function orthogonalize_pullback(Δψfinal)
-
-        Δψcache = Array{ITensor, 1}(undef, b-cog+1)
-        ΔRten_new = Δψfinal[b]
-        for j in b-1:-1:cog
-            combs_j = combs[j]
-            combinds_j = combinds[j]
-            Ulinkind_j = Ulinkinds[j]
-            WL, WR = WLRlist[j]
-            W = Wlist[j]
-            U, S, Vdg = USVlist[j]
-
-            ΔUten = Δψfinal[j]
-            ΔUten = j==1 ? ΔUten : ΔUten*combs_j[:cL]
-            ΔRten = ΔRten_new
-            ΔRten = j==N-1 ? ΔRten : ΔRten*combs_j[:cR]
-
-            ΔU = Array{ComplexF64}(ΔUten, combinds_j[:cLind], Ulinkind_j)
-            ΔR = Array{ComplexF64}(ΔRten, Ulinkind_j, combinds_j[:cRind])
-            ΔS = ΔR*Vdg'; ΔVdg = S'*ΔR
-
-            ΔW = zero(W)
-            MatrixAlgebraKit.svd_trunc_pullback!(ΔW, W, (U, S, Vdg), (ΔU, ΔS, ΔVdg))
-            ΔWL = ΔW*WR'; ΔWR = WL'*ΔW
-
-            ΔWRten = ITensor(ΔWR, links[j], combinds_j[:cRind])
-            ΔWRten = j==N-1 ? ΔWRten : ΔWRten*dag(combs_j[:cR])
-            Δψcache[j-cog+2] = ΔWRten
-
-            ΔWLten = ITensor(ΔWL, combinds_j[:cLind], links[j])
-            ΔWLten = j==1 ? ΔWLten : ΔWLten*dag(combs_j[:cL]) 
-            ΔRten_new = ΔWLten
-            if j==cog
-                Δψcache[1] = ΔWLten
-            end
-        end
-
-        Δψ = vcat(Δψfinal[1:cog-1], Δψcache, Δψfinal[b+1:end])
-        
-        return (NoTangent(), Δψ, NoTangent())
-    end
-    return ψfinal, orthogonalize_pullback
-end
 
 function is_orthogonal(psi::Vector{ITensor}, ogc::Int)
     N = length(psi)
@@ -442,7 +260,7 @@ end
 # function to orthogonalize an mps that is compatible with AD
 function move_center(ψ::Vector{<:ITensor}, b0::Int, b::Int; check_b0=true, trunc=NamedTuple())
     if check_b0
-        !is_orthogonal(ψ, b0) && throw(ErrorException("ψ is NOT orthogonal at b0"))
+        !is_orthogonal(ψ, b0) && throw(ErrorException("ψ is NOT orthogonal at specified b0=$(b0)"))
     end
 
     cog = b0
@@ -519,7 +337,7 @@ end
 
 function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::Int, b::Int; check_b0=true, trunc=NamedTuple())
     if check_b0
-        !is_orthogonal(ψ, b0) && throw(ErrorException("ψ is NOT orthogonal at b0"))
+        !is_orthogonal(ψ, b0) && throw(ErrorException("ψ is NOT orthogonal at specified b0=$(b0)"))
     end
 
     cog = b0
