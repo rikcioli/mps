@@ -17,6 +17,76 @@ Psm[3,:,:] = Z
 Psm[4,:,:] = Y
 const Ps = deepcopy(Psm)
 
+bra(T) = addtags(T,"bra")
+bralinks(T) = addtags(T, "bra", tags="Link") 
+
+function is_orthogonal(psi::Vector{ITensor}, ogc::Int)
+    N = length(psi)
+    links = linkinds(MPS(psi))
+    for j in 1:ogc-1
+        UdgU = (conj(psi[j])*delta(links[j], links[j]'))*psi[j]
+        norm(UdgU - delta(links[j], links[j]')) > 1e-12 && return false
+    end
+    for j in ogc+1:N
+        VVdg = (delta(links[j-1], links[j-1]')*conj(psi[j]))*psi[j]
+        norm(VVdg - delta(links[j-1], links[j-1]')) > 1e-12 && return false
+    end
+    return true
+end
+
+function check_orthogonal(psi::Vector{ITensor}, ogc::Int)
+    !is_orthogonal(psi, ogc) && throw(ErrorException("ψ is NOT orthogonal at specified orthogonality center=$(ogc)"))
+    return true
+end
+
+
+function inner(ψ::Vector{ITensor}, ϕ::Vector{ITensor})
+    N = length(ψ)
+    @assert length(ϕ)==N
+    ψ_bra = @. dag(bralinks(ψ))
+    c1 = ψ_bra[1] * ϕ[1]
+    for j in 2:N
+        c1 *= ψ_bra[j]
+        c1 *= ϕ[j]
+    end
+    return real(c1)[1]
+end
+
+# We write it in the form that is already in the tangent space since it's easier
+function ChainRulesCore.rrule(::typeof(inner), ψ::Vector{ITensor}, ϕ::Vector{ITensor})
+    N = length(ψ)
+    @assert length(ϕ)==N
+    ψ_bra = @. dag(bralinks(ψ))
+    envL = [ψ_bra[1] * ϕ[1]]
+    envR = [ψ_bra[N] * ϕ[N]]
+    for j in 2:N-1
+        push!(envL, envL[j-1] * ψ_bra[j] * ϕ[j])
+        push!(envR, envR[j-1] * ψ_bra[N+1-j] * ϕ[N+1-j])
+    end
+    C = envL[end] * ψ_bra[N] *ϕ[N][1]
+
+    function inner_pullback(ΔC)
+        Δϕ = ITensor[]
+        Δψ = ITensor[]
+
+        push!(Δϕ, ΔC*conj(ψ_bra[1] * envR[N-1]))
+        push!(Δψ, conj(ΔC)*ϕ[1]*envR[N-1])
+        for j in 2:N-1
+            push!(Δϕ, ΔC*conj(envL[j-1] * ψ_bra[j] * envR[N-j]))
+            push!(Δψ, conj(ΔC)*(envL[j-1] * ϕ[j] * envR[N-j]))
+        end
+        push!(Δϕ, ΔC*conj(envL[N-1] * ψ_bra[N]))
+        push!(Δψ, conj(ΔC)*(envL[N-1] * ϕ[N]))
+        Δψ = map(T -> removetags(T, "bra"), Δψ)
+
+        return (NoTangent(), Δψ, Δϕ)
+    end
+
+    return C, inner_pullback
+
+end
+
+
 
 function ChainRulesCore.rrule(::Type{Array{T}}, x::ITensor, linds, rinds) where {T}
     y = Array{T}(x, linds, rinds)
@@ -28,10 +98,13 @@ function ChainRulesCore.rrule(::Type{Array{T}}, x::ITensor, linds, rinds) where 
     return y, Array_pullback
 end
 
-"Given an array of ITensors, contracts all of them in left-associative order
+"Given an array of ITensors, contracts all of them in the chosen order
 and computes a truncated SVD of the results with the left indices given by linds."
 function SVDcontract(tensors::Vector{ITensor}, linds; move_ogc=:right, kargs...)
-    M_ten = reduce(*, tensors)
+    M_ten = tensors[1]
+    for ten in tensors[2:end]
+        M_ten *= ten
+    end
     rinds = uniqueinds(M_ten, linds)
 
     M = Array{ComplexF64}(M_ten, linds, rinds)
@@ -40,7 +113,7 @@ function SVDcontract(tensors::Vector{ITensor}, linds; move_ogc=:right, kargs...)
     M = reshape(M, prod(ldims), prod(rdims))
     U, S, Vdg = svd_trunc(M; kargs...)
     
-    bondind = move_ogc==:right ? Index(size(U)[2], "Link_trunc, u") : Index(size(Vdg)[1], "Link_trunc, v")
+    bondind = move_ogc==:right ? Index(size(U)[2], "Link, u") : Index(size(Vdg)[1], "Link, v")
 
     M1 = move_ogc==:right ? U : U*S
     M1 = reshape(M1, tuple(ldims..., space(bondind)))
@@ -64,7 +137,7 @@ function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{ITensor}, l
     M = reshape(M, prod(ldims), prod(rdims))
     U, S, Vdg = svd_trunc(M; kargs...)
     
-    bondind = move_ogc==:right ? Index(size(U)[2], "Link_trunc, u") : Index(size(Vdg)[1], "Link_trunc, v")
+    bondind = move_ogc==:right ? Index(size(U)[2], "Link, u") : Index(size(Vdg)[1], "Link, v")
 
     M1 = move_ogc==:right ? U : U*S
     M1 = reshape(M1, tuple(ldims..., space(bondind)))
@@ -204,13 +277,15 @@ end
 
 
 
-function ITensors.norm(ψ::Vector{ITensor}, ogc::Int)
+function ITensors.norm(ψ::Vector{ITensor}, ogc::Int; check_og=true)
+    check_og && check_orthogonal(ψ, ogc)
     center_ten = ψ[ogc]
     center = Array{ComplexF64}(center_ten, inds(center_ten))
     return norm(center)
 end
 
-function ChainRulesCore.rrule(::typeof(ITensors.norm), ψ::Vector{ITensor}, ogc::Int)
+function ChainRulesCore.rrule(::typeof(ITensors.norm), ψ::Vector{ITensor}, ogc::Int; check_og=true)
+    check_og && check_orthogonal(ψ, ogc)
     center_ten = ψ[ogc]
     center = Array{ComplexF64}(center_ten, inds(center_ten))
     nrm = norm(center)
@@ -224,12 +299,14 @@ function ChainRulesCore.rrule(::typeof(ITensors.norm), ψ::Vector{ITensor}, ogc:
     return norm(center), norm_pullback
 end
 
-function norm2(ψ::Vector{ITensor}, ogc::Int)
+function norm2(ψ::Vector{ITensor}, ogc::Int; check_og=true)
+    check_og && check_orthogonal(ψ, ogc)
     ogc_ten = ψ[ogc]
     return real(dot(ogc_ten, ogc_ten))
 end
 
-function ChainRulesCore.rrule(::typeof(norm2), ψ::Vector{ITensor}, ogc::Int)
+function ChainRulesCore.rrule(::typeof(norm2), ψ::Vector{ITensor}, ogc::Int; check_og=true)
+    check_og && check_orthogonal(ψ, ogc)
     ogc_ten = ψ[ogc]
     nrm2 = real(dot(ogc_ten, ogc_ten))
 
@@ -242,42 +319,11 @@ function ChainRulesCore.rrule(::typeof(norm2), ψ::Vector{ITensor}, ogc::Int)
     return nrm2, norm_pullback
 end
 
-
-function is_orthogonal(psi::Vector{ITensor}, ogc::Int)
-    N = length(psi)
-    links = linkinds(MPS(psi))
-    for j in 1:ogc-1
-        UdgU = (conj(psi[j])*delta(links[j], links[j]'))*psi[j]
-        norm(UdgU - delta(links[j], links[j]')) > 1e-12 && return false
-    end
-    for j in ogc+1:N
-        VVdg = (delta(links[j-1], links[j-1]')*conj(psi[j]))*psi[j]
-        norm(VVdg - delta(links[j-1], links[j-1]')) > 1e-12 && return false
-    end
-    return true
-end
-
-# function to orthogonalize an mps that is compatible with AD
-function move_center(ψ::Vector{<:ITensor}, b0::Int, b::Int; check_b0=true, trunc=NamedTuple())
-    if check_b0
-        !is_orthogonal(ψ, b0) && throw(ErrorException("ψ is NOT orthogonal at specified b0=$(b0)"))
-    end
-
-    cog = b0
-    if b==cog
-        return ψ
-    end
-    to_right = b>cog  # left-to-right mode
-
-    N = length(ψ)
-    sites = siteinds(MPS(ψ))
-    links = linkinds(MPS(ψ))
-
-    # Preparing the maxranks for svd trunc
-    maxranks = [link.space for link in links]
-    if maximum(maxranks) == 1
-        return ψ
-    end
+"Helper function to modify the maxrank argument in svd_trunc. 
+Removes the :maxrank key in trunc if present, and returns an array maxranks such that
+maxranks[j] = min(trunc(:maxrank), dims[j])"
+function adapt_truncarg(trunc::NamedTuple, dims::Vector{<:Int})
+    maxranks = dims
     if haskey(trunc, :maxrank)
         kwarg_maxrank = trunc[:maxrank]
         # remove maxrank from trunc tuple
@@ -285,11 +331,30 @@ function move_center(ψ::Vector{<:ITensor}, b0::Int, b::Int; check_b0=true, trun
         # choose for maxranks the minimum between input one and linkdims
         maxranks = [min(kwarg_maxrank, maxranks[j]) for j in 1:N-1]
     end
-    if !haskey(trunc, :atol)
+    if !haskey(trunc, :atol)    # adds an eps() tolerance if not present
         trunc = (trunc..., atol=eps())
     end
+    return trunc, maxranks
+end
 
+# function to orthogonalize an mps that is compatible with AD
+function move_center(ψ::Vector{<:ITensor}, b0::Int, b::Int; check_og=true, trunc=NamedTuple())
+    N = length(ψ)
+    @assert 1 <= b0 <= N
+    @assert 1 <= b <= N
+    check_og && check_orthogonal(ψ, b0) # check that ψ is orthogonal at b0
+
+    cog = b0
+    if b==cog
+        return ψ
+    end
+    to_right = b>cog  # left-to-right mode
+
+    # Preparing the maxranks for svd trunc
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(MPS(ψ)))
     
+    sites = siteinds(MPS(ψ))
+    links = linkinds(MPS(ψ))
     cache = Array{ITensor, 1}(undef, abs(b-cog)+1)
     Rten_new = ψ[cog]
     local ψfinal
@@ -335,10 +400,11 @@ function move_center(ψ::Vector{<:ITensor}, b0::Int, b::Int; check_b0=true, trun
     return ψfinal
 end
 
-function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::Int, b::Int; check_b0=true, trunc=NamedTuple())
-    if check_b0
-        !is_orthogonal(ψ, b0) && throw(ErrorException("ψ is NOT orthogonal at specified b0=$(b0)"))
-    end
+function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::Int, b::Int; check_og=true, trunc=NamedTuple())
+    N = length(ψ)
+    @assert 1 <= b0 <= N
+    @assert 1 <= b <= N
+    check_og && check_orthogonal(ψ, b0) # check that ψ is orthogonal at b0
 
     cog = b0
     if b==cog
@@ -346,29 +412,13 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::
     end
     to_right = b>cog  # left-to-right mode
 
-    N = length(ψ)
+    # Preparing the maxranks for svd trunc
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(MPS(ψ)))
+
     sites = siteinds(MPS(ψ))
     links = linkinds(MPS(ψ))
-
-    # Preparing the maxranks for svd trunc
-    maxranks = [link.space for link in links]
-    if maximum(maxranks) == 1
-        return ψ
-    end
-    if haskey(trunc, :maxrank)
-        kwarg_maxrank = trunc[:maxrank]
-        # remove maxrank from trunc tuple
-        trunc = (; filter(p -> first(p) != :maxrank, collect(pairs(trunc)))...)
-        # choose for maxranks the minimum between input one and linkdims
-        maxranks = [min(kwarg_maxrank, maxranks[j]) for j in 1:N-1]
-    end
-    if !haskey(trunc, :atol)
-        trunc = (trunc..., atol=eps())
-    end
-
-    
     cache = Array{ITensor, 1}(undef, abs(b-cog)+1)
-    backs = Function[]
+    backs = Function[]  # store intermediate pullbacks
     Rten_new = ψ[cog]
     local ψfinal
     if to_right
@@ -453,6 +503,141 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::
     end
     return ψfinal, move_center_pullback
 end
+
+
+function apply(Uarray::Vector{<:AbstractMatrix}, ψ::Vector{ITensor}; check_og=false, shift=0, trunc=NamedTuple())
+    N = length(ψ)
+    @assert shift==0 || shift==1
+    check_og && check_orthogonal(ψ, 1) # check that ψ is orthogonal at first site before applying unitaries
+
+    to_right = true  # left-to-right mode
+
+    # Preparing the maxranks for svd trunc
+    trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
+    
+    sites = siteinds(MPS(ψ))
+    ψfinal = copy(ψ)
+    i = 1; nU = length(Uarray)
+    while i<=nU
+        jvals = to_right ? (1:N-1) : (N-1:-1:1)
+        
+        for j in jvals
+            WLten, WRten = ψfinal[j:j+1]
+
+            if iseven(j+shift+to_right)
+                Uten = ITensor(Uarray[i], sites[j]', sites[j+1]', sites[j], sites[j+1])
+                linds = j > 1 ? (sites[j]', commonind(ψfinal[j-1], WLten)) : (sites[j]',)
+                tensors = [WLten, WRten, Uten]
+                i += 1
+            else
+                linds = j > 1 ? (sites[j], commonind(ψfinal[j-1], WLten)) : (sites[j],)
+                tensors = [WLten, WRten]
+            end
+
+            W1, W2 = SVDcontract(tensors, linds; move_ogc=(to_right ? :right : :left), trunc=(trunc..., maxrank=maxranks[j]))
+            W1 = noprime(W1, tags="Site")
+            W2 = noprime(W2, tags="Site")
+
+            ψfinal[j] = W1
+            ψfinal[j+1] = W2
+            i>nU && break # before to_right changes
+            if (j==N-1 && to_right) || (j==1 && !to_right)
+                # this has to be here, because we want to_right to remain as it is
+                # if the endpoint of the sweep is reached exactly at i==nU
+                to_right = !to_right      
+            end
+        end
+    end
+
+    return ψfinal
+end
+
+
+function ChainRulesCore.rrule(::typeof(apply), Uarray::Vector{<:AbstractMatrix}, ψ::Vector{ITensor}; check_og=false, shift=0, trunc=NamedTuple())
+    N = length(ψ)
+    @assert shift==0 || shift==1
+    check_og && check_orthogonal(ψ, 1) # check that ψ is orthogonal at first site before applying unitaries
+
+
+    to_right = true  # left-to-right mode
+
+    # Preparing the maxranks for svd trunc
+    trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
+    
+    sites = siteinds(MPS(ψ))
+    ψfinal = copy(ψ)
+    i = 1; nU = length(Uarray)
+    backs = Function[]  # store intermediate pullbacks
+    local lastj, prev_left_linkind      # store last j reached and left linkind of previous step
+    while i<=nU
+        jvals = to_right ? (1:N-1) : (N-1:-1:1)
+
+        for j in jvals
+            lastj = j
+            WLten, WRten = ψfinal[j:j+1]
+
+            if iseven(j+shift+to_right)
+                Uten = ITensor(Uarray[i], sites[j]', sites[j+1]', sites[j], sites[j+1])
+                linds = j > 1 ? (sites[j]', commonind(ψfinal[j-1], WLten)) : (sites[j]',)
+                tensors = [WLten, WRten, Uten]
+                i += 1
+            else
+                linds = j > 1 ? (sites[j], commonind(ψfinal[j-1], WLten)) : (sites[j],)
+                tensors = [WLten, WRten]
+            end
+
+            SVDcontract_j = (tens, leftinds) -> SVDcontract(tens, leftinds; move_ogc=(to_right ? :right : :left), trunc=(trunc..., maxrank=maxranks[j]))
+            (W1, W2), back_j = Zygote.pullback(SVDcontract_j, tensors, linds)
+            push!(backs, back_j)
+            W1 = noprime(W1, tags="Site")
+            W2 = noprime(W2, tags="Site")
+
+            ψfinal[j] = W1
+            ψfinal[j+1] = W2
+            i>nU && break # before to_right changes
+            if (j==N-1 && to_right) || (j==1 && !to_right)
+                # this has to be here, because we want to_right to remain as it is
+                # if the endpoint of the sweep is reached exactly at i==nU
+                to_right = !to_right      
+            end
+        end
+    end
+
+
+    function apply_pullback(Δψfinal)
+
+        Δψ = copy(Δψfinal)
+        ΔUarray = [zeros(ComplexF64, size(U)) for U in Uarray]
+        i = nU; pb_n = length(backs)
+        while i>=1
+            jvals = to_right ? (lastj:-1:1) : (lastj:N-1) 
+            for j in jvals
+                ΔW1 = Δψ[j]
+                ΔW2 = Δψ[j+1]
+
+                if iseven(j+shift+to_right)
+                    ΔW1 = prime(ΔW1, tags="Site")
+                    ΔW2 = prime(ΔW2, tags="Site")
+                    (ΔWLten, ΔWRten, ΔUten), _ = backs[pb_n]((ΔW1, ΔW2))  # start from the last
+                    ΔU = Array{ComplexF64}(ΔUten, sites[j]', sites[j+1]', sites[j], sites[j+1])
+                    ΔUarray[i] = reshape(ΔU, (4,4))
+                    i -= 1
+                else
+                    (ΔWLten, ΔWRten), _ = backs[pb_n]((ΔW1, ΔW2))
+                end
+                pb_n -= 1
+                Δψ[j] = ΔWLten
+                Δψ[j+1] = ΔWRten
+            end
+            lastj = to_right ? 1 : N-1
+            to_right = !to_right
+        end
+        
+        return (NoTangent(), ΔUarray, Δψ)
+    end
+    return ψfinal, apply_pullback
+end
+
 
 
 function truncDM(ψ::MPS; trunc=NamedTuple())

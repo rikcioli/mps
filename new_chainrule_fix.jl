@@ -110,9 +110,9 @@ function test_move_center()
     for ogc in 1:N
         V_arr = genPoint(N, χ, ogc)
         psi = vecToITensor(V_arr, ogc)
-        psi = move_center(psi, ogc, N; check_b0=true)
+        psi = move_center(psi, ogc, N; check_og=true)
         for ogc_final in 1:N
-            psi_final = move_center(psi, N, ogc_final; check_b0=true)
+            psi_final = move_center(psi, N, ogc_final; check_og=true)
             !is_orthogonal(psi_final, ogc_final) && return false
         end
     end
@@ -149,15 +149,92 @@ function test_move2()
     return true
 end
 
+function applyBW(U_array::Vector{<:AbstractMatrix}, psi::MPS)
+    N = length(psi)
+    sites = siteinds(psi)
+    n_unitaries = length(U_array)
+
+    # we prepare the values of j to use in the next section here
+    pattern = vcat([1:2:N-1; N-2:-2:2])
+    # repeat pattern as needed to match n_unitaries, then truncate to exact length
+    # if n_unitaries < length(pattern), only the first k elements are used
+    jvals = repeat(pattern, ceil(Int, n_unitaries/length(pattern)))[1:n_unitaries]
+
+    gates = [ITensor(U_array[unit_no], sites[j]', sites[j+1]', sites[j], sites[j+1]) for (unit_no, j) in enumerate(jvals)]
+    
+    n_twolayers = div(n_unitaries, N-1)
+    if mod(n_unitaries, N-1) > 0
+        n_twolayers += 1
+    end
+
+    for j in 1:n_twolayers
+        psi = ITensorMPS.apply(gates[1+(j-1)*(N-1) : min(j*(N-1), n_unitaries)], psi)
+    end
+
+    return psi
+end
+
+function applyED(Uvec, ψ, N, depth)
+    j=1
+    for i in 1:depth
+        if isodd(i)
+            lastj = div(N,2)
+            ψ = reduce(kron, reverse(Uvec[j:j+lastj-1]))*ψ
+        else
+            lastj = div(N,2)-1
+            ψ = reduce(kron, [[Id]; Uvec[j:j+lastj-1]; [Id]])*ψ
+        end
+        j += lastj
+    end
+    return ψ
+end
+
+function test_applyED()
+    N=6
+    Uarr = [random_unitary(4) for _ in 1:8]
+
+    sites =siteinds("Qubit", N)
+    zeromps = random_mps(ComplexF64, sites, linkdims=2)
+    psi = applyBW(Uarr, zeromps)
+    psivec = reshape(Array{ComplexF64}(prod(psi), sites), 2^N)
+
+    zerostate = reshape(Array{ComplexF64}(prod(zeromps), sites), 2^N)
+    ψED = applyED(Uarr, zerostate, N, 3)
+
+    return isapprox(real(psivec'*ψED), 1)
+end
+
+function test_apply()
+    N = 6
+    sites = siteinds("Qubit", N)
+    zeromps = random_mps(ComplexF64, sites, linkdims=2)
+    ψ = zeromps[1:N]
+    Uarr = [random_unitary(4) for _ in 1:8]
+    ψfinal = apply(Uarr, ψ)
+    @show inner(ψfinal,ψfinal)
+    ψfinal_vec = reshape(Array{ComplexF64}(prod(ψfinal), sites), 2^N)
+
+    zerostate = reshape(Array{ComplexF64}(prod(zeromps), sites), 2^N)
+    ψED = applyED(Uarr, zerostate, N, 3)
+
+    return isapprox(real(ψfinal_vec'*ψED), 1)
+end
+
+
 @test test_genPoint()
 @test test_vecToITensor()
 @test test_move_center()
 @test test_move2()
 
+@test test_applyED()
+@test test_apply()
+
+
+
 
 # CHECK GRADIENT
 
-N = 4; χ = 4; ogc = 1
+N = 4; χ = 4; ogc = 2
 V_array = genPoint(N, χ, ogc)
 
 
@@ -172,8 +249,8 @@ end
 function cost(arrV::Vector{<:AbstractArray}, ogc::Int)
     N = length(arrV)
     psi = vecToITensor(arrV, ogc)
-    psi = move_center(psi, ogc, N; check_b0=false, trunc=(maxrank=2,))
-    return norm(psi, N)
+    psi = move_center(psi, ogc, N-1; check_og=false, trunc=(maxrank=2,))
+    return inner(psi, psi)
 end
 
 
@@ -197,37 +274,25 @@ results = let cost = cost, Nrange=Nrange
     χ = 8; ogc = 1 
     ftimes = Float64[]
     gtimes = Float64[]
-    ftimes2 = Float64[]
-    gtimes2 = Float64[]
     for N in Nrange
         ftime_N = Float64[]
         gtime_N = Float64[]
-        ftime_N2 = Float64[]
-        gtime_N2 = Float64[]
         for _ in 1:100
             V_array = genPoint(N, χ, ogc)
             ftime = @elapsed cost(V_array, ogc)
             gtime = @elapsed gradient(cost, V_array, ogc)
-            ftime2 = @elapsed cost2(V_array, ogc)
-            gtime2 = @elapsed gradient(cost2, V_array, ogc)
             push!(ftime_N, ftime)
             push!(gtime_N, gtime)
-            push!(ftime_N2, ftime2)
-            push!(gtime_N2, gtime2)
         end
         push!(ftimes, sum(ftime_N)/100)
         push!(gtimes, sum(gtime_N)/100)
-        push!(ftimes2, sum(ftime_N2)/100)
-        push!(gtimes2, sum(gtime_N2)/100)
     end
-    ftimes, gtimes, ftimes2, gtimes2  
+    ftimes, gtimes
 end
 
 Plots.plot(xlabel="N", ylabel="t (s)")
 Plots.plot(Nrange, results[1], label="tf")
 Plots.plot!(Nrange, results[2], label="tg")
-Plots.plot!(Nrange, results[3], label="tf2")
-Plots.plot!(Nrange, results[4], label="tg2")
 
 
 # CHECK SCALING WITH Chi
@@ -259,3 +324,42 @@ Plots.plot!(chirange, results[2], label="tg")
 Plots.plot!(chirange, 3e-5*chirange, yscale=:log10, xscale=:log10, label="O(chi)")
 Plots.plot!(chirange, 1e-5*chirange .^2, yscale=:log10, xscale=:log10, label="O(chi^2)")
 Plots.plot!(chirange, 1e-7*chirange .^3, yscale=:log10, xscale=:log10, label="O(chi^3)", legend=:bottomright)
+
+
+function cost(arrU::Vector{<:AbstractMatrix}, arrV::Vector{<:AbstractArray})
+    psi0 = vecToITensor(arrV, 1)
+    psi = apply(arrU, psi0)
+    return real(inner(psi, psi0))
+end
+N = 10; χ = 2
+V_array = genPoint(N, χ, 1)
+U_array = [random_unitary(4) for _ in 1:10]
+costfn = arrU -> cost(arrU, V_array)
+costfn(U_array)
+gradient(costfn, U_array)
+G_array = gradient(costfn, U_array)[1]
+
+fRgrad = (func, arrU) -> begin
+    N = length(arrU)
+    fU, gU = withgradient(func, arrU)
+    gU = gU[1]
+    riemG = project(arrU, gU) 
+    return fU, riemG
+end
+fRgrad(costfn, U_array)
+
+
+function genUnitary(nU)
+    U0 = [random_unitary(4) for _ in 1:nU]
+    return U0
+end
+
+function genTanVec(Uvec)
+    V = [randn(ComplexF64, 4, 4) for _ in eachindex(Uvec)]
+    V = skew.(V)
+    V = Uvec .* V
+    V /= sqrt(inner(V, V))
+end
+
+testGrad(() -> genUnitary(3), genTanVec, arrU -> fRgrad(costfn, arrU), inner, retract)
+
