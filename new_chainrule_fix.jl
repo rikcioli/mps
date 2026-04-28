@@ -221,6 +221,7 @@ function test_apply()
 end
 
 
+
 @test test_genPoint()
 @test test_vecToITensor()
 @test test_move_center()
@@ -324,6 +325,36 @@ Plots.plot!(chirange, results[2], label="tg")
 Plots.plot!(chirange, 3e-5*chirange, yscale=:log10, xscale=:log10, label="O(chi)")
 Plots.plot!(chirange, 1e-5*chirange .^2, yscale=:log10, xscale=:log10, label="O(chi^2)")
 Plots.plot!(chirange, 1e-7*chirange .^3, yscale=:log10, xscale=:log10, label="O(chi^3)", legend=:bottomright)
+
+
+# GRADIENT OF PAULI MPS
+function cost_pauli(arrV::Vector{<:AbstractArray})
+    ogc = 3
+    psi = vecToITensor(arrV, ogc)
+    Ppsi = pauliMPS(psi, ogc)
+    return real(inner(Ppsi, Ppsi))
+end
+N = 4; χ = 2; ogc = 3
+V_array = genPoint(N, χ, ogc)
+cost_pauli(V_array)
+gradient(cost_pauli, V_array)[1]
+
+withgrad_Riemannian = (func, arrV, ogc, args...) -> begin
+    val, grad = withgradient(func, arrV, args...)
+    Rgrad = projectMixed(arrV, grad[1], ogc)
+    return val, Rgrad
+end
+
+fg_pauli = arrV -> withgrad_Riemannian(cost_pauli, arrV, ogc)
+fg_pauli(V_array)
+
+function retractMixed_ogc(arrA, arrD, t)
+    return retractMixed(arrA, arrD, t, ogc)
+end
+
+testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_pauli, innerMixed, retractMixed_ogc)
+
+
 
 
 function cost(arrU::Vector{<:AbstractMatrix}, arrV::Vector{<:AbstractArray})
