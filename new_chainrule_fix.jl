@@ -327,17 +327,9 @@ Plots.plot!(chirange, 1e-5*chirange .^2, yscale=:log10, xscale=:log10, label="O(
 Plots.plot!(chirange, 1e-7*chirange .^3, yscale=:log10, xscale=:log10, label="O(chi^3)", legend=:bottomright)
 
 
-# GRADIENT OF PAULI MPS
-function cost_pauli(arrV::Vector{<:AbstractArray})
-    ogc = 3
-    psi = vecToITensor(arrV, ogc)
-    Ppsi = pauliMPS(psi, ogc)
-    return real(inner(Ppsi, Ppsi))
-end
+# GRADIENT OF ISOMETRIES
 N = 4; χ = 2; ogc = 3
 V_array = genPoint(N, χ, ogc)
-cost_pauli(V_array)
-gradient(cost_pauli, V_array)[1]
 
 withgrad_Riemannian = (func, arrV, ogc, args...) -> begin
     val, grad = withgradient(func, arrV, args...)
@@ -345,14 +337,56 @@ withgrad_Riemannian = (func, arrV, ogc, args...) -> begin
     return val, Rgrad
 end
 
-fg_pauli = arrV -> withgrad_Riemannian(cost_pauli, arrV, ogc)
-fg_pauli(V_array)
-
 function retractMixed_ogc(arrA, arrD, t)
     return retractMixed(arrA, arrD, t, ogc)
 end
 
+
+# GRADIENT OF INNER
+W_array = genPoint(N, χ, ogc)
+psiW = vecToITensor(W_array, ogc)
+function cost_inner(arrV::Vector{<:AbstractArray})
+    ogc = 3
+    psiV = vecToITensor(arrV, ogc; sites = siteinds(psiW))
+    return real(inner(psiV, psiW))
+end
+
+cost_inner(V_array)
+gradient(cost_inner, V_array)[1]
+fg_inner = arrV -> withgrad_Riemannian(cost_inner, arrV, ogc)
+fg_inner(V_array)
+testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_inner, innerMixed, retractMixed_ogc)
+
+
+# GRADIENT OF PAULIMPS
+function cost_pauli(arrV::Vector{<:AbstractArray})
+    ogc = 3
+    psi = vecToITensor(arrV, ogc)
+    Ppsi = pauliMPS(psi, ogc)
+    return real(inner(Ppsi, Ppsi))
+end
+
+cost_pauli(V_array)
+gradient(cost_pauli, V_array)[1]
+fg_pauli = arrV -> withgrad_Riemannian(cost_pauli, arrV, ogc)
+fg_pauli(V_array)
 testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_pauli, innerMixed, retractMixed_ogc)
+
+
+# GRADIENT OF APPLY
+function cost_apply(arrV::Vector{<:AbstractArray})
+    ogc = 3
+    psi = vecToITensor(arrV, ogc)
+    psimpo = getMPO(psi)
+    res = apply(psimpo, psi)
+    return real(inner(res, res))
+end
+
+cost_apply(V_array)
+gradient(cost_apply, V_array)[1]
+fg_apply = arrV -> withgrad_Riemannian(cost_apply, arrV, ogc)
+fg_apply(V_array)
+testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_apply, innerMixed, retractMixed_ogc)
 
 
 

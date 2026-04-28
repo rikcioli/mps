@@ -18,9 +18,21 @@ Psm[4,:,:] = Y
 const Ps = deepcopy(Psm)
 
 bra(T) = addtags(T,"bra")
-bralinks(T) = addtags(T, "bra", tags="Link") 
 ITensorMPS.siteinds(ψ::Vector{ITensor}) = siteinds(MPS(ψ))
 ITensorMPS.linkinds(ψ::Vector{ITensor}) = linkinds(MPS(ψ))
+ITensorMPS.linkdims(ψ::Vector{ITensor}) = linkdims(MPS(ψ))
+
+function bralinks(ψ::Vector{ITensor})
+    ψ = copy(ψ)
+    links = linkinds(ψ)
+    blinks = bra.(links)
+    ψ[1] = replaceind(ψ[1], links[1], blinks[1])
+    for j in 2:N-1
+        ψ[j] = replaceinds(ψ[j], links[j-1:j], blinks[j-1:j])
+    end
+    ψ[N] = replaceind(ψ[N], links[N-1], blinks[N-1])
+    return ψ
+end
 
 function is_orthogonal(psi::Vector{ITensor}, ogc::Int)
     N = length(psi)
@@ -62,7 +74,7 @@ function inner(ψ::Vector{ITensor}, ϕ::Vector{ITensor})
     N = length(ψ)
     @assert length(ϕ)==N
     @assert siteinds(ψ)==siteinds(ϕ)
-    ψ_bra = @. dag(bralinks(ψ))
+    ψ_bra = dag.(bralinks(ψ))
     c1 = ψ_bra[1] * ϕ[1]
     for j in 2:N
         c1 *= ψ_bra[j]
@@ -76,7 +88,7 @@ function ChainRulesCore.rrule(::typeof(inner), ψ::Vector{ITensor}, ϕ::Vector{I
     N = length(ψ)
     @assert length(ϕ)==N
     @assert siteinds(ψ)==siteinds(ϕ)
-    ψ_bra = @. dag(bralinks(ψ))
+    ψ_bra = dag.(bralinks(ψ))
     envL = [ψ_bra[1] * ϕ[1]]
     envR = [ψ_bra[N] * ϕ[N]]
     for j in 2:N-1
@@ -776,15 +788,36 @@ function ChainRulesCore.rrule(::typeof(pauliMPS), ψ::Vector{ITensor}, ogc; trun
     return Pψ, pauliMPS_pullback
 end
 
+function getMPO(ψ::Vector{ITensor})
+    N = length(ψ)
+    sites = siteinds(ψ)
+    ψmpo = [delta(sites[j], sites[j]', sites[j]'')*ψ[j] for j in 1:N]
+    ψmpo = replaceprime.(ψmpo, 1 => 0, 2 => 1)
+    return ψmpo
+end
+
+function ChainRulesCore.rrule(::typeof(getMPO), ψ::Vector{ITensor})
+    N = length(ψ)
+    sites = siteinds(ψ)
+    ψmpo = [delta(sites[j], sites[j]', sites[j]'')*ψ[j] for j in 1:N]
+    ψmpo = replaceprime.(ψmpo, 1 => 0, 2 => 1)
+
+    function getMPO_pullback(Δψmpo)
+        Δψ = [dag(delta(sites[j], sites[j]', sites[j]''))*Δψmpo[j] for j in 1:N]
+        Δψ = replaceprime.(Δψ, 2 => 0)
+        return (NoTangent(), Δψ)
+    end
+    return ψmpo, getMPO_pullback
+end
 
 
 "Given two Vector{ITensor}, MPS or MPO A and B, multiply A*B tensor by tensor, combining the linkinds with the combiners in combs"
 function _apply(A::Union{MPS,MPO,Vector{ITensor}}, B::Union{MPS,MPO,Vector{ITensor}}, combs::Vector{ITensor})
     @assert length(A) == length(B) == length(combs)+1
     N = length(A)
-    AB1 = (A[1]*B[1])*combs[1]
+    AB1 = [(A[1]*B[1])*combs[1]]
     ABbulk = [combs[j-1]*(A[j]*B[j])*combs[j] for j in 2:N-1]
-    ABN = (A[N]*B[N])*combs[N-1]
+    ABN = [(A[N]*B[N])*combs[N-1]]
     AB = [AB1; ABbulk; ABN]
     return AB
 end
@@ -802,42 +835,71 @@ function new_linkinds(ψ::T) where {T<:Union{MPS,MPO}}
 end
 
 
-"Make sure that the linkinds are different before using it"
-function applyAD(W::MPO, ψ::MPS)
+function apply(W::Vector{ITensor}, ψ::Vector{ITensor})
     N = length(ψ)
-    linksψ = linkinds(ψ)
-    linksW = linkinds(W)
-    combs = [combiner(linksW[j], linksψ[j]) for j in 1:N-1]
+    W = bralinks(W)
 
-    return MPS(_apply(W, ψ, combs))
+    Wlinks = linkinds(W)
+    ψlinks = linkinds(ψ)
+    sites = siteinds(ψ)
+    
+    Wψ = W .* ψ
+    
+    combs = combiner.(Wlinks, ψlinks)
+    combinds = combinedind.(combs)
+    Wψlinks = [Index(space(ψlinks[j])*space(Wlinks[j]), "Link,l=$j") for j in 1:N-1]
+    replaceind!.(combs, combinds, Wψlinks)
+
+    Wψ[1] *= combs[1]
+    for j in 2:N-1
+        Wψ[j] *= combs[j-1]
+        Wψ[j] *= combs[j]
+    end
+    Wψ[N] *= combs[N-1]
+
+    Wψ = [replaceprime(Wψ[j], 1 => 0, inds=sites[j]') for j in 1:N]
+    return Wψ
 end
 
-function ChainRulesCore.rrule(::typeof(applyAD), W::MPO, ψ::MPS)
+function ChainRulesCore.rrule(::typeof(apply), W::Vector{ITensor}, ψ::Vector{ITensor})
     N = length(ψ)
+    W = bralinks(W)
+
+    Wlinks = linkinds(W)
+    ψlinks = linkinds(ψ)
     sites = siteinds(ψ)
-    linksψ = linkinds(ψ)
-    linksW = linkinds(W)
-    combs = [combiner(linksW[j], linksψ[j]) for j in 1:N-1]
     
-    Wψvect = _apply(W, ψ, combs)
-    Wψ = MPS(Wψvect)
-    Wψ = replaceprime(Wψ, 1 => 0; inds = sites')
+    Wψ = W .* ψ
     
-    function applyAD_pullback(ΔWψ)
-        ΔWψ = new_linkinds(ΔWψ)
-        linksWψ = linkinds(ΔWψ)
-        ΔWψ = replaceprime(ΔWψ, 0 => 1; inds = sites)
+    combs = combiner.(Wlinks, ψlinks)
+    combinds = combinedind.(combs)
+    Wψlinks = [Index(space(ψlinks[j])*space(Wlinks[j]), "Link,l=$j") for j in 1:N-1]
+    replaceind!.(combs, combinds, Wψlinks)
 
-        combsΔW = [combiner(linksWψ[j], dag(linksψ[j])) for j in 1:N-1]
-        ΔWvect = _apply(ΔWψ, dag(ψ), combsΔW)
-        ΔW = MPO(ΔWvect)
+    Wψ[1] *= combs[1]
+    for j in 2:N-1
+        Wψ[j] *= combs[j-1]
+        Wψ[j] *= combs[j]
+    end
+    Wψ[N] *= combs[N-1]
+    Wψ = [replaceprime(Wψ[j], 1 => 0, inds=sites[j]') for j in 1:N]
+    
+    function apply_pullback(ΔWψ)
 
-        combsΔψ = [combiner(dag(linksW[j]), linksWψ[j]) for j in 1:N-1]
-        Δψvect = _apply(dag(W), ΔWψ, combsΔψ)
-        Δψ = MPS(Δψvect)
-        # again consider compressing both ΔW and Δψ
+        ΔWψ = [replaceprime(ΔWψ[j], 0 => 1; inds = sites[j]) for j in 1:N]
+        ΔWψ[1] *= dag(combs[1])
+        for j in 2:N-1
+            ΔWψ[j] *= dag(combs[j-1])
+            ΔWψ[j] *= dag(combs[j])
+        end
+        ΔWψ[N] *= dag(combs[N-1])
+
+        Δψ = dag.(W) .* ΔWψ
+        ΔW = ΔWψ .* dag.(ψ)
+        ΔW = map(T -> removetags(T, "bra"), ΔW)
+        
         return (NoTangent(), ΔW, Δψ)
     end
 
-    return Wψ, applyAD_pullback
+    return Wψ, apply_pullback
 end
