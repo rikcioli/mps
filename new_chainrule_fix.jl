@@ -191,35 +191,74 @@ end
 
 function test_applyED()
     N=6
-    Uarr = [random_unitary(4) for _ in 1:8]
+    sites = siteinds("Qubit", N)
 
-    sites =siteinds("Qubit", N)
-    zeromps = random_mps(ComplexF64, sites, linkdims=2)
-    psi = applyBW(Uarr, zeromps)
-    psivec = reshape(Array{ComplexF64}(prod(psi), sites), 2^N)
+    for trial in 1:100
+        Uarr = [random_unitary(4) for _ in 1:8]
+        mps = random_mps(ComplexF64, sites, linkdims=4)
 
-    zerostate = reshape(Array{ComplexF64}(prod(zeromps), sites), 2^N)
-    ψED = applyED(Uarr, zerostate, N, 3)
+        psi = applyBW(Uarr, mps)
+        psivec = reshape(Array{ComplexF64}(prod(psi), sites), 2^N)
 
-    return isapprox(real(psivec'*ψED), 1)
+        mps_state = reshape(Array{ComplexF64}(prod(mps), sites), 2^N)
+        ψED = applyED(Uarr, mps_state, N, 3)
+        !isapprox(real(psivec'*ψED), 1) && return false
+    end
+
+    return true
 end
 
-function test_apply()
+function test_applyU()
     N = 6
     sites = siteinds("Qubit", N)
-    zeromps = random_mps(ComplexF64, sites, linkdims=2)
-    ψ = zeromps[1:N]
-    Uarr = [random_unitary(4) for _ in 1:8]
-    ψfinal = apply(Uarr, ψ)
-    @show inner(ψfinal,ψfinal)
-    ψfinal_vec = reshape(Array{ComplexF64}(prod(ψfinal), sites), 2^N)
 
-    zerostate = reshape(Array{ComplexF64}(prod(zeromps), sites), 2^N)
-    ψED = applyED(Uarr, zerostate, N, 3)
+    for trial in 1:1000
+        ψ = random_mps(ComplexF64, sites, linkdims=4)[:]
+        Uarr = [random_unitary(4) for _ in 1:8]
 
-    return isapprox(real(ψfinal_vec'*ψED), 1)
+        ψfinal = apply(Uarr, ψ)
+        ψfinal_vec = reshape(Array{ComplexF64}(prod(ψfinal), sites), 2^N)
+
+        ψ_vec = reshape(Array{ComplexF64}(prod(ψ), sites), 2^N)
+        ψED = applyED(Uarr, ψ_vec, N, 3)
+
+        !isapprox(real(ψfinal_vec'*ψED), 1) && return false
+    end
+    return true
 end
 
+
+function sre2(arrU::Vector{<:AbstractMatrix}, ψ::Vector{ITensor})
+    N = length(ψ)
+    Uψ = apply(arrU, ψ)     # assume odd number of layers
+    PMPS = pauliMPS(Uψ, N)
+    PMPO = getMPO(PMPS)
+    P2 = apply(PMPO, PMPS)
+    return -log2(real(inner(P2,P2))) - length(Uψ)
+end
+
+function test_sre2()
+    N = 4; χ = 2
+    sites = siteinds("Qubit", N)
+
+    for trial in 1:100
+        mps = random_mps(ComplexF64, sites; linkdims = χ)
+        orthogonalize!(mps, 1)
+        psi = mps[:]
+        U_array = [random_unitary(4) for _ in 1:5]
+
+        sre2_mps = sre2(U_array, psi)
+
+        psi_state = reshape(Array{ComplexF64}(prod(psi), sites), 2^N)
+        Upsi = applyED(U_array, psi_state, N, 3)
+
+        sre2_ED = fastEDMagic(Upsi)
+
+        !(abs(sre2_mps - sre2_ED) < 1e-12) && return false
+    end
+
+    return true
+end
 
 
 @test test_genPoint()
@@ -228,7 +267,9 @@ end
 @test test_move2()
 
 @test test_applyED()
-@test test_apply()
+@test test_applyU()
+
+@test test_sre2()
 
 
 
@@ -348,7 +389,7 @@ psiW = vecToITensor(W_array, ogc)
 function cost_inner(arrV::Vector{<:AbstractArray})
     ogc = 3
     psiV = vecToITensor(arrV, ogc; sites = siteinds(psiW))
-    return real(inner(psiV, psiW))
+    return real(inner(psiW, psiV))
 end
 
 cost_inner(V_array)
@@ -358,12 +399,33 @@ fg_inner(V_array)
 testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_inner, innerMixed, retractMixed_ogc)
 
 
-# GRADIENT OF PAULIMPS
+# GRADIENT OF SVDcontract
+function cost_SVDcontract(arrV::Vector{<:AbstractArray})
+    psi = vecToITensor(arrV, ogc)
+    sites = siteinds(psi)
+    linds = (sites[1],)
+    U, R = SVDcontract(psi, linds)
+    newpsi = [U, R]
+    return real(inner(newpsi, newpsi))
+end
+cost_SVDcontract(V_array)
+gradient(cost_SVDcontract, V_array)[1]
+fg_SVDcontract = arrV -> withgrad_Riemannian(cost_SVDcontract, arrV, ogc)
+fg_SVDcontract(V_array)
+testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_SVDcontract, innerMixed, retractMixed_ogc)
+
+
+# GRADIENT OF PAULIMPS WORKS
+W_array = genPoint(N, χ, ogc)
+psiW = vecToITensor(W_array, ogc)
 function cost_pauli(arrV::Vector{<:AbstractArray})
+    N = length(arrV)
     ogc = 3
     psi = vecToITensor(arrV, ogc)
-    Ppsi = pauliMPS(psi, ogc)
-    return real(inner(Ppsi, Ppsi))
+    sites = siteinds(4, N)
+    Ppsi = pauliMPS(psi, ogc; sites=sites)
+    Ppsi2 = pauliMPS(psiW, ogc; sites=sites)
+    return real(inner(Ppsi, Ppsi2))
 end
 
 cost_pauli(V_array)
@@ -390,29 +452,7 @@ testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_apply, inn
 
 
 
-
-function cost(arrU::Vector{<:AbstractMatrix}, arrV::Vector{<:AbstractArray})
-    psi0 = vecToITensor(arrV, 1)
-    psi = apply(arrU, psi0)
-    return real(inner(psi, psi0))
-end
-N = 10; χ = 2
-V_array = genPoint(N, χ, 1)
-U_array = [random_unitary(4) for _ in 1:10]
-costfn = arrU -> cost(arrU, V_array)
-costfn(U_array)
-gradient(costfn, U_array)
-G_array = gradient(costfn, U_array)[1]
-
-fRgrad = (func, arrU) -> begin
-    N = length(arrU)
-    fU, gU = withgradient(func, arrU)
-    gU = gU[1]
-    riemG = project(arrU, gU) 
-    return fU, riemG
-end
-fRgrad(costfn, U_array)
-
+###### COST FUNCTIONS WITH UNITARIES ######
 
 function genUnitary(nU)
     U0 = [random_unitary(4) for _ in 1:nU]
@@ -426,5 +466,91 @@ function genTanVec(Uvec)
     V /= sqrt(inner(V, V))
 end
 
-testGrad(() -> genUnitary(3), genTanVec, arrU -> fRgrad(costfn, arrU), inner, retract)
+withgrad_Riemannian = (func, arrU, args...) -> begin
+    fU, gU = withgradient(func, arrU, args...)
+    riemG = project(arrU, gU[1]) 
+    return fU, riemG
+end
 
+N = 4; χ = 2
+nU = 2;
+sites = siteinds("Qubit", N)
+psi = random_mps(ComplexF64, sites; linkdims = χ)
+orthogonalize!(psi, 1)
+psivec = psi[:]
+U_array = [random_unitary(4) for _ in 1:nU]
+
+
+# WORKS
+function cost_applyU(arrU::Vector{<:AbstractMatrix}, ψ::Vector{ITensor})
+    ψ2 = apply(arrU, ψ)
+    return real(inner(ψ, ψ2))
+end
+cost_applyU(U_array, psivec)
+cost_applyU_red = arrU -> cost_applyU(arrU, psivec)
+gradient(cost_applyU_red, U_array)
+fg_cost_applyU = arrU -> withgrad_Riemannian(cost_applyU_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_applyU, inner, retract)
+
+
+# WORKS
+function cost_move_center(arrU::Vector{<:AbstractMatrix}, ψ::Vector{ITensor})
+    N = length(ψ)
+    ψ2 = apply(arrU, ψ)
+    ψ3 = move_center(ψ2, N, 1)
+    return real(inner(ψ, ψ3))
+end
+cost_move_center(U_array, psivec)
+cost_move_center_red = arrU -> cost_move_center(arrU, psivec)
+gradient(cost_move_center_red, U_array)
+fg_cost_move_center = arrU -> withgrad_Riemannian(cost_move_center_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_move_center, inner, retract)
+
+
+
+# WORKS
+function cost_pauli(arrU::Vector{<:AbstractMatrix}, ψ::Vector{ITensor})
+    N = length(ψ)
+    Uψ = apply(arrU, ψ)
+    sites_pauli = siteinds(4, N)
+    Pψ = pauliMPS(ψ, 1; sites=sites_pauli)
+    PUψ = pauliMPS(Uψ, N; sites=sites_pauli, trunc=(atol=1e-12,))
+    return real(inner(Pψ, PUψ))
+end
+cost_pauli(U_array, psivec)
+cost_pauli_red = arrU -> cost_pauli(arrU, psivec)
+gradient(cost_pauli_red, U_array)
+fg_cost_pauli = arrU -> withgrad_Riemannian(cost_pauli_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_pauli, inner, retract)
+
+
+# WORKS
+function cost_mpo(arrU::Vector{<:AbstractMatrix}, ψ::Vector{ITensor})
+    ψ = apply(arrU, ψ)
+    ψ2 = move_center(ψ, 4, 1)
+    ψ2 = apply(arrU, ψ2)
+    W = getMPO(ψ)
+    W2 = getMPO(ψ2)
+    return real(inner(W, W2))
+end
+cost_mpo(U_array, psivec)
+cost_mpo_red = arrU -> cost_mpo(arrU, psivec)
+gradient(cost_mpo_red, U_array)
+fg_cost_mpo = arrU -> withgrad_Riemannian(cost_mpo_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_mpo, inner, retract)
+
+
+# 
+function cost_apply(arrU::Vector{<:AbstractMatrix}, ψ::Vector{ITensor})
+    N = length(ψ)
+    ψ2 = apply(arrU, ψ)
+    Pψ = pauliMPS(ψ2, N)
+    W = getMPO(Pψ)
+    P2 = apply(W, Pψ)
+    return real(inner(P2, P2))
+end
+cost_apply(U_array, psivec)
+cost_apply_red = arrU -> cost_apply(arrU, psivec)
+gradient(cost_apply_red, U_array)
+fg_cost_apply = arrU -> withgrad_Riemannian(cost_apply_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_apply, inner, retract)

@@ -1,7 +1,6 @@
 using ITensors, ITensorMPS
 using LinearAlgebra
 using ChainRulesCore
-import MatrixAlgebraKit as MAK
 using MatrixAlgebraKit
 using Zygote
 
@@ -23,6 +22,7 @@ ITensorMPS.linkinds(ψ::Vector{ITensor}) = linkinds(MPS(ψ))
 ITensorMPS.linkdims(ψ::Vector{ITensor}) = linkdims(MPS(ψ))
 
 function bralinks(ψ::Vector{ITensor})
+    N = length(ψ)
     ψ = copy(ψ)
     links = linkinds(ψ)
     blinks = bra.(links)
@@ -51,7 +51,9 @@ end
 function is_orthogonal(psi::Vector{<:AbstractArray}, ogc::Int)
     N = length(psi)
     assert_lengths = fill(2, N)
-    assert_lengths[ogc] = 3
+    if 1 < ogc < N
+        assert_lengths[ogc] = 3
+    end
     (length.(size.(psi)) != assert_lengths) && return false
     for j in 1:ogc-1
         U = psi[j]
@@ -118,7 +120,15 @@ function ChainRulesCore.rrule(::typeof(inner), ψ::Vector{ITensor}, ϕ::Vector{I
 
 end
 
-
+function ChainRulesCore.rrule(::Type{Array{T}}, x::ITensor) where {T}
+    y = Array{T}(x)
+    function Array_pullback(ȳ)
+        # Convert gradient back to ITensor with the proper indices
+        x̄ = ITensor(unthunk(ȳ))
+        return (NoTangent(), x̄)
+    end
+    return y, Array_pullback
+end
 
 function ChainRulesCore.rrule(::Type{Array{T}}, x::ITensor, linds, rinds) where {T}
     y = Array{T}(x, linds, rinds)
@@ -133,6 +143,7 @@ end
 "Given an array of ITensors, contracts all of them in the chosen order
 and computes a truncated SVD of the results with the left indices given by linds."
 function SVDcontract(tensors::Vector{ITensor}, linds; move_ogc=:right, kargs...)
+    tensors = copy(tensors)
     M_ten = tensors[1]
     for ten in tensors[2:end]
         M_ten *= ten
@@ -159,6 +170,7 @@ function SVDcontract(tensors::Vector{ITensor}, linds; move_ogc=:right, kargs...)
 end
 
 function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{ITensor}, linds; move_ogc=:right, kargs...)
+    tensors = copy(tensors)
     prods = cumprod(tensors)
     M_ten = prods[end]
     rinds = uniqueinds(M_ten, linds)
@@ -191,11 +203,11 @@ function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{ITensor}, l
         local ΔU, ΔS, ΔVdg
         if move_ogc==:right
             ΔU = ΔM1 
-            ΔS = ΔM2*Vdg'
+            ΔS = Diagonal(diag(ΔM2*Vdg'))
             ΔVdg = S'*ΔM2
         else
             ΔU = ΔM1*S'
-            ΔS = U'*ΔM1
+            ΔS = Diagonal(diag(U'*ΔM1))
             ΔVdg = ΔM2
         end
 
@@ -210,8 +222,8 @@ function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{ITensor}, l
         # each prod[j+1] = prod[j] * tensors[j+1] with prod[1] = tensors[1]
         # so Δprod[j] = Δprod[j+1] * tensors[j+1]'
         # and Δtensors[j+1] = prod[j]' * Δprod[j+1]
-        revΔprods = cumprod(vcat([ΔM_ten], conj(tensors[end:-1:2])))
-        Δtensorsp1 = [conj(prods[j])*revΔprods[end-j] for j in 1:n_tensors-1]
+        revΔprods = cumprod(vcat([ΔM_ten], dag.(tensors[end:-1:2])))
+        Δtensorsp1 = [dag(prods[j])*revΔprods[end-j] for j in 1:n_tensors-1]
         Δtensors = vcat([revΔprods[end]], Δtensorsp1)
         
         return (NoTangent(), Δtensors, NoTangent())
@@ -403,7 +415,8 @@ function move_center(ψ::Vector{<:ITensor}, b0::Int, b::Int; check_og=true, trun
             else
                 cog==1 ? (sites[j],) : (sites[j], links[cog-1]) 
             end
-            W1, W2 = SVDcontract([WLten, WRten], linds; move_ogc=:right, trunc=(trunc..., maxrank=maxranks[j]))
+            tensors = [WLten, WRten]
+            W1, W2 = SVDcontract(tensors, linds; move_ogc=:right, trunc=(trunc..., maxrank=maxranks[j]))
             push!(Ulinkinds, commonind(W1, W2))
 
             cache[j-cog+1] = W1
@@ -442,7 +455,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::
 
     cog = b0
     if b==cog
-        return ψ
+        return ψ, Δψfinal -> (NoTangent(), Δψfinal, NoTangent(), NoTangent())
     end
     to_right = b>cog  # left-to-right mode
 
@@ -467,7 +480,8 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::
                 cog==1 ? (sites[j],) : (sites[j], links[cog-1]) 
             end
             SVDcontract_j = (tensors, leftinds) -> SVDcontract(tensors, leftinds; move_ogc=:right, trunc=(trunc..., maxrank=maxranks[j]))
-            (W1, W2), back_j = Zygote.pullback(SVDcontract_j, [WLten, WRten], linds)
+            tensors = [WLten, WRten]
+            (W1, W2), back_j = Zygote.pullback(SVDcontract_j, tensors, linds)
             push!(backs, back_j)
             push!(Ulinkinds, commonind(W1, W2))
 
@@ -539,7 +553,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::
 end
 
 
-function apply(Uarray::Vector{<:AbstractMatrix}, ψ::Vector{ITensor}; check_og=false, shift=0, trunc=NamedTuple())
+function apply(Uarray::Vector{<:AbstractMatrix}, ψ::Vector{ITensor}; check_og=true, shift=0, trunc=NamedTuple())
     N = length(ψ)
     @assert shift==0 || shift==1
     check_og && check_orthogonal(ψ, 1) # check that ψ is orthogonal at first site before applying unitaries
@@ -552,10 +566,12 @@ function apply(Uarray::Vector{<:AbstractMatrix}, ψ::Vector{ITensor}; check_og=f
     sites = siteinds(MPS(ψ))
     ψfinal = copy(ψ)
     i = 1; nU = length(Uarray)
+    local lastj
     while i<=nU
         jvals = to_right ? (1:N-1) : (N-1:-1:1)
         
         for j in jvals
+            lastj = j
             WLten, WRten = ψfinal[j:j+1]
 
             if iseven(j+shift+to_right)
@@ -587,7 +603,7 @@ function apply(Uarray::Vector{<:AbstractMatrix}, ψ::Vector{ITensor}; check_og=f
 end
 
 
-function ChainRulesCore.rrule(::typeof(apply), Uarray::Vector{<:AbstractMatrix}, ψ::Vector{ITensor}; check_og=false, shift=0, trunc=NamedTuple())
+function ChainRulesCore.rrule(::typeof(apply), Uarray::Vector{<:AbstractMatrix}, ψ::Vector{ITensor}; check_og=true, shift=0, trunc=NamedTuple())
     N = length(ψ)
     @assert shift==0 || shift==1
     check_og && check_orthogonal(ψ, 1) # check that ψ is orthogonal at first site before applying unitaries
@@ -602,7 +618,7 @@ function ChainRulesCore.rrule(::typeof(apply), Uarray::Vector{<:AbstractMatrix},
     ψfinal = copy(ψ)
     i = 1; nU = length(Uarray)
     backs = Function[]  # store intermediate pullbacks
-    local lastj, prev_left_linkind      # store last j reached and left linkind of previous step
+    local lastj      # store last j reached
     while i<=nU
         jvals = to_right ? (1:N-1) : (N-1:-1:1)
 
@@ -636,6 +652,7 @@ function ChainRulesCore.rrule(::typeof(apply), Uarray::Vector{<:AbstractMatrix},
             end
         end
     end
+
 
     function apply_pullback(Δψfinal)
 
@@ -687,34 +704,36 @@ function get_Ps()
 end
 
 
-function pauliMPS(ψ::Vector{ITensor}, ogc::Int; trunc=NamedTuple(), check_og=true, post_factorize_callback = identity)
+function pauliMPS(ψ::Vector{ITensor}, ogc::Int; trunc=NamedTuple(), sites=nothing, check_og=true, post_factorize_callback = identity)
     N = length(ψ)
     ψ = move_center(ψ, ogc, 1; check_og)
+    ψbra = dag.(bra.(ψ))
 
-    ψbra = @. dag(bra(ψ))
-
-    trunc, maxranks = adapt_truncarg(trunc, linkdims(MPS(ψ)).^2)
+    if !haskey(trunc, :atol)    # adds an eps() tolerance if not present
+        trunc = (trunc..., atol=eps())
+    end
 
     # Build compressed Pauli MPS iteratively from left
     # bra is conjugated tensor in pauli mps, prime is conjugated Pauli mps
     d = 2
-    sites = siteinds(MPS(ψ))
-    sites_pauli_mps = siteinds(d^2,N) 
+    sites_pauli_mps = isnothing(sites) ? siteinds(d^2, N) : sites 
+    sites = siteinds(ψ)
     
     Ps = get_Ps()
     Pten1 = ITensor(Ps/sqrt(2), sites_pauli_mps[1], bra(sites[1]), sites[1])
 
     errs = Float64[]    # store truncation errors
     Pψ = Array{ITensor, 1}(undef, N)    # store tensors that make the final Pauli mps
-    Pψ[1] = ψ[1]*Pten1*ψbra[1]
+    Pψ[1] = ψbra[1]*Pten1*ψ[1]
 
     for j in 1:N-1    
         Bp = Pψ[j]
         Pten = ITensor(Ps/sqrt(2), sites_pauli_mps[j+1], bra(sites[j+1]), sites[j+1])
 
         linds = j>1 ? (sites_pauli_mps[j], commonind(Pψ[j-1], Bp)) : (sites_pauli_mps[j],) 
+        tensors = [Bp, ψ[j+1], ψbra[j+1], Pten]
 
-        Up, Rp = SVDcontract([Bp, ψ[j+1], ψbra[j+1], Pten], linds; move_ogc=:right, trunc=(trunc..., maxrank=maxranks[j]))
+        Up, Rp = SVDcontract(tensors, linds; move_ogc=:right, trunc)
         Pψ[j] = Up
         Pψ[j+1] = Rp
     end
@@ -726,20 +745,20 @@ end
 
 
 
-function ChainRulesCore.rrule(::typeof(pauliMPS), ψ::Vector{ITensor}, ogc; trunc=NamedTuple(), check_og=true, post_factorize_callback = identity)
+function ChainRulesCore.rrule(::typeof(pauliMPS), ψ::Vector{ITensor}, ogc::Int; trunc=NamedTuple(), sites=nothing, check_og=true, post_factorize_callback = identity)
     N = length(ψ)
-    og1 = (psi, b0) -> move_center(psi, b0, 1; check_og)
-    ψ, og_back = Zygote.pullback(og1, ψ, ogc)
+    ψ, og_back = Zygote.pullback(move_center, ψ, ogc, 1)
+    ψbra = dag.(bra.(ψ))
 
-    ψbra = @. dag(bra(ψ))
-
-    trunc, maxranks = adapt_truncarg(trunc, linkdims(MPS(ψ)).^2)
+    if !haskey(trunc, :atol)    # adds an eps() tolerance if not present
+        trunc = (trunc..., atol=eps())
+    end
 
     # Build compressed Pauli MPS iteratively from left
     # bra is conjugated tensor in pauli mps, prime is conjugated Pauli mps
     d = 2
-    sites = siteinds(MPS(ψ))
-    sites_pauli_mps = siteinds(d^2,N) 
+    sites_pauli_mps = isnothing(sites) ? siteinds(d^2, N) : sites 
+    sites = siteinds(ψ)
     
     errs = Float64[]    # store truncation errors
     Pψ = Array{ITensor, 1}(undef, N)    # store tensors that make the final Pauli mps
@@ -754,9 +773,10 @@ function ChainRulesCore.rrule(::typeof(pauliMPS), ψ::Vector{ITensor}, ogc; trun
         Pten = ITensor(Ps/sqrt(2), sites_pauli_mps[j+1], bra(sites[j+1]), sites[j+1])
 
         linds = j>1 ? (sites_pauli_mps[j], commonind(Pψ[j-1], Bp)) : (sites_pauli_mps[j],) 
+        tensors = [Bp, ψ[j+1], ψbra[j+1], Pten]
         
-        SVDcontract_j = (tensors, leftinds) -> SVDcontract(tensors, leftinds; move_ogc=:right, trunc=(trunc..., maxrank=maxranks[j]))
-        (Up, Rp), back_j = Zygote.pullback(SVDcontract_j, [Bp, ψ[j+1], ψbra[j+1], Pten], linds)
+        SVDcontract_j = (tensors, leftinds) -> SVDcontract(tensors, leftinds; move_ogc=:right, trunc)
+        (Up, Rp), back_j = Zygote.pullback(SVDcontract_j, tensors, linds)
         push!(backs, back_j)
 
         Pψ[j] = Up
@@ -774,10 +794,10 @@ function ChainRulesCore.rrule(::typeof(pauliMPS), ψ::Vector{ITensor}, ogc; trun
             (ΔBp, Δψ_jp1, Δψbra_jp1, _), _ = backs[j]((ΔUp, ΔRp))
             
             ΔPψ[j] = ΔBp
-            Δψbra_jp1 = removetags(Δψbra_jp1, "bra")
-            Δψ[j+1] = Δψ_jp1 + conj(Δψbra_jp1)
+            Δψ[j+1] = Δψ_jp1 + removetags(dag(Δψbra_jp1), "bra")
         end
-        Δψ[1] = 2*conj(ψbra[1]*Pten1)*ΔPψ[1]
+
+        Δψ[1] = dag(ψbra[1]*Pten1)*ΔPψ[1] + removetags(dag(ΔPψ[1])*Pten1*ψ[1], "bra")
 
         Δψ, _ = og_back(Δψ)
 
@@ -874,25 +894,22 @@ function ChainRulesCore.rrule(::typeof(apply), W::Vector{ITensor}, ψ::Vector{IT
     combs = combiner.(Wlinks, ψlinks)
     combinds = combinedind.(combs)
     Wψlinks = [Index(space(ψlinks[j])*space(Wlinks[j]), "Link,l=$j") for j in 1:N-1]
-    replaceind!.(combs, combinds, Wψlinks)
 
-    Wψ[1] *= combs[1]
+    Wψ[1] = replaceind(combs[1]*Wψ[1], combinds[1], Wψlinks[1])
     for j in 2:N-1
-        Wψ[j] *= combs[j-1]
-        Wψ[j] *= combs[j]
+        Wψ[j] = replaceinds(combs[j-1]*Wψ[j]*combs[j], combinds[j-1:j], Wψlinks[j-1:j])
     end
-    Wψ[N] *= combs[N-1]
+    Wψ[N] = replaceind(combs[N-1]*Wψ[N], combinds[N-1], Wψlinks[N-1])
     Wψ = [replaceprime(Wψ[j], 1 => 0, inds=sites[j]') for j in 1:N]
     
     function apply_pullback(ΔWψ)
 
         ΔWψ = [replaceprime(ΔWψ[j], 0 => 1; inds = sites[j]) for j in 1:N]
-        ΔWψ[1] *= dag(combs[1])
+        ΔWψ[1] = replaceind(ΔWψ[1], Wψlinks[1], combinds[1])*dag(combs[1])
         for j in 2:N-1
-            ΔWψ[j] *= dag(combs[j-1])
-            ΔWψ[j] *= dag(combs[j])
+            ΔWψ[j] = dag(combs[j-1])*replaceinds(ΔWψ[j], Wψlinks[j-1:j], combinds[j-1:j])*dag(combs[j])
         end
-        ΔWψ[N] *= dag(combs[N-1])
+        ΔWψ[N] = replaceind(ΔWψ[N], Wψlinks[N-1], combinds[N-1])*dag(combs[N-1])
 
         Δψ = dag.(W) .* ΔWψ
         ΔW = ΔWψ .* dag.(ψ)
@@ -902,4 +919,77 @@ function ChainRulesCore.rrule(::typeof(apply), W::Vector{ITensor}, ψ::Vector{IT
     end
 
     return Wψ, apply_pullback
+end
+
+
+
+function FWHT!(v)
+    n = length(v); h = 1
+    @inbounds while h < n
+        for i in 0:2h:n-1, j in 0:h-1
+            x = v[i+j+1]; y = v[i+j+h+1]
+            v[i+j+1] = x + y; v[i+j+h+1] = x - y
+        end; h *= 2
+    end
+end
+
+function fastEDMagic(psi)
+    d = length(psi)
+    Nkvec = zeros(Float64, d)
+    Threads.@threads for k in 0:d-1
+        A = [conj(psi[xor(x,k)+1]) * psi[x+1] for x in 0:d-1]
+        FWHT!(A)
+        Nkvec[k+1] = sum(abs2.(A).^2)
+    end
+    return -log2(sum(Nkvec)/d)
+end
+
+function ChainRulesCore.rrule(::typeof(fastEDMagic), psi)
+    d = length(psi)
+
+    As = [Vector{ComplexF64}(undef, d) for _ in 1:d]
+    Threads.@threads for k in 0:d-1
+        A = [conj(psi[xor(x,k)+1]) * psi[x+1] for x in 0:d-1]
+        FWHT!(A)
+        As[k+1] = A    
+    end
+
+    T::Float64 = sum(sum(abs2.(A).^2) for A in As)
+    m2 = -log2(T/d)
+
+    function fastEDMagic_pullback(Δm2)
+        ΔT = -Δm2/(T*log(2))
+
+        nthreads = Threads.nthreads()
+        Δψ_threads = [zeros(ComplexF64, d) for _ in 1:nthreads]
+        ΔS_threads = [Vector{ComplexF64}(undef, d) for _ in 1:nthreads]
+
+        Threads.@threads for k in 0:d-1
+            tid = Threads.threadid()
+            ΔS = ΔS_threads[tid]
+            Δψt = Δψ_threads[tid]
+            Ak = As[k+1]
+
+            # in-place ΔS computation
+            @inbounds @simd for x in 0:d-1
+                a2 = abs2(Ak[x+1])
+                ΔS[x+1] = 4*a2*Ak[x+1]
+            end
+            FWHT!(ΔS)
+
+            @inbounds for x in 0:d-1
+                xk = xor(x,k)+1     # correct permutation
+                Δψt[x+1] += (conj(ΔS[xk])+ΔS[x+1])*psi[xk]
+            end
+        end
+
+        Δψ = zeros(ComplexF64, d)
+        @inbounds for t in 1:nthreads
+            Δψ .+= Δψ_threads[t]
+        end
+        Δψ .*= ΔT
+        return (NoTangent(), Δψ)
+    end
+
+    return m2, fastEDMagic_pullback
 end
