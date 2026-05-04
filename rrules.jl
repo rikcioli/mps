@@ -34,9 +34,17 @@ function bralinks(ψ::Vector{ITensor})
     return ψ
 end
 
+function bralinks(ψ::T) where {T<:Union{MPS, MPO}}
+    olims = ortho_lims(ψ)
+    ψ_vec = bralinks(ψ[:])
+    ψ = T(ψ_vec)
+    set_ortho_lims!(ψ, olims)
+    return ψ
+end
+
 function is_orthogonal(psi::Vector{ITensor}, ogc::Int)
     N = length(psi)
-    links = linkinds(MPS(psi))
+    links = linkinds(psi)
     for j in 1:ogc-1
         UdgU = (conj(psi[j])*delta(links[j], links[j]'))*psi[j]
         norm(UdgU - delta(links[j], links[j]')) > 1e-12 && return false
@@ -46,6 +54,10 @@ function is_orthogonal(psi::Vector{ITensor}, ogc::Int)
         norm(VVdg - delta(links[j-1], links[j-1]')) > 1e-12 && return false
     end
     return true
+end
+
+function is_orthogonal(psi::MPS, ogc::Int)
+    return ortho_lims(psi) === ogc:ogc
 end
 
 function is_orthogonal(psi::Vector{<:AbstractArray}, ogc::Int)
@@ -66,13 +78,22 @@ function is_orthogonal(psi::Vector{<:AbstractArray}, ogc::Int)
     return true
 end
 
-function check_orthogonal(psi::AbstractVector, ogc::Int)
+function check_orthogonal(psi::Union{AbstractVector, MPS}, ogc::Int)
     !is_orthogonal(psi, ogc) && throw(ErrorException("ψ is NOT orthogonal at specified orthogonality center=$(ogc)"))
     return true
 end
 
+function Base.vec(psi::MPS)
+    return psi.data
+end
 
-function inner(ψ::Vector{ITensor}, ϕ::Vector{ITensor})
+function ChainRulesCore.rrule(::typeof(Base.vec), ψ::MPS)
+    return vec(ψ), Δvec -> (NoTangent(), MPS(Δvec))
+end
+
+"Compute the scalar product of two MPS. Same as ITensorMPS.inner, but different pullback."
+function sproduct(ψ::T, ϕ::T) where {T<:Union{MPS, Vector{ITensor}}}
+    @show T
     N = length(ψ)
     @assert length(ϕ)==N
     @assert siteinds(ψ)==siteinds(ϕ)
@@ -82,43 +103,52 @@ function inner(ψ::Vector{ITensor}, ϕ::Vector{ITensor})
         c1 *= ψ_bra[j]
         c1 *= ϕ[j]
     end
-    return real(c1)[1]
+    return only(Array{ComplexF64}(c1))
 end
 
-# We write it in the form that is already in the tangent space since it's easier
-function ChainRulesCore.rrule(::typeof(inner), ψ::Vector{ITensor}, ϕ::Vector{ITensor})
+
+"Compute the scalar product of two MPS. Same as ITensorMPS.inner, but different pullback."
+function ChainRulesCore.rrule(::typeof(sproduct), ψ::T, ϕ::T) where {T<:Union{MPS, Vector{ITensor}}}
     N = length(ψ)
     @assert length(ϕ)==N
     @assert siteinds(ψ)==siteinds(ϕ)
     ψ_bra = dag.(bralinks(ψ))
+
     envL = [ψ_bra[1] * ϕ[1]]
     envR = [ψ_bra[N] * ϕ[N]]
     for j in 2:N-1
         push!(envL, envL[j-1] * ψ_bra[j] * ϕ[j])
         push!(envR, envR[j-1] * ψ_bra[N+1-j] * ϕ[N+1-j])
     end
-    C = Array{ComplexF64}(envL[end] * ψ_bra[N] *ϕ[N])[]
+    C = only(Array{ComplexF64}(envL[end] * ψ_bra[N] *ϕ[N]))
 
-    function inner_pullback(ΔC)
-        Δϕ = ITensor[]
-        Δψ = ITensor[]
+    function sproduct_pullback(ΔC)
+        Δϕ_vec = ITensor[]
+        Δψ_vec = ITensor[]
 
-        push!(Δϕ, ΔC*conj(ψ_bra[1] * envR[N-1]))
-        push!(Δψ, conj(ΔC)*ϕ[1]*envR[N-1])
+        push!(Δϕ_vec, ΔC*dag(ψ_bra[1] * envR[N-1]))
+        push!(Δψ_vec, dag(ΔC)*ϕ[1]*envR[N-1])
         for j in 2:N-1
-            push!(Δϕ, ΔC*conj(envL[j-1] * ψ_bra[j] * envR[N-j]))
-            push!(Δψ, conj(ΔC)*(envL[j-1] * ϕ[j] * envR[N-j]))
+            push!(Δϕ_vec, ΔC*dag(envL[j-1] * ψ_bra[j] * envR[N-j]))
+            push!(Δψ_vec, dag(ΔC)*(envL[j-1] * ϕ[j] * envR[N-j]))
         end
-        push!(Δϕ, ΔC*conj(envL[N-1] * ψ_bra[N]))
-        push!(Δψ, conj(ΔC)*(envL[N-1] * ϕ[N]))
-        Δψ = map(T -> removetags(T, "bra"), Δψ)
+        push!(Δϕ_vec, ΔC*dag(envL[N-1] * ψ_bra[N]))
+        push!(Δψ_vec, dag(ΔC)*(envL[N-1] * ϕ[N]))
+        Δψ_vec = map(T -> removetags(T, "bra"), Δψ_vec)
+            
+        Δψ = T(Δψ_vec)
+        Δϕ = T(Δϕ_vec)
+        if T <: MPS
+            set_ortho_lims!(Δψ, ortho_lims(ψ))
+            set_ortho_lims!(Δϕ, ortho_lims(ϕ))
+        end
 
         return (NoTangent(), Δψ, Δϕ)
     end
 
-    return C, inner_pullback
-
+    return C, sproduct_pullback
 end
+
 
 function ChainRulesCore.rrule(::Type{Array{T}}, x::ITensor) where {T}
     y = Array{T}(x)
@@ -139,6 +169,8 @@ function ChainRulesCore.rrule(::Type{Array{T}}, x::ITensor, linds, rinds) where 
     end
     return y, Array_pullback
 end
+
+    
 
 "Given an array of ITensors, contracts all of them in the chosen order
 and computes a truncated SVD of the results with the left indices given by linds."
@@ -233,7 +265,8 @@ function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{ITensor}, l
 end
 
 
-function vecToITensor(V::Vector{<:AbstractArray}, ogc; check_og=true, sites=nothing)
+"Convert vector of isometries with orthogonality center ogc into an MPS."
+function ITensorMPS.MPS(V::Vector{<:AbstractArray}, ogc; check_og=true, sites=nothing)
     check_og && check_orthogonal(V, ogc)
     
     N = length(V)
@@ -269,10 +302,14 @@ function vecToITensor(V::Vector{<:AbstractArray}, ogc; check_og=true, sites=noth
 
     Vresh = [V1; VB; VN]
     Vtensors = [ITensor(Vresh[j], allinds[j]) for j in 1:N]
-    return Vtensors
+    Vmps = MPS(Vtensors)
+    set_ortho_lims!(Vmps, ogc:ogc)
+    return Vmps
 end
 
-function ChainRulesCore.rrule(::typeof(vecToITensor), V::Vector{<:AbstractArray}, ogc::Int; check_og=true, sites=nothing)
+"Convert vector of isometries with orthogonality center ogc into an MPS.
+The pullback treats the adjoint of the MPS as if it was a vector of isometries."
+function ChainRulesCore.rrule(::typeof(ITensorMPS.MPS), V::Vector{<:AbstractArray}, ogc::Int; check_og=true, sites=nothing)
     check_og && check_orthogonal(V, ogc)
     N = length(V)
     V = copy.(V) # eliminates adjoint type before converting to ITensor
@@ -306,9 +343,11 @@ function ChainRulesCore.rrule(::typeof(vecToITensor), V::Vector{<:AbstractArray}
 
     Vresh = [V1; VB; VN]
     Vtensors = [ITensor(Vresh[j], allinds[j]) for j in 1:N]
+    Vmps = MPS(Vtensors)
+    set_ortho_lims!(Vmps, ogc:ogc)
 
-    function vecToITensor_pullback(ΔVtensors)
-        ΔVresh = [Array{ComplexF64}(ΔVtensors[j], allinds[j]) for j in 1:N]
+    function MPS_pullback(ΔVmps)
+        ΔVresh = [Array{ComplexF64}(ΔVmps[j], allinds[j]) for j in 1:N]
 
         ΔVL = [reshape(ΔVresh[j], (j==1 ? 2 : dimlinks[j-1]*2, dimlinks[j])) for j in 1:ogc-1]
         ΔVC = [ΔVresh[ogc]]
@@ -318,52 +357,52 @@ function ChainRulesCore.rrule(::typeof(vecToITensor), V::Vector{<:AbstractArray}
         return (NoTangent(), ΔV, NoTangent())
     end
 
-    return Vtensors, vecToITensor_pullback
+    return Vmps, MPS_pullback
 end
 
 
 
-function ITensors.norm(ψ::Vector{ITensor}, ogc::Int; check_og=true)
-    check_og && check_orthogonal(ψ, ogc)
-    center_ten = ψ[ogc]
-    center = Array{ComplexF64}(center_ten, inds(center_ten))
-    return norm(center)
-end
-
-function ChainRulesCore.rrule(::typeof(ITensors.norm), ψ::Vector{ITensor}, ogc::Int; check_og=true)
-    check_og && check_orthogonal(ψ, ogc)
-    center_ten = ψ[ogc]
-    center = Array{ComplexF64}(center_ten, inds(center_ten))
-    nrm = norm(center)
-
-    function norm_pullback(ΔN)
-        Δψ = [zero(A) for A in ψ]
-        Δψ[ogc] = nrm < eps() ? zero(center_ten) : center_ten*(ΔN/norm(center))
-        return (NoTangent(), Δψ, NoTangent())
-    end
-
-    return norm(center), norm_pullback
-end
-
-function norm2(ψ::Vector{ITensor}, ogc::Int; check_og=true)
-    check_og && check_orthogonal(ψ, ogc)
-    ogc_ten = ψ[ogc]
-    return real(dot(ogc_ten, ogc_ten))
-end
-
-function ChainRulesCore.rrule(::typeof(norm2), ψ::Vector{ITensor}, ogc::Int; check_og=true)
-    check_og && check_orthogonal(ψ, ogc)
-    ogc_ten = ψ[ogc]
-    nrm2 = real(dot(ogc_ten, ogc_ten))
-
-    function norm_pullback(ΔN)
-        Δψ = [zero(A) for A in ψ]
-        Δψ[ogc] = 2*ΔN*ogc_ten
-        return (NoTangent(), Δψ, NoTangent())
-    end
-
-    return nrm2, norm_pullback
-end
+# function ITensors.norm(ψ::Vector{ITensor}, ogc::Int; check_og=true)
+#     check_og && check_orthogonal(ψ, ogc)
+#     center_ten = ψ[ogc]
+#     center = Array{ComplexF64}(center_ten, inds(center_ten))
+#     return norm(center)
+# end
+# 
+# function ChainRulesCore.rrule(::typeof(ITensors.norm), ψ::Vector{ITensor}, ogc::Int; check_og=true)
+#     check_og && check_orthogonal(ψ, ogc)
+#     center_ten = ψ[ogc]
+#     center = Array{ComplexF64}(center_ten, inds(center_ten))
+#     nrm = norm(center)
+# 
+#     function norm_pullback(ΔN)
+#         Δψ = [zero(A) for A in ψ]
+#         Δψ[ogc] = nrm < eps() ? zero(center_ten) : center_ten*(ΔN/norm(center))
+#         return (NoTangent(), Δψ, NoTangent())
+#     end
+# 
+#     return norm(center), norm_pullback
+# end
+# 
+# function norm2(ψ::Vector{ITensor}, ogc::Int; check_og=true)
+#     check_og && check_orthogonal(ψ, ogc)
+#     ogc_ten = ψ[ogc]
+#     return real(dot(ogc_ten, ogc_ten))
+# end
+# 
+# function ChainRulesCore.rrule(::typeof(norm2), ψ::Vector{ITensor}, ogc::Int; check_og=true)
+#     check_og && check_orthogonal(ψ, ogc)
+#     ogc_ten = ψ[ogc]
+#     nrm2 = real(dot(ogc_ten, ogc_ten))
+# 
+#     function norm_pullback(ΔN)
+#         Δψ = [zero(A) for A in ψ]
+#         Δψ[ogc] = 2*ΔN*ogc_ten
+#         return (NoTangent(), Δψ, NoTangent())
+#     end
+# 
+#     return nrm2, norm_pullback
+# end
 
 "Helper function to modify the maxrank argument in svd_trunc. 
 Removes the :maxrank key in trunc if present, and returns an array maxranks such that
@@ -384,26 +423,25 @@ function adapt_truncarg(trunc::NamedTuple, dims::Vector{<:Int})
 end
 
 # function to orthogonalize an mps that is compatible with AD
-function move_center(ψ::Vector{<:ITensor}, b0::Int, b::Int; check_og=true, trunc=NamedTuple())
+function move_center(ψ::MPS, b::Int; trunc=NamedTuple())
     N = length(ψ)
-    @assert 1 <= b0 <= N
+    cog = only(ortho_lims(ψ)) #current orthogonality center
+    @assert 1 <= cog <= N
     @assert 1 <= b <= N
-    check_og && check_orthogonal(ψ, b0) # check that ψ is orthogonal at b0
 
-    cog = b0
     if b==cog
         return ψ
     end
     to_right = b>cog  # left-to-right mode
 
     # Preparing the maxranks for svd trunc
-    trunc, maxranks = adapt_truncarg(trunc, linkdims(MPS(ψ)))
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
     
-    sites = siteinds(MPS(ψ))
-    links = linkinds(MPS(ψ))
+    sites = siteinds(ψ)
+    links = linkinds(ψ)
     cache = Array{ITensor, 1}(undef, abs(b-cog)+1)
     Rten_new = ψ[cog]
-    local ψfinal
+    local ψf_vec
     if to_right
         Ulinkinds = Index[]
         for j in cog:b-1
@@ -425,7 +463,7 @@ function move_center(ψ::Vector{<:ITensor}, b0::Int, b::Int; check_og=true, trun
                 cache[end] = W2
             end
         end
-        ψfinal = vcat(ψ[1:cog-1], cache, ψ[b+1:end])
+        ψf_vec = vcat(ψ[1:cog-1], cache, ψ[b+1:end])
         
     else
         for j in cog-1:-1:b
@@ -441,33 +479,34 @@ function move_center(ψ::Vector{<:ITensor}, b0::Int, b::Int; check_og=true, trun
                 cache[1] = W1
             end
         end
-        ψfinal = vcat(ψ[1:b-1], cache, ψ[cog+1:end])
+        ψf_vec = vcat(ψ[1:b-1], cache, ψ[cog+1:end])
     end
 
-    return ψfinal
+    ψf = MPS(ψf_vec)
+    set_ortho_lims!(ψf, b:b)
+    return ψf
 end
 
-function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::Int, b::Int; check_og=true, trunc=NamedTuple())
+function ChainRulesCore.rrule(::typeof(move_center), ψ::MPS, b::Int; trunc=NamedTuple())
     N = length(ψ)
-    @assert 1 <= b0 <= N
+    cog = only(ortho_lims(ψ)) #current orthogonality center
+    @assert 1 <= cog <= N
     @assert 1 <= b <= N
-    check_og && check_orthogonal(ψ, b0) # check that ψ is orthogonal at b0
 
-    cog = b0
     if b==cog
-        return ψ, Δψfinal -> (NoTangent(), Δψfinal, NoTangent(), NoTangent())
+        return ψ, Δψf -> (NoTangent(), Δψf, NoTangent())
     end
     to_right = b>cog  # left-to-right mode
 
     # Preparing the maxranks for svd trunc
-    trunc, maxranks = adapt_truncarg(trunc, linkdims(MPS(ψ)))
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
 
-    sites = siteinds(MPS(ψ))
-    links = linkinds(MPS(ψ))
+    sites = siteinds(ψ)
+    links = linkinds(ψ)
     cache = Array{ITensor, 1}(undef, abs(b-cog)+1)
     backs = Function[]  # store intermediate pullbacks
     Rten_new = ψ[cog]
-    local ψfinal
+    local ψf_vec
     if to_right
         Ulinkinds = Index[]
         for j in cog:b-1
@@ -491,7 +530,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::
                 cache[end] = W2
             end
         end
-        ψfinal = vcat(ψ[1:cog-1], cache, ψ[b+1:end])
+        ψf_vec = vcat(ψ[1:cog-1], cache, ψ[b+1:end])
         
     else
         for j in cog-1:-1:b
@@ -509,17 +548,20 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::
                 cache[1] = W1
             end
         end
-        ψfinal = vcat(ψ[1:b-1], cache, ψ[cog+1:end])
+        ψf_vec = vcat(ψ[1:b-1], cache, ψ[cog+1:end])
     end
 
-    function move_center_pullback(Δψfinal)
+    ψf = MPS(ψf_vec)
+    set_ortho_lims!(ψf, b:b)
 
+    function move_center_pullback(Δψf)
+        check_orthogonal(Δψf, b)
         Δψcache = Array{ITensor, 1}(undef, abs(b-cog)+1)
-        ΔR_new = Δψfinal[b]
-        local Δψ
+        ΔR_new = Δψf[b]
+        local Δψ_vec
         if to_right
             for j in b-1:-1:cog
-                ΔW1 = Δψfinal[j]
+                ΔW1 = Δψf[j]
                 ΔW2 = ΔR_new
 
                 (ΔWL, ΔWR), _ = backs[j-cog+1]((ΔW1, ΔW2))  # start from the last
@@ -530,11 +572,11 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::
                     Δψcache[1] = ΔWL
                 end
             end
-            Δψ = vcat(Δψfinal[1:cog-1], Δψcache, Δψfinal[b+1:end])
+            Δψ_vec = vcat(Δψf[1:cog-1], Δψcache, Δψf[b+1:end])
         else
             for j in b:cog-1
                 ΔW1 = ΔR_new
-                ΔW2 = Δψfinal[j+1]
+                ΔW2 = Δψf[j+1]
 
                 (ΔWL, ΔWR), _ = backs[cog-j]((ΔW1, ΔW2)) # start from the last again, since pullbacks are appended
 
@@ -544,26 +586,31 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::Vector{<:ITensor}, b0::
                     Δψcache[end] = ΔWR
                 end
             end
-            Δψ = vcat(Δψfinal[1:b-1], Δψcache, Δψfinal[cog+1:end])
+            Δψ_vec = vcat(Δψf[1:b-1], Δψcache, Δψf[cog+1:end])
         end
-        
+
+        Δψ = MPS(Δψ_vec)
+        set_ortho_lims!(Δψ, cog:cog)
         return (NoTangent(), Δψ, NoTangent(), NoTangent())
     end
-    return ψfinal, move_center_pullback
+
+    return ψf, move_center_pullback
 end
 
 
-function apply(Uarray::Vector{<:AbstractMatrix}, ψ::Vector{ITensor}; check_og=true, shift=0, trunc=NamedTuple())
+function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, trunc=NamedTuple())
     N = length(ψ)
     @assert shift==0 || shift==1
-    check_og && check_orthogonal(ψ, 1) # check that ψ is orthogonal at first site before applying unitaries
+
+    ψ = move_center(ψ, 1)
+    check_orthogonal(ψ, 1) # check that ψ is orthogonal at first site before applying unitaries
 
     to_right = true  # left-to-right mode
 
     # Preparing the maxranks for svd trunc
     trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
     
-    sites = siteinds(MPS(ψ))
+    sites = siteinds(ψ)
     ψfinal = copy(ψ)
     i = 1; nU = length(Uarray)
     local lastj
@@ -598,16 +645,18 @@ function apply(Uarray::Vector{<:AbstractMatrix}, ψ::Vector{ITensor}; check_og=t
             end
         end
     end
-
+    final_ogc = to_right ? lastj+1 : lastj
+    set_ortho_lims!(ψfinal, final_ogc:final_ogc)
     return ψfinal
 end
 
 
-function ChainRulesCore.rrule(::typeof(apply), Uarray::Vector{<:AbstractMatrix}, ψ::Vector{ITensor}; check_og=true, shift=0, trunc=NamedTuple())
+function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, trunc=NamedTuple())
     N = length(ψ)
     @assert shift==0 || shift==1
-    check_og && check_orthogonal(ψ, 1) # check that ψ is orthogonal at first site before applying unitaries
 
+    ψ, move_center_back = Zygote.pullback(move_center, ψ, 1)
+    check_og && check_orthogonal(ψ, 1) # check that ψ is orthogonal at first site before applying unitaries
 
     to_right = true  # left-to-right mode
 
@@ -652,9 +701,11 @@ function ChainRulesCore.rrule(::typeof(apply), Uarray::Vector{<:AbstractMatrix},
             end
         end
     end
+    final_ogc = to_right ? lastj+1 : lastj
+    set_ortho_lims!(ψfinal, final_ogc:final_ogc)
 
-
-    function apply_pullback(Δψfinal)
+    function apply_brickwork_pullback(Δψfinal)
+        check_orthogonal(Δψfinal, final_ogc)
 
         Δψ = copy(Δψfinal)
         ΔUarray = [zeros(ComplexF64, size(U)) for U in Uarray]
@@ -682,6 +733,8 @@ function ChainRulesCore.rrule(::typeof(apply), Uarray::Vector{<:AbstractMatrix},
             lastj = to_right ? 1 : N-1
             to_right = !to_right
         end
+        set_ortho_lims!(Δψ, 1:1)
+        Δψ, _ = move_center_back(Δψ)
         
         return (NoTangent(), ΔUarray, Δψ)
     end
@@ -704,9 +757,9 @@ function get_Ps()
 end
 
 
-function pauliMPS(ψ::Vector{ITensor}, ogc::Int; trunc=NamedTuple(), sites=nothing, check_og=true, post_factorize_callback = identity)
+function get_pauli_mps(ψ::MPS; trunc=NamedTuple(), sites=nothing, post_factorize_callback = identity)
     N = length(ψ)
-    ψ = move_center(ψ, ogc, 1; check_og)
+    ψ = move_center(ψ, 1)
     ψbra = dag.(bra.(ψ))
 
     if !haskey(trunc, :atol)    # adds an eps() tolerance if not present
@@ -723,31 +776,33 @@ function pauliMPS(ψ::Vector{ITensor}, ogc::Int; trunc=NamedTuple(), sites=nothi
     Pten1 = ITensor(Ps/sqrt(2), sites_pauli_mps[1], bra(sites[1]), sites[1])
 
     errs = Float64[]    # store truncation errors
-    Pψ = Array{ITensor, 1}(undef, N)    # store tensors that make the final Pauli mps
-    Pψ[1] = ψbra[1]*Pten1*ψ[1]
+    Pψ_vec = Array{ITensor, 1}(undef, N)    # store tensors that make the final Pauli mps
+    Pψ_vec[1] = ψbra[1]*Pten1*ψ[1]
 
     for j in 1:N-1    
-        Bp = Pψ[j]
+        Bp = Pψ_vec[j]
         Pten = ITensor(Ps/sqrt(2), sites_pauli_mps[j+1], bra(sites[j+1]), sites[j+1])
 
-        linds = j>1 ? (sites_pauli_mps[j], commonind(Pψ[j-1], Bp)) : (sites_pauli_mps[j],) 
+        linds = j>1 ? (sites_pauli_mps[j], commonind(Pψ_vec[j-1], Bp)) : (sites_pauli_mps[j],) 
         tensors = [Bp, ψ[j+1], ψbra[j+1], Pten]
 
         Up, Rp = SVDcontract(tensors, linds; move_ogc=:right, trunc)
-        Pψ[j] = Up
-        Pψ[j+1] = Rp
+        Pψ_vec[j] = Up
+        Pψ_vec[j+1] = Rp
     end
 
     post_factorize_callback(errs)
+    Pψ = MPS(Pψ_vec)
+    set_ortho_lims!(Pψ, N:N)
 
     return Pψ
 end
 
 
 
-function ChainRulesCore.rrule(::typeof(pauliMPS), ψ::Vector{ITensor}, ogc::Int; trunc=NamedTuple(), sites=nothing, check_og=true, post_factorize_callback = identity)
+function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple(), sites=nothing, check_og=true, post_factorize_callback = identity)
     N = length(ψ)
-    ψ, og_back = Zygote.pullback(move_center, ψ, ogc, 1)
+    ψ, move_center_back = Zygote.pullback(move_center, ψ, 1)
     ψbra = dag.(bra.(ψ))
 
     if !haskey(trunc, :atol)    # adds an eps() tolerance if not present
@@ -761,73 +816,86 @@ function ChainRulesCore.rrule(::typeof(pauliMPS), ψ::Vector{ITensor}, ogc::Int;
     sites = siteinds(ψ)
     
     errs = Float64[]    # store truncation errors
-    Pψ = Array{ITensor, 1}(undef, N)    # store tensors that make the final Pauli mps
+    Pψ_vec = Array{ITensor, 1}(undef, N)    # store tensors that make the final Pauli mps
     
     Ps = get_Ps()
     Pten1 = ITensor(Ps/sqrt(2), sites_pauli_mps[1], bra(sites[1]), sites[1])
     
-    Pψ[1] = ψbra[1]*Pten1*ψ[1]
+    Pψ_vec[1] = ψbra[1]*Pten1*ψ[1]
     backs = Function[]
     for j in 1:N-1    
-        Bp = Pψ[j]
+        Bp = Pψ_vec[j]
         Pten = ITensor(Ps/sqrt(2), sites_pauli_mps[j+1], bra(sites[j+1]), sites[j+1])
 
-        linds = j>1 ? (sites_pauli_mps[j], commonind(Pψ[j-1], Bp)) : (sites_pauli_mps[j],) 
+        linds = j>1 ? (sites_pauli_mps[j], commonind(Pψ_vec[j-1], Bp)) : (sites_pauli_mps[j],) 
         tensors = [Bp, ψ[j+1], ψbra[j+1], Pten]
         
         SVDcontract_j = (tensors, leftinds) -> SVDcontract(tensors, leftinds; move_ogc=:right, trunc)
         (Up, Rp), back_j = Zygote.pullback(SVDcontract_j, tensors, linds)
         push!(backs, back_j)
 
-        Pψ[j] = Up
-        Pψ[j+1] = Rp
+        Pψ_vec[j] = Up
+        Pψ_vec[j+1] = Rp
     end
 
+    Pψ = MPS(Pψ_vec)
+    set_ortho_lims!(Pψ, N:N)
 
-    function pauliMPS_pullback(ΔPψ)
-
+    function get_pauli_mps_pullback(ΔPψ)
+        check_orthogonal(ΔPψ, N)
         ΔPψ = copy(ΔPψ)
-        Δψ = Array{ITensor, 1}(undef, N)
+        Δψ_vec = Array{ITensor, 1}(undef, N)
         for j in N-1:-1:1
             ΔUp, ΔRp = ΔPψ[j:j+1]
 
             (ΔBp, Δψ_jp1, Δψbra_jp1, _), _ = backs[j]((ΔUp, ΔRp))
             
             ΔPψ[j] = ΔBp
-            Δψ[j+1] = Δψ_jp1 + removetags(dag(Δψbra_jp1), "bra")
+            Δψ_vec[j+1] = Δψ_jp1 + removetags(dag(Δψbra_jp1), "bra")
         end
 
-        Δψ[1] = dag(ψbra[1]*Pten1)*ΔPψ[1] + removetags(dag(ΔPψ[1])*Pten1*ψ[1], "bra")
+        Δψ_vec[1] = dag(ψbra[1]*Pten1)*ΔPψ[1] + removetags(dag(ΔPψ[1])*Pten1*ψ[1], "bra")
+        Δψ = MPS(Δψ_vec)
+        set_ortho_lims!(Δψ, 1:1)
 
-        Δψ, _ = og_back(Δψ)
+        Δψ, _ = move_center_back(Δψ)
 
         return (NoTangent(), Δψ, NoTangent())
     end
 
     post_factorize_callback(errs)
-    return Pψ, pauliMPS_pullback
+    return Pψ, get_pauli_mps_pullback
 end
 
-function getMPO(ψ::Vector{ITensor})
+
+function ITensorMPS.MPO(ψ::MPS)
     N = length(ψ)
     sites = siteinds(ψ)
     ψmpo = [delta(sites[j], sites[j]', sites[j]'')*ψ[j] for j in 1:N]
     ψmpo = replaceprime.(ψmpo, 1 => 0, 2 => 1)
-    return ψmpo
+    ψf = MPO(ψmpo)
+    set_ortho_lims!(ψf, ortho_lims(ψ))
+    return ψf
 end
 
-function ChainRulesCore.rrule(::typeof(getMPO), ψ::Vector{ITensor})
+function ChainRulesCore.rrule(::typeof(ITensorMPS.MPO), ψ::MPS)
     N = length(ψ)
     sites = siteinds(ψ)
     ψmpo = [delta(sites[j], sites[j]', sites[j]'')*ψ[j] for j in 1:N]
     ψmpo = replaceprime.(ψmpo, 1 => 0, 2 => 1)
+    ψf = MPO(ψmpo)
+    set_ortho_lims!(ψf, ortho_lims(ψ))
 
-    function getMPO_pullback(Δψmpo)
-        Δψ = [dag(delta(sites[j], sites[j]', sites[j]''))*Δψmpo[j] for j in 1:N]
-        Δψ = replaceprime.(Δψ, 2 => 0)
+    function MPO_pullback(Δψmpo)
+        ogc = orthocenter(Δψmpo)
+        Δψ_vec = [dag(delta(sites[j], sites[j]', sites[j]''))*Δψmpo[j] for j in 1:N]
+        Δψ_vec = replaceprime.(Δψ_vec, 2 => 0)
+        Δψ = MPS(Δψ_vec)
+        set_ortho_lims!(Δψ, ogc:ogc)
+
         return (NoTangent(), Δψ)
     end
-    return ψmpo, getMPO_pullback
+    return ψf, MPO_pullback
 end
 
 
@@ -855,7 +923,7 @@ function new_linkinds(ψ::T) where {T<:Union{MPS,MPO}}
 end
 
 
-function apply(W::Vector{ITensor}, ψ::Vector{ITensor})
+function product(W::MPO, ψ::MPS)
     N = length(ψ)
     W = bralinks(W)
 
@@ -863,25 +931,28 @@ function apply(W::Vector{ITensor}, ψ::Vector{ITensor})
     ψlinks = linkinds(ψ)
     sites = siteinds(ψ)
     
-    Wψ = W .* ψ
+    Wψ_vec = (W[:]) .* (ψ[:])
     
     combs = combiner.(Wlinks, ψlinks)
     combinds = combinedind.(combs)
     Wψlinks = [Index(space(ψlinks[j])*space(Wlinks[j]), "Link,l=$j") for j in 1:N-1]
     replaceind!.(combs, combinds, Wψlinks)
 
-    Wψ[1] *= combs[1]
+    Wψ_vec[1] *= combs[1]
     for j in 2:N-1
-        Wψ[j] *= combs[j-1]
-        Wψ[j] *= combs[j]
+        Wψ_vec[j] *= combs[j-1]
+        Wψ_vec[j] *= combs[j]
     end
-    Wψ[N] *= combs[N-1]
+    Wψ_vec[N] *= combs[N-1]
 
-    Wψ = [replaceprime(Wψ[j], 1 => 0, inds=sites[j]') for j in 1:N]
+    Wψ_vec = [replaceprime(Wψ_vec[j], 1 => 0, inds=sites[j]') for j in 1:N]
+    Wψ = MPS(Wψ_vec)
+    reset_ortho_lims!(Wψ)
+
     return Wψ
 end
 
-function ChainRulesCore.rrule(::typeof(apply), W::Vector{ITensor}, ψ::Vector{ITensor})
+function ChainRulesCore.rrule(::typeof(product), W::MPO, ψ::MPS)
     N = length(ψ)
     W = bralinks(W)
 
@@ -889,20 +960,23 @@ function ChainRulesCore.rrule(::typeof(apply), W::Vector{ITensor}, ψ::Vector{IT
     ψlinks = linkinds(ψ)
     sites = siteinds(ψ)
     
-    Wψ = W .* ψ
+    Wψ_vec = (W[:]) .* (ψ[:])
     
     combs = combiner.(Wlinks, ψlinks)
     combinds = combinedind.(combs)
     Wψlinks = [Index(space(ψlinks[j])*space(Wlinks[j]), "Link,l=$j") for j in 1:N-1]
 
-    Wψ[1] = replaceind(combs[1]*Wψ[1], combinds[1], Wψlinks[1])
+
+    Wψ_vec[1] = replaceind(combs[1]*Wψ_vec[1], combinds[1], Wψlinks[1])
     for j in 2:N-1
-        Wψ[j] = replaceinds(combs[j-1]*Wψ[j]*combs[j], combinds[j-1:j], Wψlinks[j-1:j])
+        Wψ_vec[j] = replaceinds(combs[j-1]*Wψ_vec[j]*combs[j], combinds[j-1:j], Wψlinks[j-1:j])
     end
-    Wψ[N] = replaceind(combs[N-1]*Wψ[N], combinds[N-1], Wψlinks[N-1])
-    Wψ = [replaceprime(Wψ[j], 1 => 0, inds=sites[j]') for j in 1:N]
+    Wψ_vec[N] = replaceind(combs[N-1]*Wψ_vec[N], combinds[N-1], Wψlinks[N-1])
+    Wψ_vec = [replaceprime(Wψ_vec[j], 1 => 0, inds=sites[j]') for j in 1:N]
+    Wψ = MPS(Wψ_vec)
+    reset_ortho_lims!(Wψ)
     
-    function apply_pullback(ΔWψ)
+    function product_pullback(ΔWψ)
 
         ΔWψ = [replaceprime(ΔWψ[j], 0 => 1; inds = sites[j]) for j in 1:N]
         ΔWψ[1] = replaceind(ΔWψ[1], Wψlinks[1], combinds[1])*dag(combs[1])
@@ -911,14 +985,19 @@ function ChainRulesCore.rrule(::typeof(apply), W::Vector{ITensor}, ψ::Vector{IT
         end
         ΔWψ[N] = replaceind(ΔWψ[N], Wψlinks[N-1], combinds[N-1])*dag(combs[N-1])
 
-        Δψ = dag.(W) .* ΔWψ
-        ΔW = ΔWψ .* dag.(ψ)
-        ΔW = map(T -> removetags(T, "bra"), ΔW)
+        Δψ_vec = dag.(W)[:] .* ΔWψ
+        Δψ = MPS(Δψ_vec)
+        set_ortho_lims!(Δψ, ortho_lims(ψ))
+
+        ΔW_vec = ΔWψ .* dag.(ψ)[:]
+        ΔW_vec = map(T -> removetags(T, "bra"), ΔW_vec)
+        ΔW = MPO(ΔW_vec)
+        set_ortho_lims!(ΔW, ortho_lims(W))
         
         return (NoTangent(), ΔW, Δψ)
     end
 
-    return Wψ, apply_pullback
+    return Wψ, product_pullback
 end
 
 
