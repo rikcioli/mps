@@ -236,7 +236,15 @@ function sre2(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
     return -log2(real(sproduct(P2,P2))) - length(Uψ)
 end
 
-function test_sre2()
+function sre2zip(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    Uψ = apply_brickwork(arrU, ψ)     # assume odd number of layers
+    PMPS = get_pauli_mps(Uψ)
+    PMPO = MPO(PMPS)
+    P2 = zipup(PMPO, PMPS)
+    return -log2(real(sproduct(P2,P2))) - length(Uψ)
+end
+
+function test_sre2(sre2_func)
     N = 4; χ = 2
     sites = siteinds("Qubit", N)
 
@@ -244,7 +252,7 @@ function test_sre2()
         psi = random_mps(ComplexF64, sites; linkdims = χ)
         U_array = [random_unitary(4) for _ in 1:5]
 
-        sre2_mps = sre2(U_array, psi)
+        sre2_mps = sre2_func(U_array, psi)
 
         psi_statevec = reshape(Array{ComplexF64}(prod(psi), sites), 2^N)
         Upsi = applyED(U_array, psi_statevec, N, 3)
@@ -266,7 +274,8 @@ end
 @test test_applyED()
 @test test_apply_brickwork()
 
-@test test_sre2()
+@test test_sre2(sre2)
+@test test_sre2(sre2zip)
 
 
 
@@ -365,7 +374,7 @@ function cost_SVDcontract(arrV::Vector{<:AbstractArray})
     psi = vec(MPS(arrV, ogc))
     sites = siteinds(psi)
     linds = (sites[1],)
-    U, R = SVDcontract(psi, linds)
+    (U, R), eps = SVDcontract(psi, linds)
     newpsi = [U, R]
     return real(sproduct(newpsi, newpsi))
 end
@@ -376,7 +385,7 @@ fg_SVDcontract(V_array)
 testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_SVDcontract, innerMixed, retractMixed_ogc)
 
 
-# GRADIENT OF PAULIMPS WORKS
+# GRADIENT OF PAULIMPS WORKS, SOMETIMES RETURNS LAPACK ERROR
 W_array = genPoint(N, χ, ogc)
 psiW = MPS(W_array, ogc)
 function cost_pauli(arrV::Vector{<:AbstractArray})
@@ -450,31 +459,34 @@ testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_product, i
 
 
 # GRADIENT OF SRE2 
-function cost_sre2(arrV::Vector{<:AbstractArray})
+function cost_sre2_product(arrV::Vector{<:AbstractArray})
+    N = length(arrV)
     ogc = 3
     psi = MPS(arrV, ogc)
     Ppsi = get_pauli_mps(psi)
     Pmpo = MPO(Ppsi)
     contr = product(Pmpo, Ppsi)
-    res = real(sproduct(contr, contr))
+    res = -log2(real(sproduct(contr, contr)))-N
     return res
 end
 
 # WORKS, BUT WE ARE FORCED TO USE OUR CUSTOM CHAINRULE BECAUSE MPS NEED TO BE SUMMED
 # AS IF THEY WERE VECTORS OF ITENSORS
-function ChainRulesCore.rrule(::typeof(cost_sre2), arrV::Vector{<:AbstractArray})
+function ChainRulesCore.rrule(::typeof(cost_sre2_product), arrV::Vector{<:AbstractArray})
+    N = length(arrV)
     ogc = 3
     psi, MPS_back = pullback(MPS, arrV, ogc)
     Ppsi, get_pauli_mps_pullback = pullback(get_pauli_mps, psi)
     Pmpo, MPO_back = pullback(MPO, Ppsi)
     contr, product_back = pullback(product, Pmpo, Ppsi)
     res, sproduct_back = pullback(sproduct, contr, contr)
-    resreal, real_back = real(res), Δresreal -> (NoTangent(), Δresreal*(1.0+0.0im))
 
-    function cost_sre2_pullback(Δresreal)
-        _, Δreal = real_back(Δresreal)
+    m2, m2_back = -log2(real(res))-N, Δm2 -> (NoTangent(), -Δm2/(log(2)*real(res)))
 
-        Δcontr1, Δcontr2 = sproduct_back(Δreal)
+    function cost_sre2_pullback(Δm2)
+        _, Δres = m2_back(Δm2)
+
+        Δcontr1, Δcontr2 = sproduct_back(Δres)
         @assert isa(Δcontr1, MPS)
         @assert isa(Δcontr2, MPS)
         Δcontr_vec = Δcontr1[:] .+ Δcontr2[:]
@@ -499,16 +511,74 @@ function ChainRulesCore.rrule(::typeof(cost_sre2), arrV::Vector{<:AbstractArray}
 
         return (NoTangent(), ΔarrV)
     end
-    return resreal, cost_sre2_pullback
+    return m2, cost_sre2_pullback
 end
-cost_sre2(V_array)
-gradient(cost_sre2, V_array)[1]
-fg_sre2 = arrV -> withgrad_Riemannian(cost_sre2, arrV, ogc)
+cost_sre2_product(V_array)
+gradient(cost_sre2_product, V_array)[1]
+fg_sre2 = arrV -> withgrad_Riemannian(cost_sre2_product, arrV, ogc)
 fg_sre2(V_array)
 testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_sre2, innerMixed, retractMixed_ogc)
 
 
+# GRADIENT OF SRE2 WITH zipup
+function cost_sre2_zip(arrV::Vector{<:AbstractArray})
+    N = length(arrV)
+    ogc = 3
+    psi = MPS(arrV, ogc)
+    Ppsi = get_pauli_mps(psi)
+    Pmpo = MPO(Ppsi)
+    contr = zipup(Pmpo, Ppsi)
+    res = -log2(real(sproduct(contr, contr))) - N
+    return res
+end
 
+# WORKS, BUT WE ARE FORCED TO USE OUR CUSTOM CHAINRULE BECAUSE MPS NEED TO BE SUMMED
+# AS IF THEY WERE VECTORS OF ITENSORS
+function ChainRulesCore.rrule(::typeof(cost_sre2_zip), arrV::Vector{<:AbstractArray})
+    ogc = 3
+    psi, MPS_back = pullback(MPS, arrV, ogc)
+    Ppsi, get_pauli_mps_pullback = pullback(get_pauli_mps, psi)
+    Pmpo, MPO_back = pullback(MPO, Ppsi)    # at this point Ppsi and Pmpo have same ortho lims
+    contr, zipup_back = pullback(zipup, Pmpo, Ppsi)
+    res, sproduct_back = pullback(sproduct, contr, contr)
+    
+    m2, m2_back = -log2(real(res))-N, Δm2 -> (NoTangent(), -Δm2/(log(2)*real(res)))
+
+    function cost_sre2_zip_pullback(Δm2)
+        _, Δres = m2_back(Δm2)
+
+        Δcontr1, Δcontr2 = sproduct_back(Δres)
+        @assert isa(Δcontr1, MPS)
+        @assert isa(Δcontr2, MPS)
+        Δcontr_vec = Δcontr1[:] .+ Δcontr2[:]
+        Δcontr = MPS(Δcontr_vec)
+        set_ortho_lims!(Δcontr, ortho_lims(contr))
+
+        ΔPmpo, ΔPpsi = zipup_back(Δcontr)
+        @assert isa(ΔPmpo, MPO)
+        @assert isa(ΔPpsi, MPS)
+
+        ΔPpsi2 = MPO_back(ΔPmpo)[1]
+        @assert isa(ΔPpsi2, MPS)
+
+        ΔPpsi_vec = ΔPpsi[:] .+ ΔPpsi2[:]
+        ΔPpsi = MPS(ΔPpsi_vec)
+        set_ortho_lims!(ΔPpsi, ortho_lims(Ppsi))
+
+        Δpsi = get_pauli_mps_pullback(ΔPpsi)[1]
+        @assert isa(Δpsi, MPS)
+
+        ΔarrV, _ = MPS_back(Δpsi)
+
+        return (NoTangent(), ΔarrV)
+    end
+    return m2, cost_sre2_zip_pullback
+end
+cost_sre2_zip(V_array)
+gradient(cost_sre2_zip, V_array)[1]
+fg_sre2_zip = arrV -> withgrad_Riemannian(cost_sre2_zip, arrV, ogc)
+fg_sre2_zip(V_array)
+testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_sre2zip, innerMixed, retractMixed_ogc)
 
 
 
@@ -537,31 +607,29 @@ nU = 2;
 sites = siteinds("Qubit", N)
 psi = random_mps(ComplexF64, sites; linkdims = χ)
 orthogonalize!(psi, 1)
-psivec = psi[:]
 U_array = [random_unitary(4) for _ in 1:nU]
 
 
 # WORKS
-function cost_applyU(arrU::Vector{<:AbstractMatrix}, ψ::Vector{ITensor})
-    ψ2 = apply(arrU, ψ)
-    return real(inner(ψ, ψ2))
+function cost_applyU(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    ψ2 = apply_brickwork(arrU, ψ)
+    return real(sproduct(ψ, ψ2))
 end
-cost_applyU(U_array, psivec)
-cost_applyU_red = arrU -> cost_applyU(arrU, psivec)
+cost_applyU(U_array, psi)
+cost_applyU_red = arrU -> cost_applyU(arrU, psi)
 gradient(cost_applyU_red, U_array)
 fg_cost_applyU = arrU -> withgrad_Riemannian(cost_applyU_red, arrU)
 testGrad(() -> genUnitary(nU), genTanVec, fg_cost_applyU, inner, retract)
 
 
 # WORKS
-function cost_move_center(arrU::Vector{<:AbstractMatrix}, ψ::Vector{ITensor})
-    N = length(ψ)
-    ψ2 = apply(arrU, ψ)
-    ψ3 = move_center(ψ2, N, 1)
-    return real(inner(ψ, ψ3))
+function cost_move_center(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    ψ2 = apply_brickwork(arrU, ψ)
+    ψ3 = move_center(ψ2, 1)
+    return real(sproduct(ψ, ψ3))
 end
-cost_move_center(U_array, psivec)
-cost_move_center_red = arrU -> cost_move_center(arrU, psivec)
+cost_move_center(U_array, psi)
+cost_move_center_red = arrU -> cost_move_center(arrU, psi)
 gradient(cost_move_center_red, U_array)
 fg_cost_move_center = arrU -> withgrad_Riemannian(cost_move_center_red, arrU)
 testGrad(() -> genUnitary(nU), genTanVec, fg_cost_move_center, inner, retract)
@@ -569,51 +637,135 @@ testGrad(() -> genUnitary(nU), genTanVec, fg_cost_move_center, inner, retract)
 
 
 # WORKS
-function cost_pauli(arrU::Vector{<:AbstractMatrix}, ψ::Vector{ITensor})
+function cost_pauli(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
     N = length(ψ)
-    Uψ = apply(arrU, ψ)
+    Uψ = apply_brickwork(arrU, ψ)
     sites_pauli = siteinds(4, N)
-    Pψ = pauliMPS(ψ, 1; sites=sites_pauli)
-    PUψ = pauliMPS(Uψ, N; sites=sites_pauli, trunc=(atol=1e-12,))
-    return real(inner(Pψ, PUψ))
+    Pψ = get_pauli_mps(ψ; sites=sites_pauli)
+    PUψ = get_pauli_mps(Uψ; sites=sites_pauli, trunc=(atol=1e-12,))
+    return real(sproduct(Pψ, PUψ))
 end
-cost_pauli(U_array, psivec)
-cost_pauli_red = arrU -> cost_pauli(arrU, psivec)
+cost_pauli(U_array, psi)
+cost_pauli_red = arrU -> cost_pauli(arrU, psi)
 gradient(cost_pauli_red, U_array)
 fg_cost_pauli = arrU -> withgrad_Riemannian(cost_pauli_red, arrU)
 testGrad(() -> genUnitary(nU), genTanVec, fg_cost_pauli, inner, retract)
 
 
-# WORKS
-function cost_mpo(arrU::Vector{<:AbstractMatrix}, ψ::Vector{ITensor})
-    ψ = apply(arrU, ψ)
-    ψ2 = move_center(ψ, 4, 1)
-    ψ2 = apply(arrU, ψ2)
-    W = getMPO(ψ)
-    W2 = getMPO(ψ2)
-    return real(inner(W, W2))
+
+# WORKS, BUT WE ARE FORCED TO USE OUR CUSTOM CHAINRULE BECAUSE MPS NEED TO BE SUMMED
+# AS IF THEY WERE VECTORS OF ITENSORS
+function cost_product(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    ψ2 = apply_brickwork(arrU, ψ)
+    Pψ = get_pauli_mps(ψ2)
+    W = MPO(Pψ)
+    P2 = product(W, Pψ)
+    return real(sproduct(P2, P2))
 end
-cost_mpo(U_array, psivec)
-cost_mpo_red = arrU -> cost_mpo(arrU, psivec)
-gradient(cost_mpo_red, U_array)
-fg_cost_mpo = arrU -> withgrad_Riemannian(cost_mpo_red, arrU)
-testGrad(() -> genUnitary(nU), genTanVec, fg_cost_mpo, inner, retract)
+
+function ChainRulesCore.rrule(::typeof(cost_product), arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    ψ2, apply_brickwork_back = pullback(apply_brickwork, arrU, ψ)
+    Pψ, get_pauli_mps_pullback = pullback(get_pauli_mps, ψ2)
+    W, MPO_back = pullback(MPO, Pψ)
+    P2, product_back = pullback(product, W, Pψ)
+    res, sproduct_back = pullback(sproduct, P2, P2)
+    resreal, real_back = real(res), Δresreal -> (NoTangent(), Δresreal*(1.0+0.0im))
+
+    function cost_product_pullback(Δresreal)
+        _, Δres = real_back(Δresreal)
+
+        ΔP2_1, ΔP2_2 = sproduct_back(Δres)
+        @assert isa(ΔP2_1, MPS)
+        @assert isa(ΔP2_2, MPS)
+        ΔP2_vec = ΔP2_1[:] .+ ΔP2_2[:]
+        ΔP2 = MPS(ΔP2_vec)
+        reset_ortho_lims!(ΔP2)
+
+        ΔW, ΔPψ_1 = product_back(ΔP2)
+        @assert isa(ΔW, MPO)
+        @assert isa(ΔPψ_1, MPS)
+
+        ΔPψ_2 = MPO_back(ΔW)[1]
+        @assert isa(ΔPψ_2, MPS)
+
+        ΔPψ_vec = ΔPψ_1[:] .+ ΔPψ_2[:]
+        ΔPψ = MPS(ΔPψ_vec)
+        set_ortho_lims!(ΔPψ, ortho_lims(Pψ))
+
+        Δψ2 = get_pauli_mps_pullback(ΔPψ)[1]
+        @assert isa(Δψ2, MPS)
+
+        ΔarrU, Δψ = apply_brickwork_back(Δψ2)
+        @show typeof(ΔarrU)
+        @show typeof(Δψ)
+
+        return (NoTangent(), ΔarrU, NoTangent())
+    end
+    return resreal, cost_product_pullback
+end
+cost_product(U_array, psi)
+cost_product_red = arrU -> cost_product(arrU, psi)
+gradient(cost_product_red, U_array)
+fg_cost_product = arrU -> withgrad_Riemannian(cost_product_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_product, inner, retract)
 
 
-# 
-function cost_apply(arrU::Vector{<:AbstractMatrix}, ψ::Vector{ITensor})
-    N = length(ψ)
-    ψ2 = apply(arrU, ψ)
-    Pψ = pauliMPS(ψ2, N)
-    W = getMPO(Pψ)
-    P2 = apply(W, Pψ)
-    return real(inner(P2, P2))
+
+# WORKS, BUT WE ARE FORCED TO USE OUR CUSTOM CHAINRULE BECAUSE MPS NEED TO BE SUMMED
+# AS IF THEY WERE VECTORS OF ITENSORS
+function cost_zipup(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    ψ2 = apply_brickwork(arrU, ψ)
+    Pψ = get_pauli_mps(ψ2)
+    W = MPO(Pψ)
+    P2 = zipup(W, Pψ)
+    return real(sproduct(P2, P2))
 end
-cost_apply(U_array, psivec)
-cost_apply_red = arrU -> cost_apply(arrU, psivec)
-gradient(cost_apply_red, U_array)
-fg_cost_apply = arrU -> withgrad_Riemannian(cost_apply_red, arrU)
-testGrad(() -> genUnitary(nU), genTanVec, fg_cost_apply, inner, retract)
+
+function ChainRulesCore.rrule(::typeof(cost_zipup), arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    ψ2, apply_brickwork_back = pullback(apply_brickwork, arrU, ψ)
+    Pψ, get_pauli_mps_pullback = pullback(get_pauli_mps, ψ2)
+    W, MPO_back = pullback(MPO, Pψ)
+    P2, zipup_back = pullback(zipup, W, Pψ)
+    res, sproduct_back = pullback(sproduct, P2, P2)
+    resreal, real_back = real(res), Δresreal -> (NoTangent(), Δresreal*(1.0+0.0im))
+
+    function cost_zipup_pullback(Δresreal)
+        _, Δres = real_back(Δresreal)
+
+        ΔP2_1, ΔP2_2 = sproduct_back(Δres)
+        @assert isa(ΔP2_1, MPS)
+        @assert isa(ΔP2_2, MPS)
+        ΔP2_vec = ΔP2_1[:] .+ ΔP2_2[:]
+        ΔP2 = MPS(ΔP2_vec)
+        set_ortho_lims!(ΔP2, ortho_lims(P2))
+
+        ΔW, ΔPψ_1 = zipup_back(ΔP2)
+        @assert isa(ΔW, MPO)
+        @assert isa(ΔPψ_1, MPS)
+
+        ΔPψ_2 = MPO_back(ΔW)[1]
+        @assert isa(ΔPψ_2, MPS)
+
+        ΔPψ_vec = ΔPψ_1[:] .+ ΔPψ_2[:]
+        ΔPψ = MPS(ΔPψ_vec)
+        set_ortho_lims!(ΔPψ, ortho_lims(Pψ))
+
+        Δψ2 = get_pauli_mps_pullback(ΔPψ)[1]
+        @assert isa(Δψ2, MPS)
+
+        ΔarrU, Δψ = apply_brickwork_back(Δψ2)
+        @show typeof(ΔarrU)
+        @show typeof(Δψ)
+
+        return (NoTangent(), ΔarrU, NoTangent())
+    end
+    return resreal, cost_zipup_pullback
+end
+cost_zipup(U_array, psi)
+cost_zipup_red = arrU -> cost_zipup(arrU, psi)
+gradient(cost_zipup_red, U_array)
+fg_cost_zipup = arrU -> withgrad_Riemannian(cost_zipup_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_zipup, inner, retract)
 
 
 
