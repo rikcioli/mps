@@ -42,6 +42,28 @@ function bralinks(ψ::T) where {T<:Union{MPS, MPO}}
     return ψ
 end
 
+"Replace linkinds with new ones"
+function replace_linkinds(ψ::T; newlinks=nothing) where {T<:Union{MPS,MPO}}
+    ψ = copy(ψ)
+    N = length(ψ)
+    links = linkinds(ψ)
+
+    if isnothing(newlinks)
+        newlinks = [Index(links[j].space, "Link, l=$(j)") for j in 1:N-1]
+    else
+        @assert length(newlinks) == N-1
+    end
+
+    @preserve_ortho (ψ) begin
+        ψ[1] = replaceind(ψ[1], links[1], newlinks[1])
+        for j in 2:N-1
+            ψ[j] = replaceinds(ψ[j], links[j-1:j], newlinks[j-1:j])
+        end
+        ψ[N] = replaceind(ψ[N], links[N-1], newlinks[N-1])
+    end
+    return ψ
+end
+
 function is_orthogonal(psi::Vector{ITensor}, ogc::Int)
     N = length(psi)
     links = linkinds(psi)
@@ -869,6 +891,10 @@ end
 
 
 function ITensorMPS.MPO(ψ::MPS)
+    isog = isortho(ψ)
+    ψ = replace_linkinds(ψ)
+    isog && @assert isortho(ψ)
+    
     N = length(ψ)
     sites = siteinds(ψ)
     ψmpo = [delta(sites[j], sites[j]', sites[j]'')*ψ[j] for j in 1:N]
@@ -879,6 +905,11 @@ function ITensorMPS.MPO(ψ::MPS)
 end
 
 function ChainRulesCore.rrule(::typeof(ITensorMPS.MPO), ψ::MPS)
+    isog = isortho(ψ)
+    oldlinks = linkinds(ψ)
+    ψ = replace_linkinds(ψ)
+    isog && @assert isortho(ψ)
+
     N = length(ψ)
     sites = siteinds(ψ)
     ψmpo = [delta(sites[j], sites[j]', sites[j]'')*ψ[j] for j in 1:N]
@@ -893,6 +924,7 @@ function ChainRulesCore.rrule(::typeof(ITensorMPS.MPO), ψ::MPS)
         Δψ = MPS(Δψ_vec)
         set_ortho_lims!(Δψ, ogc:ogc)
 
+        Δψ = replace_linkinds(Δψ; newlinks=oldlinks)
         return (NoTangent(), Δψ)
     end
     return ψf, MPO_pullback
@@ -910,22 +942,9 @@ function _apply(A::Union{MPS,MPO,Vector{ITensor}}, B::Union{MPS,MPO,Vector{ITens
     return AB
 end
 
-"Replace linkinds with new ones"
-function new_linkinds(ψ::T) where {T<:Union{MPS,MPO}}
-    N = length(ψ)
-    links = linkinds(ψ)
-    newlinks = [Index(links[j].space, "Link, l=$(j)") for j in 1:N-1]
-
-    ψ1 = replaceind(ψ[1], links[1], newlinks[1])
-    ψB = [replaceinds(ψ[j], links[j-1:j], newlinks[j-1:j]) for j in 2:N-1]
-    ψN = replaceind(ψ[N], links[N-1], newlinks[N-1])
-    return T([ψ1; ψB; ψN])
-end
-
 
 function product(W::MPO, ψ::MPS)
     N = length(ψ)
-    W = bralinks(W)
 
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
@@ -954,7 +973,6 @@ end
 
 function ChainRulesCore.rrule(::typeof(product), W::MPO, ψ::MPS)
     N = length(ψ)
-    W = bralinks(W)
 
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
@@ -990,7 +1008,6 @@ function ChainRulesCore.rrule(::typeof(product), W::MPO, ψ::MPS)
         set_ortho_lims!(Δψ, ortho_lims(ψ))
 
         ΔW_vec = ΔWψ .* dag.(ψ)[:]
-        ΔW_vec = map(T -> removetags(T, "bra"), ΔW_vec)
         ΔW = MPO(ΔW_vec)
         set_ortho_lims!(ΔW, ortho_lims(W))
         
@@ -1000,6 +1017,49 @@ function ChainRulesCore.rrule(::typeof(product), W::MPO, ψ::MPS)
     return Wψ, product_pullback
 end
 
+
+
+function zipup(W::MPO, ψ::MPS)
+    N = length(ψ)
+    W = bralinks(W)
+    ψ = move_center(ψ, N)
+
+    ψbra = dag.(bra.(ψ))
+
+    if !haskey(trunc, :atol)    # adds an eps() tolerance if not present
+        trunc = (trunc..., atol=eps())
+    end
+
+    # Build compressed Pauli MPS iteratively from left
+    # bra is conjugated tensor in pauli mps, prime is conjugated Pauli mps
+    d = 2
+    sites_pauli_mps = isnothing(sites) ? siteinds(d^2, N) : sites 
+    sites = siteinds(ψ)
+    
+    Ps = get_Ps()
+    Pten1 = ITensor(Ps/sqrt(2), sites_pauli_mps[1], bra(sites[1]), sites[1])
+
+    errs = Float64[]    # store truncation errors
+    Pψ_vec = Array{ITensor, 1}(undef, N)    # store tensors that make the final Pauli mps
+    Pψ_vec[1] = ψbra[1]*Pten1*ψ[1]
+
+    for j in 1:N-1    
+        Bp = Pψ_vec[j]
+        Pten = ITensor(Ps/sqrt(2), sites_pauli_mps[j+1], bra(sites[j+1]), sites[j+1])
+
+        linds = j>1 ? (sites_pauli_mps[j], commonind(Pψ_vec[j-1], Bp)) : (sites_pauli_mps[j],) 
+        tensors = [Bp, ψ[j+1], ψbra[j+1], Pten]
+
+        Up, Rp = SVDcontract(tensors, linds; move_ogc=:right, trunc)
+        Pψ_vec[j] = Up
+        Pψ_vec[j+1] = Rp
+    end
+
+    post_factorize_callback(errs)
+    Pψ = MPS(Pψ_vec)
+    set_ortho_lims!(Pψ, N:N)
+
+end
 
 
 function FWHT!(v)
