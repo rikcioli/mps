@@ -124,6 +124,7 @@ end
 Removes the :maxrank key in trunc if present, and returns an array maxranks such that
 maxranks[j] = min(trunc(:maxrank), dims[j])"
 function adapt_truncarg(trunc::NamedTuple, dims::Vector{<:Int})
+    N = length(dims)+1
     maxranks = dims
     if haskey(trunc, :maxrank)
         kwarg_maxrank = trunc[:maxrank]
