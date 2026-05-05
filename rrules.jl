@@ -303,7 +303,7 @@ end
 "Contracts all the tensors in a Vector{ITensor} in order
 and computes a truncated SVD of the result with the left indices specified by linds.
 Also returns truncation error."
-function SVDcontract(tensors::Vector{ITensor}, linds; move_ogc=:right, kargs...)
+function SVDcontract(tensors::Vector{ITensor}, linds::Tuple{Vararg{Index}}; move_ogc=:right, kargs...)
     tensors = copy(tensors)
     M_ten = tensors[1]
     for ten in tensors[2:end]
@@ -330,7 +330,11 @@ function SVDcontract(tensors::Vector{ITensor}, linds; move_ogc=:right, kargs...)
     return ((M1_ten, M2_ten), err)
 end
 
-function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{ITensor}, linds; move_ogc=:right, kargs...)
+function SVDcontract(tensors::Vector{ITensor}, linds::AbstractVector{<:Index}; kwargs...)
+    return SVDcontract(tensors, tuple(linds); kwargs...)
+end
+
+function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{ITensor}, linds::Tuple{Vararg{Index}}; move_ogc=:right, kargs...)
     tensors = copy(tensors)
     prods = cumprod(tensors)
     M_ten = prods[end]
@@ -741,10 +745,8 @@ function zipup(W::MPO, ψ::MPS; trunc=NamedTuple(), post_factorize_callback = id
     ψ = move_center(ψ, N)
     W = move_center(W, N)
 
-    if !haskey(trunc, :atol)    # adds an eps() tolerance if not present
-        trunc = (trunc..., atol=eps())
-    end
 
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
 
@@ -755,7 +757,7 @@ function zipup(W::MPO, ψ::MPS; trunc=NamedTuple(), post_factorize_callback = id
         linds = (Wlinks[j-1], ψlinks[j-1])
         tensors = j<N ? [Lten, ψ[j], W[j]] : [ψ[j], W[j]]
 
-        (Lten, V), err = SVDcontract(tensors, linds; move_ogc=:left, trunc)
+        (Lten, V), err = SVDcontract(tensors, linds; move_ogc=:left, trunc=(trunc..., maxrank=maxranks[j-1]))
         push!(errs, err)
         Wψ_vec[j] = V
     end
@@ -773,9 +775,7 @@ function ChainRulesCore.rrule(::typeof(zipup), W::MPO, ψ::MPS; trunc=NamedTuple
     ψ, move_center_back_ψ = Zygote.pullback(move_center, ψ, N)
     W, move_center_back_W = Zygote.pullback(move_center, W, N)
 
-    if !haskey(trunc, :atol)    # adds an eps() tolerance if not present
-        trunc = (trunc..., atol=eps())
-    end
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
 
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
@@ -788,7 +788,7 @@ function ChainRulesCore.rrule(::typeof(zipup), W::MPO, ψ::MPS; trunc=NamedTuple
         linds = (Wlinks[j-1], ψlinks[j-1])
         tensors = j<N ? [Lten, ψ[j], W[j]] : [ψ[j], W[j]]
 
-        SVDcontract_j = (tens, leftinds) -> SVDcontract(tens, leftinds; move_ogc=:left, trunc)
+        SVDcontract_j = (tens, leftinds) -> SVDcontract(tens, leftinds; move_ogc=:left, trunc=(trunc..., maxrank=maxranks[j-1]))
         ((Lten, V), err), back_j = Zygote.pullback(SVDcontract_j, tensors, linds)
         push!(errs, err)
         push!(backs, back_j)
@@ -843,9 +843,7 @@ function get_pauli_mps(ψ::MPS; trunc=NamedTuple(), sites=nothing, post_factoriz
     ψ = move_center(ψ, 1)
     ψbra = dag.(bra.(ψ))
 
-    if !haskey(trunc, :atol)    # adds an eps() tolerance if not present
-        trunc = (trunc..., atol=eps())
-    end
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ).^2)
 
     # Build compressed Pauli MPS iteratively from left
     # bra is conjugated tensor in pauli mps, prime is conjugated Pauli mps
@@ -867,7 +865,7 @@ function get_pauli_mps(ψ::MPS; trunc=NamedTuple(), sites=nothing, post_factoriz
         linds = j>1 ? (sites_pauli_mps[j], commonind(Pψ_vec[j-1], Bp)) : (sites_pauli_mps[j],) 
         tensors = [Bp, ψ[j+1], ψbra[j+1], Pten]
 
-        (Up, Rp), err = SVDcontract(tensors, linds; move_ogc=:right, trunc)
+        (Up, Rp), err = SVDcontract(tensors, linds; move_ogc=:right, trunc=(trunc..., maxrank=maxranks[j]))
         Pψ_vec[j] = Up
         Pψ_vec[j+1] = Rp
     end
@@ -884,9 +882,7 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
     ψ, move_center_back = Zygote.pullback(move_center, ψ, 1)
     ψbra = dag.(bra.(ψ))
 
-    if !haskey(trunc, :atol)    # adds an eps() tolerance if not present
-        trunc = (trunc..., atol=eps())
-    end
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ).^2)
 
     # Build compressed Pauli MPS iteratively from left
     # bra is conjugated tensor in pauli mps, prime is conjugated Pauli mps
@@ -909,7 +905,7 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
         linds = j>1 ? (sites_pauli_mps[j], commonind(Pψ_vec[j-1], Bp)) : (sites_pauli_mps[j],) 
         tensors = [Bp, ψ[j+1], ψbra[j+1], Pten]
         
-        SVDcontract_j = (tensors, leftinds) -> SVDcontract(tensors, leftinds; move_ogc=:right, trunc)
+        SVDcontract_j = (tensors, leftinds) -> SVDcontract(tensors, leftinds; move_ogc=:right, trunc=(trunc..., maxrank=maxranks[j]))
         ((Up, Rp), err), back_j = Zygote.pullback(SVDcontract_j, tensors, linds)
         push!(backs, back_j)
         push!(errs, err)

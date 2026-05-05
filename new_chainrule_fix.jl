@@ -6,7 +6,9 @@ using Zygote
 using Plots
 using ChainRulesCore
 using Test
+using Logging
 
+Logging.disable_logging(Logging.Warn)
 
 "Returns bond dimension of link connecting sites j and j+1"
 function bonddim(N::Int, χ::Int, j::Int)
@@ -279,64 +281,6 @@ end
 
 
 
-# CHECK SCALING WITH N
-Nrange = 4:2:50
-results = let cost = cost, Nrange=Nrange
-    χ = 8; ogc = 1 
-    ftimes = Float64[]
-    gtimes = Float64[]
-    for N in Nrange
-        ftime_N = Float64[]
-        gtime_N = Float64[]
-        for _ in 1:100
-            V_array = genPoint(N, χ, ogc)
-            ftime = @elapsed cost(V_array, ogc)
-            gtime = @elapsed gradient(cost, V_array, ogc)
-            push!(ftime_N, ftime)
-            push!(gtime_N, gtime)
-        end
-        push!(ftimes, sum(ftime_N)/100)
-        push!(gtimes, sum(gtime_N)/100)
-    end
-    ftimes, gtimes
-end
-
-Plots.plot(xlabel="N", ylabel="t (s)")
-Plots.plot(Nrange, results[1], label="tf")
-Plots.plot!(Nrange, results[2], label="tg")
-
-
-# CHECK SCALING WITH Chi
-chirange = 2 .^(1:8)
-results = let cost = cost, chirange=chirange
-    N = 50; ogc = 1 
-    ftimes = Float64[]
-    gtimes = Float64[]
-    for χ in chirange
-        @show χ
-        ftime_χ = Float64[]
-        gtime_χ = Float64[]
-        for _ in 1:100
-            V_array = genPoint(N, χ, ogc)
-            ftime = @elapsed cost(V_array, ogc)
-            gtime = @elapsed gradient(cost, V_array, ogc)
-            push!(ftime_χ, ftime)
-            push!(gtime_χ, gtime)
-        end
-        push!(ftimes, sum(ftime_χ)/100)
-        push!(gtimes, sum(gtime_χ)/100)
-    end
-    ftimes, gtimes    
-end
-
-Plots.plot(xlabel="chi", ylabel="t (s)")
-Plots.plot!(chirange, results[1], label="tf")
-Plots.plot!(chirange, results[2], label="tg")
-Plots.plot!(chirange, 3e-5*chirange, yscale=:log10, xscale=:log10, label="O(chi)")
-Plots.plot!(chirange, 1e-5*chirange .^2, yscale=:log10, xscale=:log10, label="O(chi^2)")
-Plots.plot!(chirange, 1e-7*chirange .^3, yscale=:log10, xscale=:log10, label="O(chi^3)", legend=:bottomright)
-
-
 
 # GRADIENT OF ISOMETRIES
 N = 4; χ = 2; ogc = 3
@@ -459,11 +403,10 @@ testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_product, i
 
 
 # GRADIENT OF SRE2 
-function cost_sre2_product(arrV::Vector{<:AbstractArray})
+function cost_sre2_product(arrV::Vector{<:AbstractArray}, ogc::Int; trunc_pauli = NamedTuple())
     N = length(arrV)
-    ogc = 3
     psi = MPS(arrV, ogc)
-    Ppsi = get_pauli_mps(psi)
+    Ppsi = get_pauli_mps(psi; trunc=trunc_pauli)
     Pmpo = MPO(Ppsi)
     contr = product(Pmpo, Ppsi)
     res = -log2(real(sproduct(contr, contr)))-N
@@ -472,11 +415,10 @@ end
 
 # WORKS, BUT WE ARE FORCED TO USE OUR CUSTOM CHAINRULE BECAUSE MPS NEED TO BE SUMMED
 # AS IF THEY WERE VECTORS OF ITENSORS
-function ChainRulesCore.rrule(::typeof(cost_sre2_product), arrV::Vector{<:AbstractArray})
+function ChainRulesCore.rrule(::typeof(cost_sre2_product), arrV::Vector{<:AbstractArray}, ogc::Int; trunc_pauli = NamedTuple())
     N = length(arrV)
-    ogc = 3
     psi, MPS_back = pullback(MPS, arrV, ogc)
-    Ppsi, get_pauli_mps_pullback = pullback(get_pauli_mps, psi)
+    Ppsi, get_pauli_mps_pullback = pullback(mps -> get_pauli_mps(mps; trunc=trunc_pauli), psi)
     Pmpo, MPO_back = pullback(MPO, Ppsi)
     contr, product_back = pullback(product, Pmpo, Ppsi)
     res, sproduct_back = pullback(sproduct, contr, contr)
@@ -509,76 +451,139 @@ function ChainRulesCore.rrule(::typeof(cost_sre2_product), arrV::Vector{<:Abstra
 
         ΔarrV, _ = MPS_back(Δpsi)
 
-        return (NoTangent(), ΔarrV)
+        return (NoTangent(), ΔarrV, NoTangent())
     end
     return m2, cost_sre2_pullback
 end
-cost_sre2_product(V_array)
-gradient(cost_sre2_product, V_array)[1]
-fg_sre2 = arrV -> withgrad_Riemannian(cost_sre2_product, arrV, ogc)
+cost_sre2_product(V_array, ogc)
+gradient(cost_sre2_product, V_array, ogc)[1]
+fg_sre2 = arrV -> withgrad_Riemannian(cost_sre2_product, arrV, ogc, ogc)
 fg_sre2(V_array)
 testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_sre2, innerMixed, retractMixed_ogc)
 
 
 # GRADIENT OF SRE2 WITH zipup
-function cost_sre2_zip(arrV::Vector{<:AbstractArray})
+function cost_sre2_zip(arrV::Vector{<:AbstractArray}, ogc::Int; trunc_pauli = NamedTuple(), trunc_zip = NamedTuple())
     N = length(arrV)
-    ogc = 3
-    psi = MPS(arrV, ogc)
-    Ppsi = get_pauli_mps(psi)
-    Pmpo = MPO(Ppsi)
-    contr = zipup(Pmpo, Ppsi)
-    res = -log2(real(sproduct(contr, contr))) - N
+    ψ = MPS(arrV, ogc)
+    Pψ = get_pauli_mps(ψ; trunc = trunc_pauli)
+    W = MPO(Pψ)
+    WP = zipup(W, Pψ; trunc = trunc_zip)
+    res = -log2(real(sproduct(WP, WP))) - N
     return res
 end
 
 # WORKS, BUT WE ARE FORCED TO USE OUR CUSTOM CHAINRULE BECAUSE MPS NEED TO BE SUMMED
 # AS IF THEY WERE VECTORS OF ITENSORS
-function ChainRulesCore.rrule(::typeof(cost_sre2_zip), arrV::Vector{<:AbstractArray})
-    ogc = 3
-    psi, MPS_back = pullback(MPS, arrV, ogc)
-    Ppsi, get_pauli_mps_pullback = pullback(get_pauli_mps, psi)
-    Pmpo, MPO_back = pullback(MPO, Ppsi)    # at this point Ppsi and Pmpo have same ortho lims
-    contr, zipup_back = pullback(zipup, Pmpo, Ppsi)
-    res, sproduct_back = pullback(sproduct, contr, contr)
+function ChainRulesCore.rrule(::typeof(cost_sre2_zip), arrV::Vector{<:AbstractArray}, ogc::Int; trunc_pauli = NamedTuple(), trunc_zip = NamedTuple())
+    ψ, MPS_back = pullback(MPS, arrV, ogc)
+    Pψ, get_pauli_mps_pullback = pullback(psi -> get_pauli_mps(psi; trunc=trunc_pauli), ψ)
+    W, MPO_back = pullback(MPO, Pψ)    # at this point Pψ and W have same ortho lims
+    WP, zipup_back = pullback((mpo, mps) -> zipup(mpo, mps; trunc=trunc_zip), W, Pψ)
+    res, sproduct_back = pullback(sproduct, WP, WP)
     
     m2, m2_back = -log2(real(res))-N, Δm2 -> (NoTangent(), -Δm2/(log(2)*real(res)))
 
     function cost_sre2_zip_pullback(Δm2)
         _, Δres = m2_back(Δm2)
 
-        Δcontr1, Δcontr2 = sproduct_back(Δres)
-        @assert isa(Δcontr1, MPS)
-        @assert isa(Δcontr2, MPS)
-        Δcontr_vec = Δcontr1[:] .+ Δcontr2[:]
-        Δcontr = MPS(Δcontr_vec)
-        set_ortho_lims!(Δcontr, ortho_lims(contr))
+        ΔWP_1, ΔWP_2 = sproduct_back(Δres)
+        @assert isa(ΔWP_1, MPS)
+        @assert isa(ΔWP_2, MPS)
+        ΔWP_vec = ΔWP_1[:] .+ ΔWP_2[:]
+        ΔWP = MPS(ΔWP_vec)
+        set_ortho_lims!(ΔWP, ortho_lims(WP))
 
-        ΔPmpo, ΔPpsi = zipup_back(Δcontr)
-        @assert isa(ΔPmpo, MPO)
-        @assert isa(ΔPpsi, MPS)
+        ΔW, ΔPψ_1 = zipup_back(ΔWP)
+        @assert isa(ΔW, MPO)
+        @assert isa(ΔPψ_1, MPS)
 
-        ΔPpsi2 = MPO_back(ΔPmpo)[1]
-        @assert isa(ΔPpsi2, MPS)
+        ΔPψ_2 = MPO_back(ΔW)[1]
+        @assert isa(ΔPψ_2, MPS)
 
-        ΔPpsi_vec = ΔPpsi[:] .+ ΔPpsi2[:]
-        ΔPpsi = MPS(ΔPpsi_vec)
-        set_ortho_lims!(ΔPpsi, ortho_lims(Ppsi))
+        ΔPψ_vec = ΔPψ_1[:] .+ ΔPψ_2[:]
+        ΔPψ = MPS(ΔPψ_vec)
+        set_ortho_lims!(ΔPψ, ortho_lims(Pψ))
+        Δψ = get_pauli_mps_pullback(ΔPψ)[1]
+        @assert isa(Δψ, MPS)
 
-        Δpsi = get_pauli_mps_pullback(ΔPpsi)[1]
-        @assert isa(Δpsi, MPS)
+        ΔarrV, _ = MPS_back(Δψ)
 
-        ΔarrV, _ = MPS_back(Δpsi)
-
-        return (NoTangent(), ΔarrV)
+        return (NoTangent(), ΔarrV, NoTangent())
     end
     return m2, cost_sre2_zip_pullback
+end
+function cost_sre2_zip(arrV)
+    return cost_sre2_zip(arrV, ogc; trunc_pauli=(atol=1e-6,), trunc_zip=(atol=1e-6,))
 end
 cost_sre2_zip(V_array)
 gradient(cost_sre2_zip, V_array)[1]
 fg_sre2_zip = arrV -> withgrad_Riemannian(cost_sre2_zip, arrV, ogc)
 fg_sre2_zip(V_array)
-testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_sre2zip, innerMixed, retractMixed_ogc)
+testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_sre2_zip, innerMixed, retractMixed_ogc)
+
+
+
+
+
+# CHECK SCALING WITH N
+Nrange = 4:2:50
+results = let cost = cost, Nrange=Nrange
+    χ = 2; ogc = 1 
+    ftimes = Float64[]
+    gtimes = Float64[]
+    for N in Nrange
+        ftime_N = Float64[]
+        gtime_N = Float64[]
+        for _ in 1:100
+            V_array = genPoint(N, χ, ogc)
+            ftime = @elapsed cost(V_array, ogc)
+            gtime = @elapsed gradient(cost, V_array, ogc)
+            push!(ftime_N, ftime)
+            push!(gtime_N, gtime)
+        end
+        push!(ftimes, sum(ftime_N)/100)
+        push!(gtimes, sum(gtime_N)/100)
+    end
+    ftimes, gtimes
+end
+
+Plots.plot(xlabel="N", ylabel="t (s)")
+Plots.plot(Nrange, results[1], label="tf")
+Plots.plot!(Nrange, results[2], label="tg")
+
+
+# CHECK SCALING WITH Chi
+chirange = 2 .^(1:4)
+results = let cost = cost_sre2_zip, chirange=chirange
+    N = 30; ogc = 1 
+    ftimes = Float64[]
+    gtimes = Float64[]
+    for χ in chirange
+        @show χ
+        ftime_χ = Float64[]
+        gtime_χ = Float64[]
+        cost_red = (arr, ogc) -> cost(arr, ogc; trunc_pauli=(maxrank=χ,), trunc_zip=(maxrank=2*χ,))
+        for _ in 1:100
+            V_array = genPoint(N, χ, ogc)
+            ftime = @elapsed cost_red(V_array, ogc)
+            gtime = @elapsed gradient(cost_red, V_array, ogc)
+            push!(ftime_χ, ftime)
+            push!(gtime_χ, gtime)
+        end
+        push!(ftimes, sum(ftime_χ)/100)
+        push!(gtimes, sum(gtime_χ)/100)
+    end
+    ftimes, gtimes    
+end
+
+Plots.plot(xlabel="chi", ylabel="t (s)")
+Plots.plot!(chirange, results[1], label="tf")
+Plots.plot!(chirange, results[2], label="tg")
+Plots.plot!(chirange, 1e-7*chirange .^4, yscale=:log10, xscale=:log10, label="O(chi^4)", legend=:bottomright)
+Plots.plot!(chirange, 1e-8*chirange .^5, yscale=:log10, xscale=:log10, label="O(chi^5)")
+
+
 
 
 
