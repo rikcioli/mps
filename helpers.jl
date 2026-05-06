@@ -24,32 +24,54 @@ end
 
 
 ### FUNCTIONS TO REPLACE LINKINDS
-
-bra(T) = addtags(T,"bra")
 ITensorMPS.siteinds(ψ::Vector{ITensor}) = siteinds(MPS(ψ))
 ITensorMPS.linkinds(ψ::Vector{ITensor}) = linkinds(MPS(ψ))
 ITensorMPS.linkdims(ψ::Vector{ITensor}) = linkdims(MPS(ψ))
 
-function bralinks(ψ::Vector{ITensor})
-    N = length(ψ)
-    ψ = copy(ψ)
-    links = linkinds(ψ)
-    blinks = bra.(links)
-    ψ[1] = replaceind(ψ[1], links[1], blinks[1])
-    for j in 2:N-1
-        ψ[j] = replaceinds(ψ[j], links[j-1:j], blinks[j-1:j])
+function bra(ψ::Union{MPS, MPO, Vector{<:ITensor}})
+    oldinds = vcat(siteinds(ψ), linkinds(ψ))
+    newinds = addtags.(sim(oldinds), "bra")
+
+    ψbra = dag.(copy(ψ))
+    for ten in ψbra
+        replaceinds!(ten, oldinds, newinds)
     end
-    ψ[N] = replaceind(ψ[N], links[N-1], blinks[N-1])
-    return ψ
+
+    function unbra(ψbra::T)::T where {T<:Union{MPS, MPO, Vector{<:ITensor}, ITensor}} # useful to unbra single tensors
+        ψ = dag.(copy(ψbra))
+        if T <: ITensor
+            replaceinds!(ψ, newinds, oldinds)
+        else
+            for ten in ψ
+                replaceinds!(ten, newinds, oldinds)
+            end
+        end
+        return ψ
+    end
+    return ψbra, unbra
 end
 
-function bralinks(ψ::T) where {T<:Union{MPS, MPO}}
-    olims = ortho_lims(ψ)
-    ψ_vec = bralinks(ψ[:])
-    ψ = T(ψ_vec)
-    set_ortho_lims!(ψ, olims)
-    return ψ
-end
+
+#function bralinks(ψ::Vector{ITensor})
+#    N = length(ψ)
+#    ψ = copy(ψ)
+#    links = linkinds(ψ)
+#    blinks = bra.(links)
+#    ψ[1] = replaceind(ψ[1], links[1], blinks[1])
+#    for j in 2:N-1
+#        ψ[j] = replaceinds(ψ[j], links[j-1:j], blinks[j-1:j])
+#    end
+#    ψ[N] = replaceind(ψ[N], links[N-1], blinks[N-1])
+#    return ψ
+#end
+
+# function bralinks(ψ::T) where {T<:Union{MPS, MPO}}
+#     olims = ortho_lims(ψ)
+#     ψ_vec = bralinks(ψ[:])
+#     ψ = T(ψ_vec)
+#     set_ortho_lims!(ψ, olims)
+#     return ψ
+# end
 
 "Replace linkinds with new ones"
 function replace_linkinds(ψ::T; newlinks=nothing) where {T<:Union{MPS,MPO}}
@@ -70,6 +92,26 @@ function replace_linkinds(ψ::T; newlinks=nothing) where {T<:Union{MPS,MPO}}
         end
         ψ[N] = replaceind(ψ[N], links[N-1], newlinks[N-1])
     end
+    return ψ
+end
+
+"Replace linkinds with new ones"
+function replace_linkinds(ψ::Vector{<:ITensor}; newlinks=nothing)
+    ψ = copy(ψ)
+    N = length(ψ)
+    links = linkinds(ψ)
+
+    if isnothing(newlinks)
+        newlinks = [Index(links[j].space, "Link, l=$(j)") for j in 1:N-1]
+    else
+        @assert length(newlinks) == N-1
+    end
+
+    ψ[1] = replaceind(ψ[1], links[1], newlinks[1])
+    for j in 2:N-1
+        ψ[j] = replaceinds(ψ[j], links[j-1:j], newlinks[j-1:j])
+    end
+    ψ[N] = replaceind(ψ[N], links[N-1], newlinks[N-1])
     return ψ
 end
 

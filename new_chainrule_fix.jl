@@ -1,3 +1,4 @@
+using MKL
 include("rrules.jl")
 include("optFunctions.jl")
 using ITensors, ITensorMPS
@@ -8,7 +9,7 @@ using ChainRulesCore
 using Test
 using Logging
 
-Logging.disable_logging(Logging.Warn)
+#Logging.disable_logging(Logging.Warn)
 
 "Returns bond dimension of link connecting sites j and j+1"
 function bonddim(N::Int, χ::Int, j::Int)
@@ -176,7 +177,7 @@ function applyBW(U_array::Vector{<:AbstractMatrix}, psi::MPS)
     return psi
 end
 
-function applyED(Uvec, ψ, N, depth)
+function applyED(Uvec::Vector{<:AbstractMatrix}, ψ::AbstractVector, N::Int, depth::Int)
     j=1
     for i in 1:depth
         if isodd(i)
@@ -270,20 +271,24 @@ end
 
 @test test_genPoint()
 @test test_MPS()
+#@code_warntype test_MPS()
 @test test_move_center()
+#@code_warntype test_move_center()
 @test test_move2()
-
+#@code_warntype test_move2()
 @test test_applyED()
 @test test_apply_brickwork()
+#@code_warntype test_apply_brickwork()
 
 @test test_sre2(sre2)
+#@code_warntype test_sre2(sre2)
 @test test_sre2(sre2zip)
-
+@code_warntype test_sre2(sre2zip)
 
 
 
 # GRADIENT OF ISOMETRIES
-N = 4; χ = 2; ogc = 3
+N = 4; χ = 4; ogc = 3
 V_array = genPoint(N, χ, ogc)
 
 withgrad_Riemannian = (func, arrV, ogc, args...) -> begin
@@ -301,7 +306,6 @@ end
 W_array = genPoint(N, χ, ogc)
 psiW = MPS(W_array, ogc)
 function cost_sproduct(arrV::Vector{<:AbstractArray})
-    ogc = 3
     psiV = MPS(arrV, ogc; sites = siteinds(psiW))
     return real(sproduct(psiW, psiV))
 end
@@ -313,37 +317,138 @@ fg_sproduct(V_array)
 testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_sproduct, innerMixed, retractMixed_ogc)
 
 
-# GRADIENT OF SVDcontract WORKS
+# GRADIENT OF SVDcontract DOESNT SEEM TO WORK WHEN BRA IS INVOLVED
 function cost_SVDcontract(arrV::Vector{<:AbstractArray})
-    psi = vec(MPS(arrV, ogc))
+    N = length(arrV)
+    n = div(N,2)
+    psi = toITensors(arrV, ogc)
+    psibra, unbra = bra(psi)
+
     sites = siteinds(psi)
-    linds = (sites[1],)
-    (U, R), eps = SVDcontract(psi, linds)
-    newpsi = [U, R]
-    return real(sproduct(newpsi, newpsi))
+    links = linkinds(psi)
+    brasites = siteinds(psibra)
+    bralinks = linkinds(psibra)
+
+
+    Tn = delta(sites[n], brasites[n])*psi[n]*psibra[n]
+    linds = [links[n-1], bralinks[n-1]]
+    tensors = [Tn, psi[n+1], psibra[n+1], delta(sites[n+1], brasites[n+1])]
+    ((U, R), eps), _ = SVDcontract(tensors, linds)
+    
+    state = [U, R]
+    return real(sproduct(state, dag.(state)))
+end
+
+function ChainRulesCore.rrule(::typeof(cost_SVDcontract), arrV::Vector{<:AbstractArray})
+    N = length(arrV)
+    n = div(N,2)
+    psi, backten = pullback(toITensors, arrV, ogc)
+    psibra, unbra = bra(psi)
+
+    sites = siteinds(psi)
+    links = linkinds(psi)
+    bralinks = linkinds(psibra)
+    brasites = siteinds(psibra)
+
+    Tn = psi[n]*delta(sites[n], brasites[n])*psibra[n]
+    linds = [links[n-1], bralinks[n-1]]
+    tensors = [Tn, psi[n+1], psibra[n+1], delta(sites[n+1], brasites[n+1])]
+    ((U, R), eps), tape = SVDcontract(tensors, linds)
+    
+    state = [U, R]
+    res, backsprod = pullback(sproduct, state, dag.(state))
+
+    function cost_SVDcontract_pullback(Δres)
+        Δres*=1.0+0.0im
+        Δstate, Δstate_dg = backsprod(Δres)
+        Δstate = 2*Δstate   # CHECKED, THIS IS CORRECT
+        (ΔTn, Δpsi_np1, Δpsibra_np1, _) = SVDcontract_pullback(Δstate, tape)
+
+        Δpsi_np1 = 2*Δpsi_np1   # CHECKED, THIS IS CORRECT
+        Δpsi_n = 2*ΔTn*delta(sites[n], brasites[n])*dag(psibra[n])  # CHECKED, THIS IS CORRECT
+
+        Δpsi = [ITensor(inds(T)) for T in psi]
+        Δpsi[n] = Δpsi_n
+        Δpsi[n+1] = Δpsi_np1
+
+        (ΔarrV,) = backten(Δpsi)
+        return (NoTangent(), ΔarrV)
+    end
+
+    return real(res), cost_SVDcontract_pullback
 end
 cost_SVDcontract(V_array)
-gradient(cost_SVDcontract, V_array)[1]
+gradient(cost_SVDcontract, V_array)[1];
 fg_SVDcontract = arrV -> withgrad_Riemannian(cost_SVDcontract, arrV, ogc)
 fg_SVDcontract(V_array)
 testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_SVDcontract, innerMixed, retractMixed_ogc)
 
 
-# GRADIENT OF PAULIMPS WORKS, SOMETIMES RETURNS LAPACK ERROR
+# THIS WORKS
+W_array = genPoint(N, χ, ogc)
+function cost_SVDcontract2(arrV::Vector{<:AbstractArray}, arrW::Vector{<:AbstractArray})
+    psi = toITensors(arrV, ogc)
+    sites = siteinds(psi)
+    linds = [sites[1];]
+    ((U, R), eps), _ = SVDcontract(psi, linds)
+    state = [U, R]
+
+    psiW = toITensors(arrW, ogc; sites)
+    ((UW, RW), eps), _ = SVDcontract(psiW, linds)
+    stateW = [UW, RW]
+    return real(sproduct(state, stateW))
+end
+
+function ChainRulesCore.rrule(::typeof(cost_SVDcontract2), arrV::Vector{<:AbstractArray}, arrW::Vector{<:AbstractArray})
+    psi, backten = pullback(toITensors, arrV, ogc)
+    sites = siteinds(psi)
+    linds = [sites[1];]
+    ((U, R), eps), tape = SVDcontract(psi, linds)
+    state = [U, R]
+
+    psiW, backtenW = pullback((arr, oc) -> toITensors(arr, oc; sites=sites), arrW, ogc)
+    ((UW, RW), eps), tapeW = SVDcontract(psiW, linds)
+    stateW = [UW, RW]
+
+    res, backsprod = pullback(sproduct, state, stateW)
+
+    function cost_SVDcontract2_pullback(Δres)
+        Δres*=1.0+0.0im
+        Δstate, ΔstateW = backsprod(Δres)
+        Δpsi = SVDcontract_pullback(Δstate, tape)
+        ΔpsiW = SVDcontract_pullback(ΔstateW, tapeW)
+
+        (ΔarrV,) = backten(Δpsi)
+        (ΔarrW,) = backtenW(ΔpsiW)
+
+        return (NoTangent(), ΔarrV, ΔarrW)
+    end
+
+    return real(res), cost_SVDcontract2_pullback
+end
+cost_SVDcontract2(V_array, W_array)
+svdred = arrV -> cost_SVDcontract2(arrV, W_array)
+gradient(svdred, V_array)[1]
+fg_SVDcontract2 = arrV -> withgrad_Riemannian(svdred, arrV, ogc)
+fg_SVDcontract2(V_array)
+testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_SVDcontract2, innerMixed, retractMixed_ogc)
+
+
+
+
+# GRADIENT OF PAULIMPS WORKS, SOMETIMES RETURNS NAN FOR DEGENERATE SINGULAR VALUES
 W_array = genPoint(N, χ, ogc)
 psiW = MPS(W_array, ogc)
 function cost_pauli(arrV::Vector{<:AbstractArray})
     N = length(arrV)
-    ogc = 3
     psi = MPS(arrV, ogc)
     sites = siteinds(4, N)
     Ppsi = get_pauli_mps(psi; sites=sites)
     Ppsi2 = get_pauli_mps(psiW; sites=sites)
     return real(sproduct(Ppsi, Ppsi2))
 end
-
-cost_pauli(V_array)
-gradient(cost_pauli, V_array)[1]
+@time cost_pauli(V_array)
+@time gradient(cost_pauli, V_array)[1];
 fg_pauli = arrV -> withgrad_Riemannian(cost_pauli, arrV, ogc)
 fg_pauli(V_array)
 testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_pauli, innerMixed, retractMixed_ogc)
@@ -476,6 +581,7 @@ end
 # WORKS, BUT WE ARE FORCED TO USE OUR CUSTOM CHAINRULE BECAUSE MPS NEED TO BE SUMMED
 # AS IF THEY WERE VECTORS OF ITENSORS
 function ChainRulesCore.rrule(::typeof(cost_sre2_zip), arrV::Vector{<:AbstractArray}, ogc::Int; trunc_pauli = NamedTuple(), trunc_zip = NamedTuple())
+    N = length(arrV)
     ψ, MPS_back = pullback(MPS, arrV, ogc)
     Pψ, get_pauli_mps_pullback = pullback(psi -> get_pauli_mps(psi; trunc=trunc_pauli), ψ)
     W, MPO_back = pullback(MPO, Pψ)    # at this point Pψ and W have same ortho lims
@@ -525,14 +631,75 @@ testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_sre2_zip, 
 
 
 
+V_array = genPoint(30, 8, 1);
+function cost_sre2_zip(arrV)
+    return cost_sre2_zip(arrV, 1; trunc_pauli=(maxrank=8,), trunc_zip=(maxrank=8,))
+end
+@time cost_sre2_zip(V_array);
+@time gradient(cost_sre2_zip, V_array)[1];
+@profview gradient(cost_sre2_zip, V_array)[1];
+
+
+### SCALINGS
+V_array = genPoint(10, 10, 1);
+W_array = genPoint(10, 10, 1);
+function cost_pauli(arrV::Vector{<:AbstractArray}, arrW::Vector{<:AbstractArray}, ogc; trunc=(maxrank=10,))
+    N = length(arrV)
+    sites = siteinds(4, N)
+
+    psi = MPS(arrV, ogc)
+    Ppsi = get_pauli_mps(psi; sites=sites, trunc)
+    psiW = MPS(arrW, ogc)
+    Ppsi2 = get_pauli_mps(psiW; sites=sites, trunc)
+    return real(sproduct(Ppsi, Ppsi2))
+end
+@time cost_pauli(V_array, W_array, 1);
+@time gradient(cost_pauli, V_array, W_array, 1)[1];
+@profview gradient(cost_pauli, V_array, W_array, 1)[1];
+
+
+
+chirange = 2 .^(1:4)
+results = let cost = cost_pauli, chirange=chirange
+    N = 30; ogc = 1 
+    ftimes = Float64[]
+    gtimes = Float64[]
+    for χ in chirange
+        @show χ
+        ftime_χ = Float64[]
+        gtime_χ = Float64[]
+        cost_red = (arrV, arrW, ogc) -> cost(arrV, arrW, ogc; trunc=(maxrank=χ,))
+        for iter in 1:10
+            @show iter
+            V_array = genPoint(N, χ, ogc)
+            W_array = genPoint(N, χ, ogc)
+            ftime = @elapsed cost_red(V_array, W_array, ogc)
+            gtime = @elapsed gradient(cost_red, V_array, W_array, ogc)
+            push!(ftime_χ, ftime)
+            push!(gtime_χ, gtime)
+        end
+        push!(ftimes, sum(ftime_χ)/100)
+        push!(gtimes, sum(gtime_χ)/100)
+    end
+    ftimes, gtimes    
+end
+
+Plots.plot(xlabel="chi", ylabel="t (s)")
+Plots.plot!(chirange, results[1], label="tf")
+Plots.plot!(chirange, results[2], label="tg")
+Plots.plot!(chirange, 1e-5*chirange .^4, yscale=:log10, xscale=:log10, label="O(chi^4)", legend=:bottomright)
+Plots.plot!(chirange, 1e-5*chirange .^5, yscale=:log10, xscale=:log10, label="O(chi^5)")
+
+
 
 # CHECK SCALING WITH N
-Nrange = 4:2:50
-results = let cost = cost, Nrange=Nrange
+Nrange = 4:2:30
+results = let cost = cost_sre2_zip, Nrange=Nrange
     χ = 2; ogc = 1 
     ftimes = Float64[]
     gtimes = Float64[]
     for N in Nrange
+        @show N
         ftime_N = Float64[]
         gtime_N = Float64[]
         for _ in 1:100
@@ -563,8 +730,9 @@ results = let cost = cost_sre2_zip, chirange=chirange
         @show χ
         ftime_χ = Float64[]
         gtime_χ = Float64[]
-        cost_red = (arr, ogc) -> cost(arr, ogc; trunc_pauli=(maxrank=χ,), trunc_zip=(maxrank=2*χ,))
-        for _ in 1:100
+        cost_red = (arr, ogc) -> cost(arr, ogc; trunc_pauli=(maxrank=χ,), trunc_zip=(maxrank=χ,))
+        for iter in 1:10
+            @show iter
             V_array = genPoint(N, χ, ogc)
             ftime = @elapsed cost_red(V_array, ogc)
             gtime = @elapsed gradient(cost_red, V_array, ogc)
@@ -580,8 +748,8 @@ end
 Plots.plot(xlabel="chi", ylabel="t (s)")
 Plots.plot!(chirange, results[1], label="tf")
 Plots.plot!(chirange, results[2], label="tg")
-Plots.plot!(chirange, 1e-7*chirange .^4, yscale=:log10, xscale=:log10, label="O(chi^4)", legend=:bottomright)
-Plots.plot!(chirange, 1e-8*chirange .^5, yscale=:log10, xscale=:log10, label="O(chi^5)")
+Plots.plot!(chirange, 1e-5*chirange .^4, yscale=:log10, xscale=:log10, label="O(chi^4)", legend=:bottomright)
+Plots.plot!(chirange, 1e-5*chirange .^5, yscale=:log10, xscale=:log10, label="O(chi^5)")
 
 
 
