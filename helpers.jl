@@ -116,6 +116,60 @@ function replace_linkinds(ψ::Vector{<:ITensor}; newlinks=nothing)
 end
 
 
+### FUNCTION TO EXTRACT INDICES IN ORDER
+
+function ordered_inds(psi::Union{Vector{<:ITensor}, MPS})
+    N = length(psi)
+    sites = siteinds(psi)
+    links = linkinds(psi)
+    inds1 = [(sites[1], links[1])]
+    indsbulk = [(links[j-1], sites[j], links[j]) for j in 2:N-1]
+    indsN = [(links[N-1], sites[N])]
+
+    inds_all = vcat(inds1, indsbulk, indsN)
+    return inds_all
+end
+
+### FUNCTIONS TO GENERATE VECTOR OF ISOMETRIES 
+
+"Returns bond dimension of link connecting sites j and j+1"
+function bonddim(N::Int, χ::Int, j::Int)
+    return min(2^j, χ, 2^(N-j))
+end
+
+# WATCH OUT: THIS IS STILL NOT GAUGE FIXED, YOU NEED TO FIX A PERMUTATION OF THE BASIS STATES VIA QR
+function genPoint(N::Int, χ::Int, b::Int)
+    # generate random point on M
+    bond = j -> bonddim(N, χ, j)
+
+    local U
+    if b == 1
+        U1 = randn(ComplexF64, 2, bond(1))
+        U1 /= norm(U1)
+        UR = [random_right_isometry(bond(j-1), 2*bond(j)) for j in 2:N]
+        U = vcat([U1], UR)
+    elseif b == N
+        UL = [random_left_isometry(bond(j-1)*2, bond(j)) for j in 1:N-1]
+        UN = randn(ComplexF64, bond(N-1), 2)
+        UN /= norm(UN)
+        U = vcat(UL, [UN])
+    else
+        UL = [random_left_isometry(bond(j-1)*2, bond(j)) for j in 1:b-1]
+        UC = randn(ComplexF64, bond(b-1), 2, bond(b))
+        UC /= norm(UC)
+        UR = [random_right_isometry(bond(j-1), 2*bond(j)) for j in b+1:N]
+        U = vcat(UL, [UC], UR)
+    end
+    return U
+end
+
+function genTanVec(arrU, b::Int)
+    arrV = [randn(ComplexF64, size(U)) for U in arrU]    
+    arrV = projectMixed(arrU, arrV, b)
+    arrV /= sqrt(innerMixed(arrV, arrV))
+end
+
+
 ### FUNCTIONS TO CHECK ORTHOGONALITY
 
 function is_orthogonal(psi::Vector{ITensor}, ogc::Int)
