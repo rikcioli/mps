@@ -1,7 +1,7 @@
 using LinearAlgebra
 using ITensors, ITensorMPS
 
-### CONSTANTS
+# ### CONSTANTS
 
 const Id = (1.0+0.0im)*[1.0 0; 0 1.0]
 const X = (1.0+0.0im)*[0 1.0 ; 1.0 0]
@@ -233,4 +233,39 @@ function adapt_truncarg(trunc::NamedTuple, dims::Vector{<:Int})
         trunc = (trunc..., atol=eps())
     end
     return trunc, maxranks
+end
+
+using MatrixAlgebraKit: trunctol, truncrank, truncerror, truncfilter, 
+                        TruncationStrategy, TruncationIntersection
+
+"Converts a NamedTuple into a TruncationStrategy"
+function to_strategy(trunc::NamedTuple)
+    allowed = Set((:maxrank, :maxerror, :atol, :rtol, :filter))
+    bad = setdiff(keys(trunc), allowed)
+
+    isempty(bad) || throw(ArgumentError("Unknown truncation field(s): $(collect(bad)). " *
+                            "Allowed fields are $(collect(allowed))."))
+
+    if isempty(trunc)
+        return TruncationStrategy()
+    end
+
+    strats = TruncationStrategy[]
+    if haskey(trunc, :maxrank)
+        push!(strats, truncrank(trunc[:maxrank]))
+    end
+    if haskey(trunc, :maxerror)
+        push!(strats, truncerror(atol = trunc[:maxerror]))
+    end
+    if haskey(trunc, :atol)
+        push!(strats, trunctol(atol = trunc[:atol]))
+    end
+    if haskey(trunc, :rtol)
+        push!(strats, trunctol(rtol = trunc[:rtol]))
+    end
+    if haskey(trunc, :filter)
+        push!(strats, truncfilter(trunc[:filter]))
+    end
+
+    return TruncationIntersection(strats...)
 end

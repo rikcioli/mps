@@ -12,6 +12,65 @@ using Zygote
 
 ### OVERLOADING OF MatrixAlgebraKit svd_trunc_pullback to apply patch
 
+using MatrixAlgebraKit: MatrixAlgebraKit, TruncationStrategy
+
+struct TruncationDegenerate{Strategy <: TruncationStrategy, T <: Real} <: TruncationStrategy
+    strategy::Strategy
+    atol::T
+    rtol::T
+end
+
+"""
+    truncdegen(trunc::TruncationStrategy; atol::Real=0, rtol::Real=0)
+
+Modify a truncation strategy so that if the truncation falls within
+a degenerate subspace, the entire subspace gets truncated as well.
+A value `val` is considered degenerate if
+`norm(val - truncval) ≤ max(atol, rtol * norm(truncval))`
+where `truncval` is the largest value truncated by the original
+truncation strategy `trunc`.
+
+For now, this truncation strategy assumes the spectrum being truncated
+has already been reverse sorted and the strategy being wrapped
+outputs a contiguous subset of values including the largest one. It
+also only truncates for now, so may not respect if a minimum dimension
+was requested in the strategy being wrapped. These restrictions may
+be lifted in the future or provided through a different truncation strategy.
+"""
+function truncdegen(strategy::TruncationStrategy; atol::Real = 0, rtol::Real = 0)
+    return TruncationDegenerate(strategy, promote(atol, rtol)...)
+end
+
+
+using MatrixAlgebraKit: findtruncated
+
+function MatrixAlgebraKit.findtruncated(
+        values::AbstractVector, strategy::TruncationDegenerate
+    )
+    Base.require_one_based_indexing(values)
+    issorted(values; rev = true) || throw(ArgumentError("Values must be reverse sorted."))
+    indices_collection = findtruncated(values, strategy.strategy)
+    indices = Base.OneTo(maximum(indices_collection))
+    indices_collection == indices ||
+        throw(ArgumentError("Truncation must be a contiguous range."))
+    if length(indices_collection) == length(values)
+        # No truncation occurred.
+        return indices
+    end
+    # The largest truncated value.
+    truncval = values[last(indices) + 1]
+    # Tolerance of determining if a value is degenerate.
+    atol = max(strategy.atol, strategy.rtol * abs(truncval))
+    for rank in reverse(indices)
+        ≈(values[rank], truncval; atol, rtol = 0) || return Base.OneTo(rank)
+    end
+    return Base.OneTo(0)
+end
+
+
+using MatrixAlgebraKit: default_pullback_rank_atol, default_pullback_gauge_atol,
+                            iszerotangent, project_antihermitian!, inv_safe, diagview
+
 """
     svd_trunc_pullback!(
         ΔA, A, USVᴴ, ΔUSVᴴ;
@@ -110,7 +169,7 @@ function svd_trunc_pullback!(
     # replace XY = sylvester(ÃÃ, -Smat, rhs) with linsolve
     Smat⁻¹ = diagm(inv_safe.(S, degeneracy_atol))
     f(xy) = ÃÃ * xy * Smat⁻¹ - xy
-    XY₀ = zeros(scalartype(ÃÃ), size(ÃÃ, 2), size(Smat⁻¹, 1))
+    XY₀ = zeros(KrylovKit.scalartype(ÃÃ), size(ÃÃ, 2), size(Smat⁻¹, 1))
     XY, info = linsolve(f, -rhs * Smat⁻¹, XY₀)
 
     X = view(XY, 1:m̃, :)
@@ -1075,12 +1134,15 @@ end
 
 ### EXTRACT PAULI MPS FROM MPS
 
+using MatrixAlgebraKit: trunctol, truncrank
+
 function get_pauli_mps(ψ::MPS; trunc=NamedTuple(), sites=nothing, post_factorize_callback = identity)
     N = length(ψ)
     ψ = move_center(ψ, 1)
     ψbra, unbra = bra(ψ)
 
-    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ).^2)
+    strat = to_strategy(trunc)
+    strat_degen = truncdegen(strat; atol=2*eps())
 
     # Build compressed Pauli MPS iteratively from left
     # bra is conjugated tensor in pauli mps, prime is conjugated Pauli mps
@@ -1103,7 +1165,7 @@ function get_pauli_mps(ψ::MPS; trunc=NamedTuple(), sites=nothing, post_factoriz
 
         ((Up, Rp), err), _ = SVDcontract(tensors, linds; 
                                         move_ogc=:right, 
-                                        trunc=(trunc..., maxrank=maxranks[j]))
+                                        trunc=strat_degen)
         push!(errs, err)
         
         Pψ_vec[j] = Up
@@ -1125,7 +1187,8 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
     ψ, move_center_back = Zygote.pullback(move_center, ψ, 1)
     ψbra, unbra = bra(ψ)
 
-    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ).^2)
+    strat = to_strategy(trunc)
+    strat_degen = truncdegen(strat; atol=2*eps())
 
     # Build compressed Pauli MPS iteratively from left
     # bra is conjugated tensor in pauli mps, prime is conjugated Pauli mps
@@ -1150,7 +1213,7 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
         
         ((Up, Rp), err), tape_j = SVDcontract(tensors, linds; 
                                         move_ogc=:right, 
-                                        trunc=(trunc..., maxrank=maxranks[j]))
+                                        trunc=strat_degen)
         push!(errs, err)
         push!(tapes, tape_j)
 
@@ -1189,7 +1252,7 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
     return Pψ, get_pauli_mps_pullback
 end
 
-### COMPUTE SRE2
+### COMPUTE SRE2 FOR VECTOR OF ISOMETRIES
 
 function sre2(arrV::Vector{<:AbstractArray}, ogc::Int, alg::Symbol; trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
     N = length(arrV)
@@ -1230,6 +1293,18 @@ function ChainRulesCore.rrule(::typeof(sre2), arrV::Vector{<:AbstractArray}, ogc
     return m2, sre2_pullback
 end
 
+### SRE2 OF AN MPS ψ
+
+function sre2( ψ::MPS, alg::Symbol; trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
+    N = length(ψ)
+    # ψf = apply_brickwork(arrU, ψ; trunc=trunc_bw)
+    Pψ = get_pauli_mps(ψ; trunc=trunc_pauli)
+    W = MPO(Pψ)
+    P2 = product(W, Pψ, alg; trunc=trunc_product)
+    m2 = -log2(real(sproduct(P2, P2))) - N
+    return m2
+end
+### SRE2 OF A BRICKWORK CIRCUIT APPLIED ON AN MPS ψ
 
 function sre2(arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
     N = length(ψ)
@@ -1241,7 +1316,11 @@ function sre2(arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = N
     return m2
 end
 
+
+
+
 function ChainRulesCore.rrule(::typeof(sre2), arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
+    N = length(ψ)
     ψf, apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, ψ; trunc=trunc_bw), arrU, ψ)
     Pψ, get_pauli_mps_pullback = pullback(psi -> get_pauli_mps(psi; trunc=trunc_pauli), ψf)
     W, MPO_back = pullback(MPO, Pψ)
@@ -1266,79 +1345,131 @@ function ChainRulesCore.rrule(::typeof(sre2), arrU::Vector{<:AbstractMatrix}, ψ
     return m2, sre2_pullback
 end
 
+### M_lin
 
-### EXACT MAGIC COMPUTATION
-
-function FWHT!(v)
-    n = length(v); h = 1
-    @inbounds while h < n
-        for i in 0:2h:n-1, j in 0:h-1
-            x = v[i+j+1]; y = v[i+j+h+1]
-            v[i+j+1] = x + y; v[i+j+h+1] = x - y
-        end; h *= 2
-    end
+function m_lin(ψ::MPS, alg::Symbol; trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
+    N = length(ψ)
+    # ψf = apply_brickwork(arrU, ψ; trunc=trunc_bw)
+    Pψ = get_pauli_mps(ψ; trunc=trunc_pauli)
+    W = MPO(Pψ)
+    P2 = product(W, Pψ, alg; trunc=trunc_product)
+    m = 1-real(sproduct(P2, P2))*2^N
+    return m
 end
 
-function fastEDMagic(psi)
-    d = length(psi)
-    Nkvec = zeros(Float64, d)
-    Threads.@threads for k in 0:d-1
-        A = [conj(psi[xor(x,k)+1]) * psi[x+1] for x in 0:d-1]
-        FWHT!(A)
-        Nkvec[k+1] = sum(abs2.(A).^2)
-    end
-    return -log2(sum(Nkvec)/d)
+function m_lin(arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
+    truncerr = Ref(0.0)
+    post_factorize_callback(errs) = (truncerr[] += sum(errs))
+    N = length(ψ)
+    ψf = apply_brickwork(arrU, ψ; trunc=trunc_bw,post_factorize_callback)
+    Pψ = get_pauli_mps(ψf; trunc=trunc_pauli,post_factorize_callback)
+    W = MPO(Pψ)
+    P2 = product(W, Pψ, alg; trunc=trunc_product,post_factorize_callback)
+    m = 1-real(sproduct(P2, P2))*2^N
+    err = truncerr[]*(2^N)
+    println("truncerr: $err")
+    flush(stdout)
+    return m
 end
 
-function ChainRulesCore.rrule(::typeof(fastEDMagic), psi)
-    d = length(psi)
+# function ChainRulesCore.rrule(::typeof(m_lin), arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
+#     N = length(ψ)
+#     ψf, apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, ψ; trunc=trunc_bw), arrU, ψ)
+#     Pψ, get_pauli_mps_pullback = pullback(psi -> get_pauli_mps(psi; trunc=trunc_pauli), ψf)
+#     W, MPO_back = pullback(MPO, Pψ)
+#     P2, product_back = pullback((mpo, psi) -> product(mpo, psi, alg; trunc=trunc_product), W, Pψ)
+#     res, sproduct_back = pullback(sproduct, P2, P2)
+#     m, m_back = 1-real(res)*2^N, Δm -> (NoTangent(), -Δm*2^N)
 
-    As = [Vector{ComplexF64}(undef, d) for _ in 1:d]
-    Threads.@threads for k in 0:d-1
-        A = [conj(psi[xor(x,k)+1]) * psi[x+1] for x in 0:d-1]
-        FWHT!(A)
-        As[k+1] = A    
-    end
+#     function m_lin_pullback(Δm)
+#         _, Δres = m_back(Δm)
 
-    T::Float64 = sum(sum(abs2.(A).^2) for A in As)
-    m2 = -log2(T/d)
+#         ΔP2_1, ΔP2_2 = sproduct_back(Δres)
+#         ΔP2 = ΔP2_1 .+ ΔP2_2
+#         ΔW, ΔPψ_1 = product_back(ΔP2)
+#         (ΔPψ_2,) = MPO_back(ΔW)
+#         ΔPψ = ΔPψ_1 .+ ΔPψ_2
+#         (Δψ2,) = get_pauli_mps_pullback(ΔPψ)
 
-    function fastEDMagic_pullback(Δm2)
-        ΔT = -Δm2/(T*log(2))
+#         ΔarrU, Δψ = apply_brickwork_back(Δψ2)
 
-        nthreads = Threads.nthreads()
-        Δψ_threads = [zeros(ComplexF64, d) for _ in 1:nthreads]
-        ΔS_threads = [Vector{ComplexF64}(undef, d) for _ in 1:nthreads]
+#         return (NoTangent(), ΔarrU, NoTangent(), NoTangent())
+#     end
+#     return m, m_lin_pullback
+# end
 
-        Threads.@threads for k in 0:d-1
-            tid = Threads.threadid()
-            ΔS = ΔS_threads[tid]
-            Δψt = Δψ_threads[tid]
-            Ak = As[k+1]
+# ### EXACT MAGIC COMPUTATION
 
-            # in-place ΔS computation
-            @inbounds @simd for x in 0:d-1
-                a2 = abs2(Ak[x+1])
-                ΔS[x+1] = 4*a2*Ak[x+1]
-            end
-            FWHT!(ΔS)
+# function FWHT!(v)
+#     n = length(v); h = 1
+#     @inbounds while h < n
+#         for i in 0:2h:n-1, j in 0:h-1
+#             x = v[i+j+1]; y = v[i+j+h+1]
+#             v[i+j+1] = x + y; v[i+j+h+1] = x - y
+#         end; h *= 2
+#     end
+# end
 
-            @inbounds for x in 0:d-1
-                xk = xor(x,k)+1     # correct permutation
-                Δψt[x+1] += (conj(ΔS[xk])+ΔS[x+1])*psi[xk]
-            end
-        end
+# function fastEDMagic(psi)
+#     d = length(psi)
+#     Nkvec = zeros(Float64, d)
+#     Threads.@threads for k in 0:d-1
+#         A = [conj(psi[xor(x,k)+1]) * psi[x+1] for x in 0:d-1]
+#         FWHT!(A)
+#         Nkvec[k+1] = sum(abs2.(A).^2)
+#     end
+#     return -log2(sum(Nkvec)/d)
+# end
 
-        Δψ = zeros(ComplexF64, d)
-        @inbounds for t in 1:nthreads
-            Δψ .+= Δψ_threads[t]
-        end
-        Δψ .*= ΔT
-        return (NoTangent(), Δψ)
-    end
+# function ChainRulesCore.rrule(::typeof(fastEDMagic), psi)
+#     d = length(psi)
 
-    return m2, fastEDMagic_pullback
-end
+#     As = [Vector{ComplexF64}(undef, d) for _ in 1:d]
+#     Threads.@threads for k in 0:d-1
+#         A = [conj(psi[xor(x,k)+1]) * psi[x+1] for x in 0:d-1]
+#         FWHT!(A)
+#         As[k+1] = A    
+#     end
+
+#     T::Float64 = sum(sum(abs2.(A).^2) for A in As)
+#     m2 = -log2(T/d)
+
+#     function fastEDMagic_pullback(Δm2)
+#         ΔT = -Δm2/(T*log(2))
+
+#         nthreads = Threads.nthreads()
+#         Δψ_threads = [zeros(ComplexF64, d) for _ in 1:nthreads]
+#         ΔS_threads = [Vector{ComplexF64}(undef, d) for _ in 1:nthreads]
+
+#         Threads.@threads for k in 0:d-1
+#             tid = Threads.threadid()
+#             ΔS = ΔS_threads[tid]
+#             Δψt = Δψ_threads[tid]
+#             Ak = As[k+1]
+
+#             # in-place ΔS computation
+#             @inbounds @simd for x in 0:d-1
+#                 a2 = abs2(Ak[x+1])
+#                 ΔS[x+1] = 4*a2*Ak[x+1]
+#             end
+#             FWHT!(ΔS)
+
+#             @inbounds for x in 0:d-1
+#                 xk = xor(x,k)+1     # correct permutation
+#                 Δψt[x+1] += (conj(ΔS[xk])+ΔS[x+1])*psi[xk]
+#             end
+#         end
+
+#         Δψ = zeros(ComplexF64, d)
+#         @inbounds for t in 1:nthreads
+#             Δψ .+= Δψ_threads[t]
+#         end
+#         Δψ .*= ΔT
+#         return (NoTangent(), Δψ)
+#     end
+
+#     return m2, fastEDMagic_pullback
+# end
 
 
 
