@@ -187,6 +187,7 @@ end
 struct SVDcontractTape
     # ITensor data
     move_ogc::Symbol
+    normalize::Bool
     tensors::Vector{ITensor}
     prods::Vector{ITensor}
     cL::ITensor
@@ -197,13 +198,14 @@ struct SVDcontractTape
     U::Matrix{ComplexF64}
     S::Diagonal{Float64, Vector{Float64}}
     Vdg::Matrix{ComplexF64}
+    Snorm::Float64
 end
    
 
 "Contracts all the tensors in a Vector{ITensor} in order
 and computes a truncated SVD of the result with the left indices specified by linds.
 Also returns truncation error."
-function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_ogc=:right, kwargs...)
+function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_ogc=:right, normalize=false, kwargs...)
     n = length(tensors)
     tensors = copy(tensors)
     prods = Array{ITensor, 1}(undef, n)
@@ -220,6 +222,10 @@ function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_og
 
     M = Matrix{ComplexF64}(M_ten, cLind, cRind)
     U, S, Vdg, err = svd_trunc(M; kwargs...)
+    Snorm = norm(S)
+    if normalize
+        S /= Snorm
+    end
     
     bondind = move_ogc==:right ? Index(size(U)[2], "Link, u") : Index(size(Vdg)[1], "Link, v")
 
@@ -232,7 +238,7 @@ function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_og
     MR_ten *= dag(cR)
 
     out = ((ML_ten, MR_ten), err)
-    tape = SVDcontractTape(move_ogc, tensors, prods, cL, cR, bondind, M, U, S, Vdg)
+    tape = SVDcontractTape(move_ogc, normalize, tensors, prods, cL, cR, bondind, M, U, S, Vdg, Snorm)
 
     return out, tape
 end
@@ -240,7 +246,7 @@ end
 
 function SVDcontract_pullback(ΔMf, tape::SVDcontractTape)
     ΔML_ten, ΔMR_ten = ΔMf
-    (; move_ogc, tensors, prods, cL, cR, bondind, M, U, S, Vdg) = tape
+    (; move_ogc, normalize, tensors, prods, cL, cR, bondind, M, U, S, Vdg, Snorm) = tape
 
     ΔML_ten *= cL
     ΔMR_ten *= cR
@@ -252,12 +258,17 @@ function SVDcontract_pullback(ΔMf, tape::SVDcontractTape)
     local ΔU, ΔS, ΔVdg
     if move_ogc==:right
         ΔU = ΔML 
-        ΔS = ΔMR*Vdg'
+        ΔS = Diagonal(diag(ΔMR*Vdg'))
         ΔVdg = S'*ΔMR
     else
         ΔU = ΔML*S'
-        ΔS = U'*ΔML
+        ΔS = Diagonal(diag(U'*ΔML))
         ΔVdg = ΔMR
+    end
+
+    if normalize
+        ΔS = ΔS/Snorm - S*dot(S, ΔS)/Snorm
+        S *= Snorm
     end
 
     ΔM = zero(M)
@@ -612,6 +623,37 @@ function ChainRulesCore.rrule(::typeof(sproduct), ψ::Vector{<:ITensor}, ϕ::Vec
     return res, sproduct_pullback
 end
 
+
+"Computes the norm of the MPS."
+function snorm(ψ::MPS)
+    return isortho(ψ) ? norm(ψ[only(ortho_lims(ψ))]) : sqrt(sproduct(ψ, ψ))
+end
+
+function ChainRulesCore.rrule(::typeof(snorm), ψ::MPS)
+
+    if isortho(ψ)
+        ogc = only(ortho_lims(ψ))
+        C = ψ[ogc]
+        n = norm(C)
+        function snorm_pullback_og(Δn)
+            ΔC = Δn*C/n
+            Δψ = [ITensor(inds(T)) for T in ψ]
+            Δψ[ogc] = ΔC
+            return (NoTangent(), Δψ)
+        end
+        return n, snorm_pullback_og
+    else
+        n2, back_sproduct = pullback(sproduct, ψ, ψ)
+        n = sqrt(n2)
+        function snorm_pullback_all(Δn)
+            Δn2 = Δn/(2n)
+            Δψ1, Δψ2 = back_sproduct(Δn2)
+            Δψ = Δψ1 + Δψ2
+            return (NoTangent(), Δψ)
+        end
+        return n, snorm_pullback_all
+    end
+end
 
 ### PRODUCT OF AN MPO WITH AN MPS, TENSOR BY TENSOR
 
@@ -975,18 +1017,16 @@ end
 
 ### APPLY VECTOR OF UNITARIES IN A BRICKWORK PATTERN, SWEEPING LEFT TO RIGHT AND BACK
 
-function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, trunc=NamedTuple(), post_factorize_callback=identity)
+function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), post_factorize_callback=identity)
     N = length(ψ)
     @assert shift==0 || shift==1
-
-    ψ = move_center(ψ, 1)
-    check_orthogonal(ψ, 1) # check that ψ is orthogonal at first site before applying unitaries
-
-    to_right = true  # left-to-right mode
 
     # Preparing the maxranks for svd trunc
     trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
     
+    # by default to_right == true, meaning we sweep from left to right
+    ψ = move_center(ψ, to_right ? 1 : N)
+
     sites = siteinds(ψ)
     ψfinal = copy(ψ)
     errs = Float64[]
@@ -996,6 +1036,7 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, tru
         jvals = to_right ? (1:N-1) : (N-1:-1:1)
         
         for j in jvals
+            end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
             lastj = j
             WLten, WRten = ψfinal[j:j+1]
 
@@ -1009,7 +1050,10 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, tru
                 tensors = [WLten, WRten]
             end
 
-            ((W1, W2), err), _ = SVDcontract(tensors, linds; move_ogc=(to_right ? :right : :left), trunc=(trunc..., maxrank=maxranks[j]))
+            ((W1, W2), err), _ = SVDcontract(tensors, linds; 
+                                    move_ogc = (to_right ? :right : :left), 
+                                    normalize = (end_of_sweep || i>nU),
+                                    trunc = (trunc..., maxrank=maxranks[j]))
             push!(errs, err)
             W1 = noprime(W1, tags="Site")
             W2 = noprime(W2, tags="Site")
@@ -1017,10 +1061,10 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, tru
             ψfinal[j] = W1
             ψfinal[j+1] = W2
             i>nU && break # before to_right changes
-            if (j==N-1 && to_right) || (j==1 && !to_right)
+            if end_of_sweep
                 # this has to be here, because we want to_right to remain as it is
                 # if the endpoint of the sweep is reached exactly at i==nU
-                to_right = !to_right      
+                to_right = !to_right       
             end
         end
     end
@@ -1030,14 +1074,11 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, tru
     return ψfinal
 end
 
-function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, trunc=NamedTuple(), post_factorize_callback=identity)
+function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), post_factorize_callback=identity)
     N = length(ψ)
     @assert shift==0 || shift==1
 
-    ψ, move_center_back = Zygote.pullback(move_center, ψ, 1)
-    check_orthogonal(ψ, 1) # check that ψ is orthogonal at first site before applying unitaries
-
-    to_right = true  # left-to-right mode
+    ψ, move_center_back = Zygote.pullback(move_center, ψ, to_right ? 1 : N)
 
     # Preparing the maxranks for svd trunc
     trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
@@ -1052,6 +1093,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
         jvals = to_right ? (1:N-1) : (N-1:-1:1)
 
         for j in jvals
+            end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
             lastj = j
             WLten, WRten = ψfinal[j:j+1]
 
@@ -1066,7 +1108,8 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
             end
 
             ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
-                                                move_ogc = (to_right ? :right : :left), 
+                                                move_ogc = (to_right ? :right : :left),
+                                                normalize = (end_of_sweep || i>nU), 
                                                 trunc = (trunc..., maxrank=maxranks[j]))
             push!(tapes, tape_j)
             push!(errs, err)
@@ -1076,7 +1119,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
             ψfinal[j] = W1
             ψfinal[j+1] = W2
             i>nU && break # before to_right changes
-            if (j==N-1 && to_right) || (j==1 && !to_right)
+            if end_of_sweep
                 # this has to be here, because we want to_right to remain as it is
                 # if the endpoint of the sweep is reached exactly at i==nU
                 to_right = !to_right      
@@ -1091,7 +1134,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
 
         Δψ = copy(Δψfinal)
         ΔUarray = [zeros(ComplexF64, size(U)) for U in Uarray]
-        i = nU; pb_n = length(tapes)
+        i = nU; pb_n = length(tapes);
         while i>=1
             jvals = to_right ? (lastj:-1:1) : (lastj:N-1) 
             for j in jvals
@@ -1142,7 +1185,9 @@ function get_pauli_mps(ψ::MPS; trunc=NamedTuple(), sites=nothing, post_factoriz
     ψbra, unbra = bra(ψ)
 
     strat = to_strategy(trunc)
-    strat_degen = truncdegen(strat; atol=2*eps())
+    if !(strat isa MatrixAlgebraKit.NoTruncation)
+        strat = truncdegen(strat; atol=2*eps())
+    end
 
     # Build compressed Pauli MPS iteratively from left
     # bra is conjugated tensor in pauli mps, prime is conjugated Pauli mps
@@ -1165,7 +1210,7 @@ function get_pauli_mps(ψ::MPS; trunc=NamedTuple(), sites=nothing, post_factoriz
 
         ((Up, Rp), err), _ = SVDcontract(tensors, linds; 
                                         move_ogc=:right, 
-                                        trunc=strat_degen)
+                                        trunc=strat)
         push!(errs, err)
         
         Pψ_vec[j] = Up
@@ -1188,7 +1233,9 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
     ψbra, unbra = bra(ψ)
 
     strat = to_strategy(trunc)
-    strat_degen = truncdegen(strat; atol=2*eps())
+    if !(strat isa MatrixAlgebraKit.NoTruncation)
+        strat = truncdegen(strat; atol=2*eps())
+    end
 
     # Build compressed Pauli MPS iteratively from left
     # bra is conjugated tensor in pauli mps, prime is conjugated Pauli mps
@@ -1213,7 +1260,7 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
         
         ((Up, Rp), err), tape_j = SVDcontract(tensors, linds; 
                                         move_ogc=:right, 
-                                        trunc=strat_degen)
+                                        trunc=strat)
         push!(errs, err)
         push!(tapes, tape_j)
 
@@ -1400,76 +1447,76 @@ end
 
 # ### EXACT MAGIC COMPUTATION
 
-# function FWHT!(v)
-#     n = length(v); h = 1
-#     @inbounds while h < n
-#         for i in 0:2h:n-1, j in 0:h-1
-#             x = v[i+j+1]; y = v[i+j+h+1]
-#             v[i+j+1] = x + y; v[i+j+h+1] = x - y
-#         end; h *= 2
-#     end
-# end
+function FWHT!(v)
+    n = length(v); h = 1
+    @inbounds while h < n
+        for i in 0:2h:n-1, j in 0:h-1
+            x = v[i+j+1]; y = v[i+j+h+1]
+            v[i+j+1] = x + y; v[i+j+h+1] = x - y
+        end; h *= 2
+    end
+end
 
-# function fastEDMagic(psi)
-#     d = length(psi)
-#     Nkvec = zeros(Float64, d)
-#     Threads.@threads for k in 0:d-1
-#         A = [conj(psi[xor(x,k)+1]) * psi[x+1] for x in 0:d-1]
-#         FWHT!(A)
-#         Nkvec[k+1] = sum(abs2.(A).^2)
-#     end
-#     return -log2(sum(Nkvec)/d)
-# end
+function fastEDMagic(psi)
+    d = length(psi)
+    Nkvec = zeros(Float64, d)
+    Threads.@threads for k in 0:d-1
+        A = [conj(psi[xor(x,k)+1]) * psi[x+1] for x in 0:d-1]
+        FWHT!(A)
+        Nkvec[k+1] = sum(abs2.(A).^2)
+    end
+    return -log2(sum(Nkvec)/d)
+end
 
-# function ChainRulesCore.rrule(::typeof(fastEDMagic), psi)
-#     d = length(psi)
+function ChainRulesCore.rrule(::typeof(fastEDMagic), psi)
+    d = length(psi)
 
-#     As = [Vector{ComplexF64}(undef, d) for _ in 1:d]
-#     Threads.@threads for k in 0:d-1
-#         A = [conj(psi[xor(x,k)+1]) * psi[x+1] for x in 0:d-1]
-#         FWHT!(A)
-#         As[k+1] = A    
-#     end
+    As = [Vector{ComplexF64}(undef, d) for _ in 1:d]
+    Threads.@threads for k in 0:d-1
+        A = [conj(psi[xor(x,k)+1]) * psi[x+1] for x in 0:d-1]
+        FWHT!(A)
+        As[k+1] = A    
+    end
 
-#     T::Float64 = sum(sum(abs2.(A).^2) for A in As)
-#     m2 = -log2(T/d)
+    T::Float64 = sum(sum(abs2.(A).^2) for A in As)
+    m2 = -log2(T/d)
 
-#     function fastEDMagic_pullback(Δm2)
-#         ΔT = -Δm2/(T*log(2))
+    function fastEDMagic_pullback(Δm2)
+        ΔT = -Δm2/(T*log(2))
 
-#         nthreads = Threads.nthreads()
-#         Δψ_threads = [zeros(ComplexF64, d) for _ in 1:nthreads]
-#         ΔS_threads = [Vector{ComplexF64}(undef, d) for _ in 1:nthreads]
+        nthreads = Threads.nthreads()
+        Δψ_threads = [zeros(ComplexF64, d) for _ in 1:nthreads]
+        ΔS_threads = [Vector{ComplexF64}(undef, d) for _ in 1:nthreads]
 
-#         Threads.@threads for k in 0:d-1
-#             tid = Threads.threadid()
-#             ΔS = ΔS_threads[tid]
-#             Δψt = Δψ_threads[tid]
-#             Ak = As[k+1]
+        Threads.@threads for k in 0:d-1
+            tid = Threads.threadid()
+            ΔS = ΔS_threads[tid]
+            Δψt = Δψ_threads[tid]
+            Ak = As[k+1]
 
-#             # in-place ΔS computation
-#             @inbounds @simd for x in 0:d-1
-#                 a2 = abs2(Ak[x+1])
-#                 ΔS[x+1] = 4*a2*Ak[x+1]
-#             end
-#             FWHT!(ΔS)
+            # in-place ΔS computation
+            @inbounds @simd for x in 0:d-1
+                a2 = abs2(Ak[x+1])
+                ΔS[x+1] = 4*a2*Ak[x+1]
+            end
+            FWHT!(ΔS)
 
-#             @inbounds for x in 0:d-1
-#                 xk = xor(x,k)+1     # correct permutation
-#                 Δψt[x+1] += (conj(ΔS[xk])+ΔS[x+1])*psi[xk]
-#             end
-#         end
+            @inbounds for x in 0:d-1
+                xk = xor(x,k)+1     # correct permutation
+                Δψt[x+1] += (conj(ΔS[xk])+ΔS[x+1])*psi[xk]
+            end
+        end
 
-#         Δψ = zeros(ComplexF64, d)
-#         @inbounds for t in 1:nthreads
-#             Δψ .+= Δψ_threads[t]
-#         end
-#         Δψ .*= ΔT
-#         return (NoTangent(), Δψ)
-#     end
+        Δψ = zeros(ComplexF64, d)
+        @inbounds for t in 1:nthreads
+            Δψ .+= Δψ_threads[t]
+        end
+        Δψ .*= ΔT
+        return (NoTangent(), Δψ)
+    end
 
-#     return m2, fastEDMagic_pullback
-# end
+    return m2, fastEDMagic_pullback
+end
 
 
 

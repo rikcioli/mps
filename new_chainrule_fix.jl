@@ -92,7 +92,7 @@ function test_move2()
             inds_final = ordered_inds(psi_final)
             psi_tensors = [Array{ComplexF64}(psi_final[j], inds_final[j]) for j in 1:N]
 
-            psi_mps_final = orthogonalize(psi_mps, ogc_final)
+            psi_mps_final = ITensorMPS.orthogonalize(psi_mps, ogc_final)
             inds_mps_final = ordered_inds(psi_mps_final[1:N])
             psi_mps_tensors = [Array{ComplexF64}(psi_mps_final[j], inds_mps_final[j]) for j in 1:N]
 
@@ -270,6 +270,18 @@ fg_sproduct = arrV -> withgrad_Riemannian(cost_sproduct, arrV, ogc)
 fg_sproduct(V_array)
 testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_sproduct, innerMixed, retractMixed_ogc)
 
+
+# GRADIENT OF SNORM
+function cost_snorm(arrV::Vector{<:AbstractArray})
+    psiV = MPS(arrV, ogc; sites = siteinds(psiW))
+    return snorm(psiV)
+end
+
+cost_snorm(V_array)
+gradient(cost_snorm, V_array)[1]
+fg_snorm = arrV -> withgrad_Riemannian(cost_snorm, arrV, ogc)
+fg_snorm(V_array)
+testGrad(() -> genPoint(N, χ, ogc), arrV -> genTanVec(arrV, ogc), fg_snorm, innerMixed, retractMixed_ogc)
 
 
 # GRADIENT OF SVDCONTRACT WORKS
@@ -640,8 +652,8 @@ withgrad_Riemannian = (func, arrU, args...) -> begin
     return fU, riemG
 end
 
-N = 4; χ = 2
-nU = 2;
+N = 8; χ = 4
+nU = 11;
 sites = siteinds("Qubit", N)
 psi = random_mps(ComplexF64, sites; linkdims = χ)
 orthogonalize!(psi, 1)
@@ -650,7 +662,7 @@ U_array = [random_unitary(4) for _ in 1:nU]
 
 # WORKS
 function cost_applyU(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
-    ψ2 = apply_brickwork(arrU, ψ)
+    ψ2 = apply_brickwork(arrU, ψ; trunc=(maxrank=2,))
     return real(sproduct(ψ, ψ2))
 end
 cost_applyU(U_array, psi)
