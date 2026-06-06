@@ -272,7 +272,7 @@ function SVDcontract_pullback(ΔMf, tape::SVDcontractTape)
     end
 
     ΔM = zero(M)
-    svd_trunc_pullback!(ΔM, M, (U, S, Vdg), (ΔU, ΔS, ΔVdg))
+    svd_trunc_pullback!(ΔM, M, (U, S, Vdg), (ΔU, ΔS, ΔVdg), gauge_atol = 1e-15)
 
     ΔM_ten = ITensor(ΔM, cLind, cRind)
     ΔM_ten *= dag(cR)
@@ -830,7 +830,7 @@ end
 
 ### ORTHOGONALIZE WITH TRUNCATION
 
-function move_center(ψ::T, b::Int; trunc=NamedTuple(), post_factorize_callback=identity) where {T<:Union{MPS, MPO}}
+function move_center(ψ::T, b::Int; trunc=NamedTuple(), normalize=false, post_factorize_callback=identity) where {T<:Union{MPS, MPO}}
     N = length(ψ)
     cog = only(ortho_lims(ψ)) #current orthogonality center
     @assert 1 <= cog <= N
@@ -862,7 +862,10 @@ function move_center(ψ::T, b::Int; trunc=NamedTuple(), post_factorize_callback=
                 cog==1 ? [sites[j];] : [sites[j]; links[cog-1]]
             end
             tensors = [WLten, WRten]
-            ((W1, W2), err), _ = SVDcontract(tensors, linds; move_ogc=:right, trunc=(trunc..., maxrank=maxranks[j]))
+            ((W1, W2), err), _ = SVDcontract(tensors, linds; 
+                                    move_ogc=:right,
+                                    normalize=normalize,
+                                    trunc=(trunc..., maxrank=maxranks[j]))
             push!(Ulinkinds, commonind(W1, W2))
             push!(errs, err)
 
@@ -881,7 +884,10 @@ function move_center(ψ::T, b::Int; trunc=NamedTuple(), post_factorize_callback=
 
             linds = j > 1 ? [sites[j]; links[j-1]] : [sites[j];]
             tensors = [WLten, WRten]
-            ((W1, W2), err), _ = SVDcontract(tensors, linds; move_ogc=:left, trunc=(trunc..., maxrank=maxranks[j]))
+            ((W1, W2), err), _ = SVDcontract(tensors, linds; 
+                                    move_ogc=:left,
+                                    normalize=normalize,
+                                    trunc=(trunc..., maxrank=maxranks[j]))
             push!(errs, err)
 
             Rten_new = W1
@@ -899,7 +905,7 @@ function move_center(ψ::T, b::Int; trunc=NamedTuple(), post_factorize_callback=
     return ψf
 end
 
-function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedTuple(), post_factorize_callback=identity) where {T<:Union{MPS, MPO}}
+function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedTuple(), normalize=false, post_factorize_callback=identity) where {T<:Union{MPS, MPO}}
     N = length(ψ)
     cog = only(ortho_lims(ψ)) #current orthogonality center
     @assert 1 <= cog <= N
@@ -933,7 +939,10 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedT
             end
             tensors = [WLten, WRten]
 
-            ((W1, W2), err), tape_j = SVDcontract(tensors, linds; move_ogc=:right, trunc=(trunc..., maxrank=maxranks[j]))
+            ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
+                                        move_ogc=:right,
+                                        normalize=normalize,
+                                        trunc=(trunc..., maxrank=maxranks[j]))
             push!(tapes, tape_j)
             push!(Ulinkinds, commonind(W1, W2))
             push!(errs, err)
@@ -954,7 +963,10 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedT
             linds = j > 1 ? [sites[j]; links[j-1]] : [sites[j];]
             tensors = [WLten, WRten]
 
-            ((W1, W2), err), tape_j = SVDcontract(tensors, linds; move_ogc=:left, trunc=(trunc..., maxrank=maxranks[j]))
+            ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
+                                        move_ogc=:left,
+                                        normalize=normalize,
+                                        trunc=(trunc..., maxrank=maxranks[j]))
             push!(tapes, tape_j)
             push!(errs, err)
 
@@ -1017,9 +1029,10 @@ end
 
 ### APPLY VECTOR OF UNITARIES IN A BRICKWORK PATTERN, SWEEPING LEFT TO RIGHT AND BACK
 
-function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), post_factorize_callback=identity)
+function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), normalize_after_layer=true, post_factorize_callback=identity)
     N = length(ψ)
     @assert shift==0 || shift==1
+    @assert length(Uarray)>0
 
     # Preparing the maxranks for svd trunc
     trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
@@ -1031,6 +1044,7 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_
     ψfinal = copy(ψ)
     errs = Float64[]
     i = 1; nU = length(Uarray)
+    current_layer_odd = true
     local lastj
     while i<=nU
         jvals = to_right ? (1:N-1) : (N-1:-1:1)
@@ -1040,7 +1054,7 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_
             lastj = j
             WLten, WRten = ψfinal[j:j+1]
 
-            if iseven(j+shift+to_right)
+            if iseven(j+shift+current_layer_odd)
                 Uten = ITensor(Uarray[i], sites[j]', sites[j+1]', sites[j], sites[j+1])
                 linds = j > 1 ? [sites[j]'; commonind(ψfinal[j-1], WLten)] : [sites[j]';]
                 tensors = [WLten, WRten, Uten]
@@ -1052,7 +1066,7 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_
 
             ((W1, W2), err), _ = SVDcontract(tensors, linds; 
                                     move_ogc = (to_right ? :right : :left), 
-                                    normalize = (end_of_sweep || i>nU),
+                                    normalize = normalize_after_layer && (end_of_sweep || i>nU),
                                     trunc = (trunc..., maxrank=maxranks[j]))
             push!(errs, err)
             W1 = noprime(W1, tags="Site")
@@ -1064,7 +1078,8 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_
             if end_of_sweep
                 # this has to be here, because we want to_right to remain as it is
                 # if the endpoint of the sweep is reached exactly at i==nU
-                to_right = !to_right       
+                to_right = !to_right    
+                current_layer_odd = !current_layer_odd
             end
         end
     end
@@ -1074,9 +1089,10 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_
     return ψfinal
 end
 
-function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), post_factorize_callback=identity)
+function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), normalize_after_layer=true, post_factorize_callback=identity)
     N = length(ψ)
     @assert shift==0 || shift==1
+    @assert length(Uarray)>0
 
     ψ, move_center_back = Zygote.pullback(move_center, ψ, to_right ? 1 : N)
 
@@ -1087,6 +1103,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
     ψfinal = copy(ψ)
     errs = Float64[]
     i = 1; nU = length(Uarray)
+    current_layer_odd = true
     tapes = SVDcontractTape[]  # store intermediate data for the pullback
     local lastj      # store last j reached
     while i<=nU
@@ -1097,7 +1114,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
             lastj = j
             WLten, WRten = ψfinal[j:j+1]
 
-            if iseven(j+shift+to_right)
+            if iseven(j+shift+current_layer_odd)
                 Uten = ITensor(Uarray[i], sites[j]', sites[j+1]', sites[j], sites[j+1])
                 linds = j > 1 ? [sites[j]'; commonind(ψfinal[j-1], WLten)] : [sites[j]';]
                 tensors = [WLten, WRten, Uten]
@@ -1109,7 +1126,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
 
             ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
                                                 move_ogc = (to_right ? :right : :left),
-                                                normalize = (end_of_sweep || i>nU), 
+                                                normalize = normalize_after_layer && (end_of_sweep || i>nU), 
                                                 trunc = (trunc..., maxrank=maxranks[j]))
             push!(tapes, tape_j)
             push!(errs, err)
@@ -1122,7 +1139,8 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
             if end_of_sweep
                 # this has to be here, because we want to_right to remain as it is
                 # if the endpoint of the sweep is reached exactly at i==nU
-                to_right = !to_right      
+                to_right = !to_right
+                current_layer_odd = !current_layer_odd
             end
         end
     end
@@ -1141,7 +1159,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
                 ΔW1 = Δψ[j]
                 ΔW2 = Δψ[j+1]
 
-                if iseven(j+shift+to_right)
+                if iseven(j+shift+current_layer_odd)
                     ΔW1 = prime(ΔW1, tags="Site")
                     ΔW2 = prime(ΔW2, tags="Site")
                     ΔMf = (ΔW1, ΔW2)
@@ -1162,6 +1180,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
             end
             lastj = to_right ? 1 : N-1
             to_right = !to_right
+            current_layer_odd = !current_layer_odd
         end
 
         (Δψ,) = move_center_back(Δψ)
