@@ -217,7 +217,7 @@ function invert(ψ::MPS, maxtau::Int; pathname = "", trunc=NamedTuple(), reuse_p
                         gradmin=gradmin, niter=numfg, normgradhistory=normgradhistory)
 
         maxerror = trunc[:maxerror]
-        save_object("$(pathname)N$(N)_T$(tau)_E$(maxerror).jld2", result_tau)
+        save_object(pathname*"N$(N)_T$(tau)_E$(maxerror).jld2", result_tau)
 
         arrUs[tau] .+= arrUmin
         entsL[tau] .+= entsL_tau
@@ -233,8 +233,10 @@ function invert(ψ::MPS, maxtau::Int; pathname = "", trunc=NamedTuple(), reuse_p
     return result
 end
 
-function run(N, maxtau, maxerror, pathname = "testdata\\XY\\")
-    _, psi = XY(N)
+function runinversion(N, maxtau, maxerror, pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/xy/g0h0.5/")
+    f = h5open(pathname*"$(N)_mps.h5","r")
+    psi = read(f,"psi",MPS)
+    close(f)
     orthogonalize!(psi, 1)
     psi_cut = move_center(psi, N; trunc=(maxrank=1,), normalize=true)
     @show maxlinkdim(psi)
@@ -251,7 +253,7 @@ function run(N, maxtau, maxerror, pathname = "testdata\\XY\\")
     U_start = newU .* U_start
 
     result = invert(psi, maxtau; trunc=(maxerror=maxerror,), warm_start=U_start, reuse_previous=true)
-    save_object("$(pathname)N$(N)_E$(maxerror).jld2", result)
+    save_object(pathname*"N$(N)_E$(maxerror).jld2", result)
 end
 
 function dagger(Uarray::Vector{<:AbstractMatrix})
@@ -259,7 +261,14 @@ function dagger(Uarray::Vector{<:AbstractMatrix})
     return Udagger
 end
 
-run(20, 10, 1e-4)
+
+let
+    Nlist = [20, 40, 60, 80, 100]
+    maxerrorlist = [1e-5, 1e-6, 1e-7, 1e-8]
+    Threads.@threads for (N, maxerror) in Iterators.product(Nlist, maxerrorlist)
+        runinversion(N, 12, maxerror)
+    end
+end
 
 
 
