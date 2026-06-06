@@ -269,3 +269,16 @@ function to_strategy(trunc::NamedTuple)
 
     return TruncationIntersection(strats...)
 end
+
+
+### Functions for brickwork circuits
+
+"Returns number of unitaries in a depth-τ brickwork circuit of 2-qubit gates on N qubits.
+Set shift=1 if you want the first gate to act on qubits (2,3) instead of (1,2)"
+function n_unitaries(N, τ, shift=0)
+    return div(N-1,2)*τ + mod(N-1,2)*div(τ+1-shift,2)
+end
+
+function n_unitaries_layer(N, t, shift=0)
+    div(N, 2) - mod(N+1,2)*mod(t+shift+1, 2)
+end

@@ -106,59 +106,78 @@ end
 
 
 "Uses ITensor apply, can be used to check later functions"
-function applyBW(U_array::Vector{<:AbstractMatrix}, psi::MPS)
+function applyBW(U_array::Vector{<:AbstractMatrix}, psi::MPS; shift=0)
     N = length(psi)
     sites = siteinds(psi)
-    n_unitaries = length(U_array)
+    nU = length(U_array)
 
     # we prepare the values of j to use in the next section here
-    pattern = vcat([1:2:N-1; N-2:-2:2])
-    # repeat pattern as needed to match n_unitaries, then truncate to exact length
-    # if n_unitaries < length(pattern), only the first k elements are used
-    jvals = repeat(pattern, ceil(Int, n_unitaries/length(pattern)))[1:n_unitaries]
+    pattern = iseven(N) ? vcat([1+shift:2:N-1; N-2+shift:-2:2-shift]) : vcat([1+shift:2:N-1; N-1-shift:-2:2-shift])
+    # repeat pattern as needed to match nU, then truncate to exact length
+    # if nU < length(pattern), only the first k elements are used
+    jvals = repeat(pattern, ceil(Int, nU/length(pattern)))[1:nU]
 
     gates = [ITensor(U_array[unit_no], sites[j]', sites[j+1]', sites[j], sites[j+1]) for (unit_no, j) in enumerate(jvals)]
     
-    n_twolayers = div(n_unitaries, N-1)
-    if mod(n_unitaries, N-1) > 0
+    ngates_2layer = N-1
+    n_twolayers = div(nU, ngates_2layer)
+    if mod(nU, ngates_2layer) > 0
         n_twolayers += 1
     end
-
+ 
     for j in 1:n_twolayers
-        psi = ITensorMPS.apply(gates[1+(j-1)*(N-1) : min(j*(N-1), n_unitaries)], psi)
+        psi = ITensorMPS.apply(gates[1+(j-1)*ngates_2layer : min(j*ngates_2layer, nU)], psi)
     end
 
     return psi
 end
 
-function applyED(Uvec::Vector{<:AbstractMatrix}, ψ::AbstractVector, N::Int, depth::Int)
-    j=1
+function applyED(Uvec::Vector{<:AbstractMatrix}, ψ::AbstractVector, N::Int, depth::Int, shift::Int=0)
+    @assert shift == 0 || shift == 1
+    j = 1
+    Id = Matrix{ComplexF64}(I, 2, 2)
     for i in 1:depth
+        start_site = isodd(i+shift) ? 1 : 2
+        ngates = start_site == 1 ? div(N, 2) : div(N-1, 2)
+        layer = Uvec[j:j+ngates-1]
         if isodd(i)
-            lastj = div(N,2)
-            ψ = reduce(kron, reverse(Uvec[j:j+lastj-1]))*ψ
-        else
-            lastj = div(N,2)-1
-            ψ = reduce(kron, [[Id]; Uvec[j:j+lastj-1]; [Id]])*ψ
+            layer = reverse(layer)
         end
-        j += lastj
+
+        if isodd(N)
+            if start_site==1
+                pushfirst!(layer, Id)
+            else
+                push!(layer, Id)
+            end
+        else
+            if start_site==2
+                layer = [[Id]; layer; [Id]]
+            end
+        end
+
+        ψ = reduce(kron, layer)*ψ
+        j += ngates
     end
     return ψ
 end
 
 function test_applyED()
-    N=6
-    sites = siteinds("Qubit", N)
-
-    for trial in 1:100
-        Uarr = [random_unitary(4) for _ in 1:8]
+    for trial in 1:200
+        N = rand([6,7])
+        sites = siteinds("Qubit", N)
         mps = random_mps(ComplexF64, sites, linkdims=4)
 
-        psi = applyBW(Uarr, mps)
+        tau = rand([1,2,3])
+        shift = rand([0,1])
+        nU = n_unitaries(N, tau, shift)
+        Uarr = [random_unitary(4) for _ in 1:nU]
+
+        psi = applyBW(Uarr, mps; shift)
         psivec = reshape(Array{ComplexF64}(prod(psi), sites), 2^N)
 
         mps_state = reshape(Array{ComplexF64}(prod(mps), sites), 2^N)
-        ψED = applyED(Uarr, mps_state, N, 3)
+        ψED = applyED(Uarr, mps_state, N, tau, shift)
         !isapprox(real(psivec'*ψED), 1) && return false
     end
 
@@ -166,24 +185,49 @@ function test_applyED()
 end
 
 function test_apply_brickwork()
-    N = 6
-    sites = siteinds("Qubit", N)
-
     for trial in 1:1000
+        N = rand([6,7])
+        sites = siteinds("Qubit", N)
         ψ = random_mps(ComplexF64, sites, linkdims=4)
-        Uarr = [random_unitary(4) for _ in 1:8]
 
-        ψfinal = apply_brickwork(Uarr, ψ)
+        tau = rand([1,2,3])
+        shift = rand([0,1])
+        nU = n_unitaries(N, tau, shift)
+        Uarr = [random_unitary(4) for _ in 1:nU]
+
+        ψfinal = apply_brickwork(Uarr, ψ; shift=shift)
         ψfinal_statevec = reshape(Array{ComplexF64}(prod(ψfinal), sites), 2^N)
 
         ψ_statevec = reshape(Array{ComplexF64}(prod(ψ), sites), 2^N)
-        ψED = applyED(Uarr, ψ_statevec, N, 3)
+        ψED = applyED(Uarr, ψ_statevec, N, tau, shift)
 
         !isapprox(real(ψfinal_statevec'*ψED), 1) && return false
     end
     return true
 end
 
+function test_apply_brickwork_toleft()
+
+    for trial in 1:1000
+        N = rand([6,7])
+        sites = siteinds("Qubit", N)
+        ψ = random_mps(ComplexF64, sites, linkdims=4)
+
+        tau = 1
+        shift = rand([0,1])
+        nU = n_unitaries(N, tau, shift)
+        Uarr = [random_unitary(4) for _ in 1:nU]
+
+        ψfinal = apply_brickwork(Uarr, ψ; shift=shift, to_right=false)
+        ψfinal_statevec = reshape(Array{ComplexF64}(prod(ψfinal), sites), 2^N)
+
+        ψ_statevec = reshape(Array{ComplexF64}(prod(ψ), sites), 2^N)
+        ψED = applyED(reverse(Uarr), ψ_statevec, N, tau, shift)
+
+        !isapprox(real(ψfinal_statevec'*ψED), 1) && return false
+    end
+    return true
+end
 
 function sre2direct(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
     Uψ = apply_brickwork(arrU, ψ)     # assume odd number of layers
@@ -232,6 +276,7 @@ end
 #@code_warntype test_move2()
 @test test_applyED()
 @test test_apply_brickwork()
+@test test_apply_brickwork_toleft()
 #@code_warntype test_apply_brickwork()
 
 @test test_sre2(sre2direct)
