@@ -1,4 +1,4 @@
-using MKL
+#using MKL
 include("rrules.jl")
 include("optFunctions.jl")
 using ITensors, ITensorMPS
