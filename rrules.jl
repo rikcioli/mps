@@ -733,7 +733,7 @@ function zipup(W::MPO, ψ::MPS; trunc=NamedTuple(), post_factorize_callback = id
     ψ = move_center(ψ, N)
     W = move_center(W, N)
 
-    trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
+    #trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
 
@@ -762,7 +762,7 @@ function ChainRulesCore.rrule(::typeof(zipup), W::MPO, ψ::MPS; trunc=NamedTuple
     ψ, move_center_back_ψ = Zygote.pullback(move_center, ψ, N)
     W, move_center_back_W = Zygote.pullback(move_center, W, N)
 
-    trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
+    #trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
 
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
@@ -842,7 +842,7 @@ function move_center(ψ::T, b::Int; trunc=NamedTuple(), normalize=false, post_fa
     to_right = b>cog  # left-to-right mode
 
     # Preparing the maxranks for svd trunc
-    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
+    #trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
     
     sites = siteinds(ψ)
     links = linkinds(ψ)
@@ -865,7 +865,7 @@ function move_center(ψ::T, b::Int; trunc=NamedTuple(), normalize=false, post_fa
             ((W1, W2), err), _ = SVDcontract(tensors, linds; 
                                     move_ogc=:right,
                                     normalize=normalize,
-                                    trunc=(trunc..., maxrank=maxranks[j]))
+                                    trunc=trunc)
             push!(Ulinkinds, commonind(W1, W2))
             push!(errs, err)
 
@@ -917,7 +917,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedT
     to_right = b>cog  # left-to-right mode
 
     # Preparing the maxranks for svd trunc
-    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
+    #trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
 
     sites = siteinds(ψ)
     links = linkinds(ψ)
@@ -942,7 +942,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedT
             ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
                                         move_ogc=:right,
                                         normalize=normalize,
-                                        trunc=(trunc..., maxrank=maxranks[j]))
+                                        trunc=trunc)
             push!(tapes, tape_j)
             push!(Ulinkinds, commonind(W1, W2))
             push!(errs, err)
@@ -1035,7 +1035,7 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_
     @assert length(Uarray)>0
 
     # Preparing the maxranks for svd trunc
-    trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
+    #trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
     
     # by default to_right == true, meaning we sweep from left to right
     ψ = move_center(ψ, to_right ? 1 : N)
@@ -1067,7 +1067,7 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_
             ((W1, W2), err), _ = SVDcontract(tensors, linds; 
                                     move_ogc = (to_right ? :right : :left), 
                                     normalize = normalize_after_layer && (end_of_sweep || i>nU),
-                                    trunc = (trunc..., maxrank=maxranks[j]))
+                                    trunc = trunc)
             push!(errs, err)
             W1 = noprime(W1, tags="Site")
             W2 = noprime(W2, tags="Site")
@@ -1097,7 +1097,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
     ψ, move_center_back = Zygote.pullback(move_center, ψ, to_right ? 1 : N)
 
     # Preparing the maxranks for svd trunc
-    trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
+    #trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
     
     sites = siteinds(ψ)
     ψfinal = copy(ψ)
@@ -1127,7 +1127,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
             ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
                                                 move_ogc = (to_right ? :right : :left),
                                                 normalize = normalize_after_layer && (end_of_sweep || i>nU), 
-                                                trunc = (trunc..., maxrank=maxranks[j]))
+                                                trunc = trunc)
             push!(tapes, tape_j)
             push!(errs, err)
             W1 = noprime(W1, tags="Site")

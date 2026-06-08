@@ -234,9 +234,11 @@ function invert(ψ::MPS, maxtau::Int; pathname = "", trunc=NamedTuple(), reuse_p
 end
 
 function runinversion(N, maxtau, maxerror, pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/xy/g0h0.5/")
+    #pathname = "testdata/"
     f = h5open(pathname*"$(N)_mps.h5","r")
     psi = read(f,"psi",MPS)
     close(f)
+    psi = XY(N)[2]
     orthogonalize!(psi, 1)
     psi_cut = move_center(psi, N; trunc=(maxrank=1,), normalize=true)
     @show maxlinkdim(psi)
@@ -252,7 +254,7 @@ function runinversion(N, maxtau, maxerror, pathname = "/home/PERSONALE/riccardo.
     newU = [retract(Matrix{ComplexF64}(I, (4,4)), V, 0.01)[1] for V in Vs]
     U_start = newU .* U_start
 
-    result = invert(psi, maxtau; trunc=(maxerror=maxerror,), warm_start=U_start, reuse_previous=true)
+    result = invert(psi, maxtau; pathname=pathname, trunc=(maxerror=maxerror,), warm_start=U_start, reuse_previous=true)
     save_object(pathname*"N$(N)_E$(maxerror).jld2", result)
 end
 
@@ -263,9 +265,10 @@ end
 
 
 let
-    Nlist = [20, 40, 60, 80, 100]
+    Nlist = [80, 100]
     maxerrorlist = [1e-5, 1e-6, 1e-7, 1e-8]
-    Threads.@threads for (N, maxerror) in Iterators.product(Nlist, maxerrorlist)
+    pairs = collect(Iterators.product(Nlist, maxerrorlist))
+    for (N, maxerror) in pairs
         runinversion(N, 12, maxerror)
     end
 end
