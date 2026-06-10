@@ -684,6 +684,11 @@ function genUnitary(nU)
     return U0
 end
 
+function genUnitaryProduct(nU)
+    U0 = [kron(random_unitary(2), random_unitary(2)) for _ in 1:nU]
+    return U0
+end
+
 function genTanVec(Uvec)
     V = [randn(ComplexF64, 4, 4) for _ in eachindex(Uvec)]
     V = skew.(V)
@@ -865,3 +870,99 @@ Plots.plot!(chirange, results[2], label="tg")
 Plots.plot!(chirange, 3e-5*chirange, yscale=:log10, xscale=:log10, label="O(chi)")
 Plots.plot!(chirange, 1e-5*chirange .^2, yscale=:log10, xscale=:log10, label="O(chi^2)")
 Plots.plot!(chirange, 1e-7*chirange .^3, yscale=:log10, xscale=:log10, label="O(chi^3)", legend=:bottomright)
+
+
+"Extends m x n isometry to M x M unitary, where M is the power of 2 which bounds max(m, n) from above"
+function iso_to_unitary(V::AbstractArray)
+    nrows, ncols = size(V, 1), size(V, 2)
+    dagger = false
+    if ncols > nrows
+        V = V'
+        nrows, ncols = ncols, nrows
+        dagger = true
+    end
+    V = V[:, vec(sum(abs.(V), dims=1) .> 1E-10)]
+    nrows, ncols = size(V, 1), size(V, 2)
+
+    bitlength = length(digits(nrows-1, base=2))     # find number of sites of dim 2
+    D = 2^bitlength
+
+    U = zeros(ComplexF64, (D, D))
+    U[1:nrows, 1:ncols] = V
+    kerU = nullspace(U')
+    U[:, ncols+1:D] = kerU
+
+    if dagger
+        U = copy(U')
+    end
+
+    return U
+end
+
+"Extract isometries from bond dimension-1 MPS and convert them to depth-1 brickwork circuit"
+function to_layer(ψ::MPS)
+    N = length(ψ)
+    @assert maxlinkdim(ψ)==1
+    orthogonalize!(ψ, N)
+    sites = siteinds(ψ)
+    links = linkinds(ψ)
+
+    combiners1 = [combiner((sites[1], links[1]))]
+    combiners = [combiner([sites[j]; links[j-1:j]]) for j in 2:N-1]
+    combinersN = [combiner((sites[N], links[N-1]))]
+    combiners = [combiners1; combiners; combinersN]
+
+    combinedinds = [combinedind(comb) for comb in combiners]
+    tensor_list = [combiners[j]*ψ[j] for j in 1:N]
+
+    Vlist = [Array{ComplexF64}(tensor_list[j], combinedinds[j]) for j in 1:N]
+
+    Ulist = [iso_to_unitary(V) for V in Vlist]
+    layer = [kron(Ulist[2*j], Ulist[2*j-1]) for j in 1:div(N,2)]
+    return layer
+end
+
+
+sites = siteinds("Qubit", 100)
+psi = random_mps(ComplexF64, sites; linkdims = 2)
+N = length(psi)
+orthogonalize!(psi, 1)
+
+psi_cut = move_center(psi, N; trunc=(maxrank=1,), normalize=true)
+@show maxlinkdim(psi)
+@show norm(psi_cut)
+@show real(dot(psi_cut, psi))
+@show maxlinkdim(psi_cut)
+
+# Extract the U_start from the truncated mps
+U_start = to_layer(psi_cut)
+
+# We add some random noise to help escaping the saddle point
+Vs = skew([randn(ComplexF64, 4, 4) for _ in eachindex(U_start)])
+newU = [retract(Matrix{ComplexF64}(I, (4,4)), V, 0.01)[1] for V in Vs]
+U_start = newU .* U_start
+
+zeromps = MPS(sites, ["0" for _ in 1:N])
+orthogonalize!(zeromps, 1)
+trunc = (maxerror=1e-2,)
+
+# Captures ψ, zeromps and kwargs
+cost_function = (arrU) -> begin
+    ϕ = apply_brickwork(arrU, zeromps; trunc=trunc, normalize=true)
+    return -real(sproduct(psi, ϕ))
+end
+
+# Combines function and projected gradient
+fg = arrU -> begin
+    func, grad = withgradient(cost_function, arrU)
+    grad = project(arrU, grad[1])
+    return func, grad
+end
+
+nU = n_unitaries(N, 5)
+
+testGrad(() -> U_start, genTanVec, fg, inner, retract)
+
+testGrad(() -> genUnitary(nU), genTanVec, fg, inner, retract)
+
+testGrad(() -> genUnitaryProduct(nU), genTanVec, fg, inner, retract)
