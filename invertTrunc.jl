@@ -1,4 +1,4 @@
-#using MKL
+using MKL
 include("rrules.jl")
 include("optFunctions.jl")
 using ITensors, ITensorMPS
@@ -6,6 +6,7 @@ using OptimKit
 using Zygote
 using LinearAlgebra
 using JLD2
+using HDF5
 #using LaTeXStrings
 #using Plots
 
@@ -135,6 +136,7 @@ end
 
 
 
+
 function invert(ψ::MPS, maxtau::Int; pathname = "", trunc=NamedTuple(), reuse_previous=false, warm_start::Union{Vector{<:AbstractMatrix}, Nothing} = nothing)
     N = length(ψ)
     sites = siteinds(ψ)
@@ -143,7 +145,7 @@ function invert(ψ::MPS, maxtau::Int; pathname = "", trunc=NamedTuple(), reuse_p
 
     # Captures ψ, zeromps and kwargs
     cost_function = (arrU) -> begin
-        ϕ = apply_brickwork(arrU, zeromps; trunc=trunc)
+        ϕ = apply_brickwork(arrU, zeromps; trunc=trunc, normalize=true)
         return -real(sproduct(ψ, ϕ))
     end
 
@@ -154,13 +156,10 @@ function invert(ψ::MPS, maxtau::Int; pathname = "", trunc=NamedTuple(), reuse_p
         return func, grad
     end
 
-
     arrUs = [[zeros(ComplexF64, 4, 4) for _ in 1:n_unitaries(N, tau)] for tau in 1:maxtau]
     errs = zeros(maxtau)
     times = zeros(maxtau)
-    bonddims = zeros(Int64, maxtau)
-    entsL = [zeros(tau) for tau in 1:maxtau]
-    entsR = [zeros(tau) for tau in 1:maxtau]
+    
     arrU0 = isnothing(warm_start) ? Matrix{ComplexF64}[] : warm_start
 
     for tau in 1:maxtau
@@ -187,59 +186,146 @@ function invert(ψ::MPS, maxtau::Int; pathname = "", trunc=NamedTuple(), reuse_p
                                                                 isometrictransport = true, 
                                                                 inner = inner)
         
-        if reuse_previous
-            arrU0 = arrUmin
-        end
-
-        currentU = 1
-        entsL_tau = zeros(tau)
-        entsR_tau = zeros(tau)
-        state = zeromps
-        for i in 1:tau
-            nUlayer = n_unitaries_layer(N, i)
-            state = apply_brickwork(arrUmin[currentU : currentU+nUlayer-1], state; 
-                                                    to_right=isodd(i), 
-                                                    trunc=trunc)
-
-            state_copy = copy(state)
-            entL = entropy!(state_copy, div(N,2))
-            entR = entropy!(state_copy, div(N,2)+1)
-            @show i, entL, entR
-            entsL_tau[i] += entL
-            entsR_tau[i] += entR
-            currentU += nUlayer
-        end
         err_tau = 1+neg_overlap
-        bonddim_tau = maximum(linkdims(state))
-        result_tau = (N=N, tau=tau, trunc=trunc, time=time_tau, 
-                        err=err_tau, bonddim=bonddim_tau, arrU=arrUmin, 
-                        entsL=entsL_tau, entsR=entsR_tau,
-                        gradmin=gradmin, niter=numfg, normgradhistory=normgradhistory)
 
+        result_tau = (N=N, tau=tau, trunc=trunc,
+                        time=time_tau, err=err_tau, arrU=arrUmin, 
+                        gradmin=gradmin, niter=numfg, normgradhistory=normgradhistory)
         maxerror = trunc[:maxerror]
         save_object(pathname*"N$(N)_T$(tau)_E$(maxerror).jld2", result_tau)
 
         arrUs[tau] .+= arrUmin
-        entsL[tau] .+= entsL_tau
-        entsR[tau] .+= entsR_tau
         errs[tau] = err_tau
-        bonddims[tau] = bonddim_tau
         times[tau] = time_tau
+
+        if reuse_previous
+            arrU0 = arrUmin
+        end
     end
 
     result = (N=N, maxtau=maxtau, trunc=trunc, times=times,
-    errs=errs, bonddims=bonddims, arrUs=arrUs, entsL=entsL, entsR=entsR)
+    errs=errs, arrUs=arrUs)
 
     return result
 end
 
-function runinversion(N, maxtau, maxerror, pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/xy/g0h0.5/")
-    #pathname = "testdata/"
-    f = h5open(pathname*"$(N)_mps.h5","r")
-    psi = read(f,"psi",MPS)
-    close(f)
-    psi = XY(N)[2]
+
+function invert2(ψ::MPS, maxtau::Int; pathname = "", reuse_previous=false, warm_start::Union{Vector{<:AbstractMatrix}, Nothing} = nothing)
+    N = length(ψ)
+    sites = siteinds(ψ)
+    chimax = maxlinkdim(ψ)
+    zeromps = MPS(sites, ["0" for _ in 1:N])
+    orthogonalize!(zeromps, 1)
+
+    # Captures ψ, zeromps and kwargs
+    cost_function = (arrU) -> begin
+        ϕ, logs = apply_brickwork_normalize(arrU, zeromps; trunc=(maxrank=chimax, atol=eps()))
+        return -log(real(sproduct(ψ, ϕ)))-logs
+    end
+
+    err_func = (arrU) -> begin
+        ϕ = apply_brickwork(arrU, zeromps; trunc=(maxerror=1e-12,), normalize=true)
+        return 1-real(sproduct(ψ, ϕ))
+    end
+
+    cost_split_func = (arrU) -> begin
+        ϕ, logs = apply_brickwork_normalize(arrU, zeromps; trunc=(maxrank=chimax, atol=eps()))
+        return (-log(real(sproduct(ψ, ϕ))), -logs)
+    end
+
+    # Combines function and projected gradient
+    fg = arrU -> begin
+        func, grad = withgradient(cost_function, arrU)
+        grad = project(arrU, grad[1])
+        return func, grad
+    end
+    
+    arrU0 = isnothing(warm_start) ? Matrix{ComplexF64}[] : warm_start
+    for tau in 1:maxtau
+        @show tau
+        nU_tau = n_unitaries_layer(N, tau)
+        if reuse_previous 
+            if tau>1 || isnothing(warm_start)  # add a layer of unitaries close to identity to increase the circuit depth
+                Vs = skew([randn(ComplexF64, 4, 4) for _ in 1:nU_tau])
+                newU = [retract(Matrix{ComplexF64}(I, (4,4)), V, 0.01)[1] for V in Vs]
+                arrU0 = vcat(arrU0, newU)
+            end
+        else
+            arrU0 = [random_unitary(4) for _ in 1:n_unitaries(N, tau)]
+        end
+
+        m = 5
+        algorithm = LBFGS(m;maxiter = 10000, gradtol = 1e-8, verbosity = 2)
+
+        # optimize and store results
+        time_tau = @elapsed arrUmin, fmin, gradmin, numfg, normgradhistory = 
+                                                            optimize(fg, arrU0, algorithm; 
+                                                                retract = retract, 
+                                                                transport! = transport!, 
+                                                                isometrictransport = true, 
+                                                                inner = inner)
+        
+        cost = cost_split_func(arrUmin)
+        @show cost
+        err_tau = err_func(arrUmin)
+        @show err_tau
+        @show (1-exp(-fmin) - err_tau)/err_tau
+
+        result_tau = (N=N, tau=tau, trunc=trunc, cost=cost,
+                        time=time_tau, err=err_tau, arrU=arrUmin, 
+                        gradmin=gradmin, niter=numfg, normgradhistory=normgradhistory)
+
+        save_object(pathname*"N$(N)_T$(tau).jld2", result_tau)
+
+        if reuse_previous
+            arrU0 = arrUmin
+        end
+    end
+
+    return
+end
+
+
+function things_to_put_somewhere()
+    bonddims = zeros(Int64, maxtau)
+    entsL = [zeros(tau) for tau in 1:maxtau]
+    entsR = [zeros(tau) for tau in 1:maxtau]
+
+    currentU = 1
+    entsL_tau = zeros(tau)
+    entsR_tau = zeros(tau)
+    state = zeromps
+    for i in 1:tau
+        nUlayer = n_unitaries_layer(N, i)
+        state = apply_brickwork(arrUmin[currentU : currentU+nUlayer-1], state; 
+                                                    to_right=isodd(i), 
+                                                    trunc=trunc)
+
+        state_copy = copy(state)
+        entL = entropy!(state_copy, div(N,2))
+        entR = entropy!(state_copy, div(N,2)+1)
+        @show i, entL, entR
+        entsL_tau[i] += entL
+        entsR_tau[i] += entR
+        currentU += nUlayer
+    end
+    bonddim_tau = maximum(linkdims(state))
+
+    entsL[tau] .+= entsL_tau
+    entsR[tau] .+= entsR_tau
+    bonddims[tau] = bonddim_tau
+end
+
+
+function runinversion(N, maxtau, maxerror, pathname = "testdata\\ising\\")
+    #f = h5open(pathname*"$(N)_mps.h5","r")
+    #psi = read(f,"psi",MPS)
+    #close(f)
+    #psi = XY(N)[2]
+    psi = load_object(pathname*"ising_L128_g1.5.jld2")
+    psi = dense(psi)
     orthogonalize!(psi, 1)
+
     psi_cut = move_center(psi, N; trunc=(maxrank=1,), normalize=true)
     @show maxlinkdim(psi)
     @show norm(psi_cut)
@@ -258,302 +344,95 @@ function runinversion(N, maxtau, maxerror, pathname = "/home/PERSONALE/riccardo.
     save_object(pathname*"N$(N)_E$(maxerror).jld2", result)
 end
 
-function dagger(Uarray::Vector{<:AbstractMatrix})
-    Udagger = adjoint.(reverse(Uarray))
-    return Udagger
+
+function runinversion2(psi::MPS, maxtau; pathname = "testdata\\XY\\")
+    #f = h5open(pathname*"$(N)_mps.h5","r")
+    #psi = read(f,"psi",MPS)
+    #close(f)
+    #psi = random_mps(ComplexF64, siteinds("Qubit", N); linkdims=2)
+    #save_object(pathname*"$(N)_mps.jld2", psi)
+    #psi = load_object(pathname*"$(N)_mps.jld2")
+    #psi = dense(psi)
+    N = length(psi)
+
+    orthogonalize!(psi, 1)
+
+    psi_cut = move_center(psi, N; trunc=(maxrank=1,), normalize=true)
+    @show maxlinkdim(psi)
+    @show norm(psi_cut)
+    @show dot(psi_cut, psi)
+    @show maxlinkdim(psi_cut)
+
+    # Extract the U_start from the truncated mps
+    U_start = to_layer(psi_cut)
+
+    # We add some random noise to help escaping the saddle point
+    Vs = skew([randn(ComplexF64, 4, 4) for _ in eachindex(U_start)])
+    newU = [retract(Matrix{ComplexF64}(I, (4,4)), V, 0.01)[1] for V in Vs]
+    U_start = newU .* U_start
+
+    invert2(psi, maxtau; pathname=pathname, warm_start=U_start, reuse_previous=true)
 end
 
 
-let
-    Nlist = [80, 100]
-    maxerrorlist = [1e-5, 1e-6, 1e-7, 1e-8]
-    pairs = collect(Iterators.product(Nlist, maxerrorlist))
-    for (N, maxerror) in pairs
-        runinversion(N, 12, maxerror)
+if false
+    let
+        Nlist = [20]
+        maxerrorlist = [1e-2]
+        pairs = collect(Iterators.product(Nlist, maxerrorlist))
+        for (N, maxerror) in pairs
+            runinversion(N, 12, maxerror)
+        end
     end
 end
 
 
+if false
+    let
+        Nlist = [20]
+        for N in Nlist
+            runinversion2(N, 12; pathname = "testdata\\rand\\")
+        end
+    end
+end
 
-# N = 50
-# ### #sites = siteinds("Qubit", N)
-# ### #psi = random_mps(ComplexF64, sites; linkdims=2)
-# energy, psi = XXZ(N)
-# entL = entropy!(psi, div(N,2))
-# entR = entropy!(psi, div(N,2)+1)
-# chimax = maxlinkdim(psi)
-# 
-# 
-# zerostate = MPS(siteinds(psi), ["0" for _ in 1:N])
-# orthogonalize!(zerostate, 1)
-# 
-# plterr = plot(yscale=:log10, xlabel=L"\tau", ylabel=L"1-|\langle\psi|U^{(\tau)}|0\rangle|")
-# for maxerror in [1e-4, 1e-5, 1e-6, 1e-7]
-#     results = load_object("testdata\\heisenberg_N$(N)_T8_E$(maxerror).jld2")
-#     plot!(plterr, 1:8, results[:errs], label=L"\mathrm{maxerror}="*"$(maxerror)")
-# end
-# plterr
-# savefig(plterr, "testdata\\error.png")
-# 
-# pltchi = plot(1:8, [chimax for _ in 1:8], line=:dash, xlabel=L"\tau", ylabel=L"\chi", label=L"\psi")
-# spectra_err = []
-# for maxerror in [1e-4]
-#     results = load_object("testdata\\heisenberg_N$(N)_T8_E$(maxerror).jld2")
-#     arrUs = results[:arrUs]
-#     spectra = []
-#     for i in 1:8
-#         state = apply_brickwork(arrUs[i], zerostate; 
-#                         normalize_after_layer = false,
-#                         trunc=(maxerror=maxerror,))
-#         reconstr_err = 1-abs(dot(state, zerostate))
-#         inv_err = results[:errs][i]
-#         abs_diff = abs(reconstr_err - inv_err)
-#         rel_diff = abs_diff/inv_err
-# 
-#         spec = spectrum(state, div(N,2))
-#         push!(spectra, spec)
-#     end
-#     push!(spectra_err, spectra)
-#     plot!(pltchi, 1:8, results[:bonddims], label=L"\mathrm{maxerror}="*"$(maxerror)")
-# end
-# pltchi
-# savefig(pltchi, "testdata\\bonddim.png")
-# 
-# plttime = plot(xlabel=L"\tau", ylabel=L"t \ (s)")
-# for maxerror in [1e-4, 1e-5, 1e-6, 1e-7]
-#     results = load_object("testdata\\heisenberg_N$(N)_T8_E$(maxerror).jld2")
-#     plot!(plttime, 1:8, results[:times], label=L"\mathrm{maxerror}="*"$(maxerror)")
-# end
-# plttime
-# savefig(plttime, "testdata\\times.png")
-# 
-# 
-# 
-# 
-# pltchi_psi = plot(1:8, [chimax for _ in 1:8], line=:dash, xlabel=L"\tau", ylabel=L"\chi", label=L"\psi")
-# spectra_err = []
-# for maxerror in [1e-4]
-#     results = load_object("testdata\\heisenberg_N$(N)_T8_E$(maxerror).jld2")
-#     arrUs = results[:arrUs]
-#     maxchis = []
-#     spectra = []
-#     for i in 1:8
-#         orthogonalize!(psi, iseven(i) ? 1 : N)
-#         arrdg = dagger(arrUs[i])
-#         @show maxlinkdim(psi)
-#         state = apply_brickwork(arrdg, psi; 
-#                         shift = mod(i-1,2), 
-#                         to_right = iseven(i), 
-#                         normalize_after_layer = false,
-#                         trunc=(maxerror=maxerror,))
-#         reconstr_err = 1-abs(dot(state, zerostate))
-#         inv_err = results[:errs][i]
-#         abs_diff = abs(reconstr_err - inv_err)
-#         rel_diff = abs_diff/inv_err
-# 
-#         spec = spectrum(state, div(N,2))
-#         push!(spectra, spec)
-#         @show abs_diff
-#         @show rel_diff
-#         @show norm(state)
-#         @show maxlinkdim(state)
-#         maxchi = maxlinkdim(state)
-#         push!(maxchis, maxchi)
-#     end
-#     push!(spectra_err, spectra)
-#     plot!(pltchi_psi, 1:8, maxchis, label=L"\mathrm{maxerror}="*"$(maxerror)")
-# end
-# pltchi_psi
-# savefig(pltchi_psi, "testdata\\bonddim_Upsi.png")
-# 
-# 
-# pltchi_psi = plot(1:8, [chimax for _ in 1:8], line=:dash, xlabel=L"\tau", ylabel=L"\chi", label=L"\psi")
-# spectra_err = []
-# for maxerror in [1e-4]
-#     results = load_object("testdata\\heisenberg_N$(N)_T8_E$(maxerror).jld2")
-#     arrUs = results[:arrUs]
-#     maxchis = []
-#     spectra = []
-#     for i in 1:8
-#         orthogonalize!(psi, iseven(i) ? 1 : N)
-#         arrdg = dagger(arrUs[i])
-#         @show maxlinkdim(psi)
-#         state = apply_brickwork(arrdg, psi; 
-#                         shift = mod(i-1,2), 
-#                         to_right = iseven(i), 
-#                         normalize_after_layer = false,
-#                         trunc=(maxerror=maxerror,))
-#         reconstr_err = 1-abs(dot(state, zerostate))
-#         inv_err = results[:errs][i]
-#         abs_diff = abs(reconstr_err - inv_err)
-#         rel_diff = abs_diff/inv_err
-# 
-#         spec = spectrum(state, div(N,2))
-#         push!(spectra, spec)
-#         @show abs_diff
-#         @show rel_diff
-#         @show norm(state)
-#         @show maxlinkdim(state)
-#         maxchi = maxlinkdim(state)
-#         push!(maxchis, maxchi)
-#     end
-#     push!(spectra_err, spectra)
-#     plot!(pltchi_psi, 1:8, maxchis, label=L"\mathrm{maxerror}="*"$(maxerror)")
-# end
-# pltchi_psi
-# savefig(pltchi_psi, "testdata\\bonddim_Upsi.png")
-# 
-# 
-# using ColorSchemes
-# colors = [get(ColorSchemes.inferno, t) for t in range(0.9, stop=0.1, length=8)]
-# 
-# specs = spectra_err[1]
-# 
-# spec_psi = spectrum(psi, div(N,2))
-# pltspec = plot(1:length(spec_psi), spec_psi, line=:dash, 
-#             xlabel=L"j", ylabel=L"\lambda_j", yscale=:log10, 
-#             ylimits = (4e-5,1.1), xlimits = (0, 15),
-#             dpi=400, palette=:inferno, label=L"\psi")
-# for tau in 1:8
-#     plot!(pltspec, 1:length(specs[tau]), specs[tau], color=colors[tau], label=L"\tau="*"$(tau)")
-# end
-# pltspec
-# savefig(pltspec, "testdata\\spectra_zero.png")
-# 
-# 
-# plt = plot(1:8, [entL for _ in 1:8], label=L"ψ", line=:dash, xlabel=L"\mathrm{Layer}", ylabel=L"S")
-# for (i, vals) in enumerate(results[:entsL])
-#     if isodd(i)
-#         plot!(plt, 1:2:length(vals), vals[1:2:end], label=L"\tau="*"$i", m=:circle)
-#     end
-# end
-# plt
-# 
-# 
-# plt_compare = plot(yscale=:log10, 
-#         ylabel=ylabel=L"1-|\langle\psi|U^{(\tau)}|0\rangle|",
-#         xlabel=L"\tau")
-# for maxerror in [1e-4, 1e-5, 1e-6, 1e-7]
-#     results = load_object("testdata\\heisenberg_N$(N)_T8_E$(maxerror).jld2")
-#     states = [apply_brickwork(circuit, zerostate) for circuit in results[:arrUs]]
-#     errs_true = [1 - abs(dot(state, psi)) for state in states]
-#     plot!(plt_compare, 1:8, results[:errs], line=:dash, label=L"\mathrm{maxerror}="*"$(maxerror)")
-#     plot!(plt_compare, errs_true, label=L"\mathrm{maxerror}="*"$(maxerror)")
-# end
-# plt_compare
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# 
-# N = 10
-# energy, psi = XXZ(N)
-# entL = entropy!(psi, div(N,2))
-# entR = entropy!(psi, div(N,2)+1)
-# chimax = maxlinkdim(psi)
-# 
-# zerostate = MPS(siteinds(psi), ["0" for _ in 1:N])
-# orthogonalize!(zerostate, 1)
-# 
-# maxerror = 1e-4
-# maxdepth = 20
-# results = [load_object("testdata\\heisenberg_N$(N)_T$(tau)_E$(maxerror).jld2") for tau in 1:20]
-# 
-# plterr = plot(yscale=:log10, xlabel=L"\tau", ylabel=L"1-|\langle\psi|U^{(\tau)}|0\rangle|")
-# plot!(plterr, 1:maxdepth, [res[:err] for res in results], label=L"\mathrm{maxerror}="*"$(maxerror)")
-# savefig(plterr, "testdata\\N10_error.png")
-# 
-# 
-# plttime = plot(xlabel=L"\tau", ylabel=L"t \ (s)")
-# plot!(plttime, 1:maxdepth, [res[:time] for res in results], label=L"\mathrm{maxerror}="*"$(maxerror)")
-# plttime
-# savefig(plttime, "testdata\\N10_times.png")
-# 
-# pltchi = plot(1:maxdepth, [chimax for _ in 1:maxdepth], line=:dash, xlabel=L"\tau", ylabel=L"\chi", label=L"\psi")
-# spectra_err = []
-# for maxerror in [1e-4]
-#     arrUs = [res[:arrU] for res in results]
-#     spectra = []
-#     for i in 1:maxdepth
-#         state = apply_brickwork(arrUs[i], zerostate; 
-#                         normalize_after_layer = false,
-#                         trunc=(maxerror=maxerror,))
-#         reconstr_err = 1-abs(dot(state, zerostate))
-#         inv_err = results[i][:err]
-#         abs_diff = abs(reconstr_err - inv_err)
-#         rel_diff = abs_diff/inv_err
-# 
-#         spec = spectrum(state, div(N,2))
-#         push!(spectra, spec)
-#     end
-#     push!(spectra_err, spectra)
-#     plot!(pltchi, 1:maxdepth, [res[:bonddim] for res in results], label=L"\mathrm{maxerror}="*"$(maxerror)")
-# end
-# pltchi
-# savefig(pltchi, "testdata\\N10_bonddim.png")
-# 
-# 
-# 
-# pltchi_psi = plot(1:maxdepth, [chimax for _ in 1:maxdepth], line=:dash, xlabel=L"\tau", ylabel=L"\chi", label=L"\psi")
-# spectra_err = []
-# for maxerror in [1e-4]
-#     arrUs = [res[:arrU] for res in results]
-#     maxchis = []
-#     spectra = []
-#     for i in 1:maxdepth
-#         orthogonalize!(psi, iseven(i) ? 1 : N)
-#         arrdg = dagger(arrUs[i])
-#         @show maxlinkdim(psi)
-#         state = apply_brickwork(arrdg, psi; 
-#                         shift = mod(i-1,2), 
-#                         to_right = iseven(i), 
-#                         normalize_after_layer = false,
-#                         trunc=(maxerror=maxerror,))
-#         reconstr_err = 1-abs(dot(state, zerostate))
-#         inv_err = results[i][:err]
-#         abs_diff = abs(reconstr_err - inv_err)
-#         rel_diff = abs_diff/inv_err
-# 
-#         spec = spectrum(state, div(N,2))
-#         push!(spectra, spec)
-#         @show abs_diff
-#         @show rel_diff
-#         @show norm(state)
-#         @show maxlinkdim(state)
-#         maxchi = maxlinkdim(state)
-#         push!(maxchis, maxchi)
-#     end
-#     push!(spectra_err, spectra)
-#     plot!(pltchi_psi, 1:maxdepth, maxchis, label=L"\mathrm{maxerror}="*"$(maxerror)")
-# end
-# pltchi_psi
-# savefig(pltchi_psi, "testdata\\N10_bonddim_Upsi.png")
-# 
-# 
-# 
-# using ColorSchemes
-# colors = [get(ColorSchemes.inferno, t) for t in range(0.9, stop=0.1, length=maxdepth)]
-# 
-# specs = spectra_err[1]
-# 
-# spec_psi = spectrum(psi, div(N,2))
-# pltspec = plot(1:length(spec_psi), spec_psi, line=:dash, 
-#             xlabel=L"j", ylabel=L"\lambda_j", yscale=:log10, 
-#             ylimits = (4e-5,1.1), xlimits = (0, 15),
-#             dpi=400, palette=:inferno, label=L"\psi")
-# for tau in 1:maxdepth
-#     plot!(pltspec, 1:length(specs[tau]), specs[tau], color=colors[tau], label=L"\tau="*"$(tau)")
-# end
-# pltspec
-# savefig(pltspec, "testdata\\N10_spectra_Upsi.png")
+
+if true
+    let
+        pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/xy/g0h0.5/"
+        Nlist = [20, 40, 60, 80, 100]
+        psis = MPS[]
+        for N in Nlist
+            f = h5open(pathname*"$(N)_mps.h5","r")
+            psi = read(f,"psi",MPS)
+            close(f)
+            push!(psis, psi)
+        end
+
+        Threads.@threads for psi in psis
+            runinversion2(psi, 30; pathname = pathname*"trunc/")
+        end
+    end
+end
+
+
+if false
+    let
+        pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/ising/test/"
+        glist = [1.0, 1.5]
+        psis = MPS[]
+        for g in glist
+            psi = load_object(pathname*"ising_L128_g$(g).jld2")
+            psi = dense(psi)
+            push!(psis, psi)
+        end
+
+        pairs = collect(Iterators.product(glist, psis))
+        Threads.@threads for (g, psi) in pairs
+            runinversion2(psi, 30; pathname = pathname*"g$(g)new/")
+        end
+    end
+end
+
+
 
