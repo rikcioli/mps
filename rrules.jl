@@ -170,7 +170,7 @@ function svd_trunc_pullback!(
     Smat⁻¹ = diagm(inv_safe.(S, degeneracy_atol))
     f(xy) = ÃÃ * xy * Smat⁻¹ - xy
     XY₀ = zeros(KrylovKit.scalartype(ÃÃ), size(ÃÃ, 2), size(Smat⁻¹, 1))
-    XY, info = linsolve(f, -rhs * Smat⁻¹, XY₀)
+    XY, info = linsolve(f, -rhs * Smat⁻¹, XY₀; maxiter=100)
 
     X = view(XY, 1:m̃, :)
     Y = view(XY, m̃ .+ (1:ñ), :)
@@ -272,7 +272,7 @@ function SVDcontract_pullback(ΔMf, tape::SVDcontractTape)
     end
 
     ΔM = zero(M)
-    svd_trunc_pullback!(ΔM, M, (U, S, Vdg), (ΔU, ΔS, ΔVdg), gauge_atol = 1e-15)
+    svd_trunc_pullback!(ΔM, M, (U, S, Vdg), (ΔU, ΔS, ΔVdg), gauge_atol = 1e-12)
 
     ΔM_ten = ITensor(ΔM, cLind, cRind)
     ΔM_ten *= dag(cR)
@@ -1210,10 +1210,36 @@ end
 """
 TODO: custom rrule, safeinv
 """
+#function normalize_logn!(A::ITensor)
+#    logn = lognorm(A::ITensor)
+#    An = diven(A,logn)
+#    return An, logn
+#end
+
 function normalize_logn!(A::ITensor)
-    logn = lognorm(A::ITensor)
-    An = diven(A,logn)
-    return An, logn
+    n = norm(A)
+    An = A/n
+    return An, log(n)
+end
+
+function ChainRulesCore.rrule(::typeof(normalize_logn!), A::ITensor)
+    n = norm(A)
+    An = A/n
+    logn = log(n)
+
+    function pullback(Δy)
+        ΔAn, Δlogn = Δy
+
+        # scalar inner product between the cotangent of An and An itself
+        alpha = real(dot(ΔAn, An))
+
+        # derivative w.r.t. A
+        ΔA = (ΔAn - An*alpha + Δlogn*An)/n
+
+        return (NoTangent(), ΔA)
+    end
+
+    return (An, logn), pullback
 end
 
 """
