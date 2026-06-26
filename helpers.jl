@@ -282,3 +282,67 @@ end
 function n_unitaries_layer(N, t, shift=0)
     div(N, 2) - mod(N+1,2)*mod(t+shift+1, 2)
 end
+
+"Extends m x n isometry to M x M unitary, where M is the power of 2 which bounds max(m, n) from above"
+function iso_to_unitary(V::AbstractArray)
+    nrows, ncols = size(V, 1), size(V, 2)
+    dagger = false
+    if ncols > nrows
+        V = V'
+        nrows, ncols = ncols, nrows
+        dagger = true
+    end
+    V = V[:, vec(sum(abs.(V), dims=1) .> 1E-10)]
+    nrows, ncols = size(V, 1), size(V, 2)
+
+    bitlength = length(digits(nrows-1, base=2))     # find number of sites of dim 2
+    D = 2^bitlength
+
+    U = zeros(ComplexF64, (D, D))
+    U[1:nrows, 1:ncols] = V
+    kerU = nullspace(U')
+    U[:, ncols+1:D] = kerU
+
+    if dagger
+        U = copy(U')
+    end
+
+    return U
+end
+
+"Extract isometries from bond dimension-1 MPS and convert them to depth-1 brickwork circuit"
+function to_layer(ψ::MPS)
+    N = length(ψ)
+    @assert maxlinkdim(ψ)==1
+    orthogonalize!(ψ, N)
+    sites = siteinds(ψ)
+    links = linkinds(ψ)
+
+    combiners1 = [combiner((sites[1], links[1]))]
+    combiners = [combiner([sites[j]; links[j-1:j]]) for j in 2:N-1]
+    combinersN = [combiner((sites[N], links[N-1]))]
+    combiners = [combiners1; combiners; combinersN]
+
+    combinedinds = [combinedind(comb) for comb in combiners]
+    tensor_list = [combiners[j]*ψ[j] for j in 1:N]
+
+    Vlist = [Array{ComplexF64}(tensor_list[j], combinedinds[j]) for j in 1:N]
+
+    Ulist = [iso_to_unitary(V) for V in Vlist]
+    layer = [kron(Ulist[2*j], Ulist[2*j-1]) for j in 1:div(N,2)]
+    return layer
+end
+
+"Construct a random brickwork circuit of 2-qubit unitaries of depth τ on N qubits."
+function random_circuit(N::Int, τ::Int)
+    return [Matrix{ComplexF64}(random_unitary(4)) for _ in 1:n_unitaries(N, τ)]
+end
+
+"Add a layer of unitaries close to the identity to a circuit of previous size N and depth τ"
+function add_layer(arrU::Vector{<:AbstractMatrix}, N::Int, τ::Int)
+    nU_τp1 = n_unitaries_layer(N, τ+1)
+    Vs = skew([randn(ComplexF64, 4, 4) for _ in 1:nU_τp1])
+    newU = [retract(Matrix{ComplexF64}(I, (4,4)), V, 0.01)[1] for V in Vs]
+    arrUnext = vcat(arrU, newU)
+    return arrUnext
+end
