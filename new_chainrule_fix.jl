@@ -923,7 +923,7 @@ function to_layer(ψ::MPS)
 end
 
 
-sites = siteinds("Qubit", 100)
+sites = siteinds("Qubit", 20)
 psi = random_mps(ComplexF64, sites; linkdims = 2)
 N = length(psi)
 orthogonalize!(psi, 1)
@@ -966,3 +966,339 @@ testGrad(() -> U_start, genTanVec, fg, inner, retract)
 testGrad(() -> genUnitary(nU), genTanVec, fg, inner, retract)
 
 testGrad(() -> genUnitaryProduct(nU), genTanVec, fg, inner, retract)
+
+
+
+
+
+
+### TESTING COMPRESSION AND PULLBACK OF COMPRESSION
+
+# Real Riemannian metric (must match what pcg_solve/warm_start use)
+tinner(x, y) = innerLC(x, y)
+tnorm(x)     = sqrt(innerLC(x, x))
+
+# Random tangent at arrA (Grassmann sites projected, center site free)
+function random_tangent(arrA)
+    D = [randn(ComplexF64, size(a)) for a in arrA]
+    return projectLC(arrA, D)
+end
+
+# Standalone Riemannian gradient, mirroring `fg` inside `compress`
+function riem_grad(arrA, ψ, sites, N)
+    cost = a -> begin
+        ψA = MPS(a, N; sites=sites)
+        return snorm(ψA)^2 - 2*real(sproduct(ψ, ψA))
+    end
+    _, grad = withgradient(cost, arrA)
+    return projectLC(arrA, grad[1])
+end
+
+# ---- Test 1: self-adjointness of the implemented HVP ----
+# ⟨ξ, Hη⟩ == ⟨Hξ, η⟩  for the real metric. No gradients/retraction needed.
+function test_self_adjoint(hvp, arrA; ntrials=5)
+    println("== self-adjointness ==")
+    for _ in 1:ntrials
+        ξ = random_tangent(arrA)
+        η = random_tangent(arrA)
+        a = tinner(ξ, hvp(η))
+        b = tinner(hvp(ξ), η)
+        println("  rel.asym = ", abs(a - b) / max(abs(a), abs(b), 1e-30))
+    end
+end
+
+# ---- Test 2: HVP vs central-difference of the re-projected gradient ----
+# At the converged point, (P_A grad(R_A(tξ)) - P_A grad(R_A(-tξ)))/2t  ->  Hess[ξ].
+function test_fd_hvp(hvp, arrA, ψ, sites, N; ts=[1e-3, 1e-4, 1e-5, 1e-6])
+    println("== FD vs HVP (central difference) ==")
+    ξ  = random_tangent(arrA)
+    Hξ = hvp(ξ)
+    for t in ts
+        Ap, _ = retractLC(arrA, ξ,  t)
+        Am, _ = retractLC(arrA, ξ, -t)
+        gp = projectLC(arrA, riem_grad(Ap, ψ, sites, N))   # transport back to T_A
+        gm = projectLC(arrA, riem_grad(Am, ψ, sites, N))
+        fd = [(p - m) / (2t) for (p, m) in zip(gp, gm)]
+        relerr = tnorm(fd .- Hξ) / max(tnorm(Hξ), 1e-30)
+        println("  t = $t   rel.err = $relerr")
+    end
+    # Scalar (Rayleigh) cross-check — most robust to retraction higher-order terms
+    println("  scalar check (⟨ξ,Hξ⟩):")
+    for t in ts
+        Ap, _ = retractLC(arrA, ξ,  t)
+        Am, _ = retractLC(arrA, ξ, -t)
+        hp = tinner(ξ, projectLC(arrA, riem_grad(Ap, ψ, sites, N)))
+        hm = tinner(ξ, projectLC(arrA, riem_grad(Am, ψ, sites, N)))
+        fd = (hp - hm) / (2t)
+        ex = tinner(ξ, Hξ)
+        println("    t = $t   rel.err = $(abs(fd - ex)/max(abs(ex),1e-30))")
+    end
+end
+
+# ---- Driver ----
+function run_hvp_tests(ψ::MPS, χ::Int)
+    ψA, _ = compress(ψ, χ; gradtol=1e-12)
+    N     = length(ψ)
+    sites = siteinds(ψ)
+    arrψA = toMatricesLC(ψA)
+
+    L0, R0 = build_environments(ψ, ψA)
+    Σ      = compute_sigma(ψ, ψA, arrψA, L0, R0)
+    hvp(ξ) = hessian_vector_product(ψ, ψA, arrψA, ξ, L0, R0, Σ)
+
+    test_self_adjoint(hvp, arrψA)
+    test_fd_hvp(hvp, arrψA, ψ, sites, N)
+end
+
+
+N = 10
+sites = siteinds("Qubit", N)
+psi = random_mps(ComplexF64, sites; linkdims=4)
+orthogonalize!(psi, N)
+run_hvp_tests(psi, 2)
+
+
+using Printf
+
+# Instrumented PCG: returns solution, iteration count, and residual history.
+function pcg_solve_instrumented(hvp, precond, b, x0; tol=1e-10, maxiter=500)
+    x = deepcopy(x0)
+    r = b .- hvp(x)
+    z = precond(r)
+    p = deepcopy(z)
+    rz_old = tinner(r, z)
+    b_norm = max(tnorm(b), 1e-30)
+    reshist = Float64[]
+    for iter in 1:maxiter
+        res = tnorm(r) / b_norm
+        push!(reshist, res)
+        res < tol && return x, iter, reshist
+        Hp = hvp(p)
+        α  = rz_old / tinner(p, Hp)
+        x  = x .+ α .* p
+        r  = r .- α .* Hp
+        z  = precond(r)
+        rz_new = tinner(r, z)
+        β = rz_new / rz_old
+        p = z .+ β .* p
+        rz_old = rz_new
+    end
+    return x, maxiter, reshist
+end
+
+# Largest/smallest eigenvalue of an operator on the tangent space, via power
+# iteration (largest) and inverse-shift-free smallest through CG-solve power
+# iteration. Cheap, approximate — just to *see* the conditioning.
+function estimate_condition(op, arrA; iters=60)
+    x = let D = [randn(ComplexF64, size(a)) for a in arrA]; projectLC(arrA, D); end
+    x = x ./ tnorm(x)
+    λmax = 0.0
+    for _ in 1:iters
+        y = op(x); λmax = tinner(x, y); x = y ./ max(tnorm(y), 1e-30)
+    end
+    # smallest: power-iterate (λmax·I - op) to get the eigenvalue furthest from λmax
+    x = let D = [randn(ComplexF64, size(a)) for a in arrA]; projectLC(arrA, D); end
+    x = x ./ tnorm(x)
+    μ = 0.0
+    for _ in 1:iters
+        y = λmax .* x .- op(x); μ = tinner(x, y); x = y ./ max(tnorm(y), 1e-30)
+    end
+    λmin = λmax - μ
+    return λmax, λmin, abs(λmax / λmin)
+end
+
+function benchmark_preconditioner(ψ::MPS, χ::Int; tol=1e-10)
+    ψA, _ = compress(ψ, χ)
+    arrψA = toMatricesLC(ψA)
+    L0, R0 = build_environments(ψ, ψA)
+    Σ      = compute_sigma(ψ, ψA, arrψA, L0, R0)
+    hvp(ξ) = hessian_vector_product(ψ, ψA, arrψA, ξ, L0, R0, Σ)
+
+    # A representative right-hand side: a random tangent (stands in for -ΔψA)
+    b = let D = [randn(ComplexF64, size(a)) for a in arrψA]; projectLC(arrψA, D); end
+    x0 = [zero(a) for a in arrψA]
+
+    # ----- conditioning of H and of M^{-1}H -----
+    blocks = build_preconditioner_blocks(arrψA, Σ)
+    Minv(r) = apply_preconditioner(blocks, r)
+    MinvH(ξ) = Minv(hvp(ξ))
+
+    λmax, λmin, κ      = estimate_condition(hvp,   arrψA)
+    λmaxP, λminP, κP   = estimate_condition(MinvH, arrψA)
+    @printf("κ(H)        ≈ %.3e   (λmax=%.3e, λmin=%.3e)\n", κ,  λmax,  λmin)
+    @printf("κ(M⁻¹H)     ≈ %.3e   (λmax=%.3e, λmin=%.3e)\n", κP, λmaxP, λminP)
+
+    # ----- iteration counts -----
+    identity_precond(r) = r
+    _, it_none, h_none = pcg_solve_instrumented(hvp, identity_precond, b, x0; tol=tol)
+    xP, it_prec, h_prec = pcg_solve_instrumented(hvp, Minv,            b, x0; tol=tol)
+    xN, _,       _      = pcg_solve_instrumented(hvp, identity_precond, b, x0; tol=tol)
+
+    @printf("CG iters: no-precond = %d,  precond = %d\n", it_none, it_prec)
+    @printf("solutions agree (rel): %.3e\n", tnorm(xP .- xN) / max(tnorm(xN), 1e-30))
+
+    println("residual history (no-precond):")
+    for (k, r) in enumerate(h_none); @printf("  %3d  %.3e\n", k, r); end
+    println("residual history (precond):")
+    for (k, r) in enumerate(h_prec); @printf("  %3d  %.3e\n", k, r); end
+
+    return (it_none=it_none, it_prec=it_prec, κ=κ, κP=κP)
+end
+
+
+N = 20
+sites = siteinds("Qubit", N)
+psi = random_mps(ComplexF64, sites; linkdims=16)
+orthogonalize!(psi, N)
+benchmark_preconditioner(psi, 2)
+
+
+
+### TEST MIXED PARTIAL ADJOINT
+
+# Perturb the bra-MPS ψ by a matrix-space tangent η (step t), staying in ψ's
+# own site/link gauge so the environments remain index-compatible.
+function perturb_mps(ψ::MPS, η::Vector{<:AbstractMatrix}, t::Real)
+    arr   = toMatricesLC(ψ)
+    arrp  = [arr[j] .+ t .* η[j] for j in eachindex(arr)]
+    N     = length(ψ)
+    return toITensors(arrp, N; check_og=false, sites=siteinds(ψ), links=linkinds(ψ))
+end
+
+# Ambient (Wirtinger) gradient of the OVERLAP part  -2 Re⟨ψ_pert | ψA⟩  w.r.t. A,
+# as a function of the (perturbed) bra ψ_pert. Mirrors exactly the overlap piece
+# used in compute_sigma / fg: E_j = L0[j]·dag(ψ_pert[j])·R0[j+1], then -2·conj.
+# NOTE: environments must be rebuilt for the perturbed bra each time.
+function ambient_overlap_grad_A(ψ_pert::MPS, ψA::MPS)
+    N = length(ψA)
+    L0, R0 = build_environments(ψ_pert, ψA)
+    Ej_tensors = [L0[j]*dag(ψ_pert[j])*R0[j+1] for j in 1:N]
+    Ej = toMatricesLC(Ej_tensors; check_og=false)
+    return [-2 .* conj(Ej[j]) for j in 1:N]   # ambient ∂/∂A* of -2Re⟨ψ_pert|ψA⟩
+end
+
+function test_mixed_adjoint(ψ::MPS, ψA::MPS, arrψ, arrψA, L0, R0; ntrials=4, t=1e-6)
+    N = length(ψ)
+    println("== mixed_partial_adjoint pairing test ==")
+    for _ in 1:ntrials
+        λ = projectLC(arrψA, [randn(ComplexF64, size(a)) for a in arrψA])
+        η = projectLC(arrψ,  [randn(ComplexF64, size(b)) for b in arrψ])
+
+        # LHS: ⟨ mixed_partial_adjoint(λ), η ⟩_B
+        MB  = mixed_partial_adjoint(ψ, arrψ, ψA, λ, L0, R0)
+        lhs = innerLC(MB, η)
+
+        # RHS: ⟨ λ, D_B g[η] ⟩_A  via central difference of the ambient A-gradient
+        gp  = ambient_overlap_grad_A(MPS(perturb_mps(ψ, η,  t)), ψA)
+        gm  = ambient_overlap_grad_A(MPS(perturb_mps(ψ, η, -t)), ψA)
+        DBg = [(gp[j] .- gm[j]) ./ (2t) for j in 1:N]
+        rhs = innerLC(λ, projectLC(arrψA, DBg))
+
+        relerr = abs(lhs - rhs) / max(abs(lhs), abs(rhs), 1e-30)
+        @show lhs rhs relerr
+    end
+end
+
+# Driver
+function run_mixed_adjoint_test(ψ::MPS, χ::Int)
+    ψA, _  = compress(ψ, χ)
+    arrψ   = toMatricesLC(ψ)
+    arrψA  = toMatricesLC(ψA)
+    L0, R0 = build_environments(ψ, ψA)
+    Σ      = compute_sigma(ψ, ψA, arrψA, L0, R0)
+    test_mixed_adjoint(ψ, ψA, arrψ, arrψA, L0, R0)
+end
+
+N = 10
+sites = siteinds("Qubit", N)
+psi = random_mps(sites; linkdims=4)
+orthogonalize!(psi, N)
+run_mixed_adjoint_test(psi, 2)
+
+
+
+
+
+
+# GRADIENT OF compress 
+
+function genPointLC(N, χ)
+    ψ = random_mps(ComplexF64, siteinds("Qubit", N); linkdims=χ)
+    orthogonalize!(ψ, N)
+    arrV = toMatricesLC(ψ)
+    return arrV
+end
+
+function genTanLC(arrV)
+    D = [randn(ComplexF64, size(a)) for a in arrV]
+    return projectLC(arrV, D)
+end
+
+
+N = 4; χ = 4
+V_array = genPointLC(N, χ)
+
+withgrad_Riemannian = (func, arrV, args...) -> begin
+    val, grad = withgradient(func, arrV, args...)
+    Rgrad = projectLC(arrV, grad[1])
+    return val, Rgrad
+end
+
+function testGrad(genPoint::Function, genTanVec::Function, computeCostGrad::Function, inner::Function, retract::Function)
+    U0 = genPoint()
+    func, grad = computeCostGrad(U0)
+
+    V = genTanVec(U0)
+    gradV = inner(grad, V) 
+    E = t -> abs(computeCostGrad(retract(U0, V, t)[1])[1] - func - t*gradV)
+
+    tvals = exp10.(-8:0.1:0)
+    plot = Plots.plot(tvals, E.(tvals), yscale=:log10, xscale=:log10, legend=:bottomright)
+    Plots.plot!(plot, tvals, tvals .^2, yscale=:log10, xscale=:log10, label=L"O(t^2)")
+    Plots.plot!(plot, tvals, tvals, yscale=:log10, xscale=:log10, label=L"O(t)")
+    return plot
+end
+
+function cost_compress(arrV::Vector{<:AbstractMatrix})
+    N = length(arrV)
+    psiV = MPS(arrV, N)
+    psiVcompr, _ = compress(psiV, 2)
+    @show psiVcompr
+    return real(sproduct(psiV, psiVcompr))
+end
+
+function ChainRulesCore.rrule(::typeof(cost_compress), arrV::Vector{<:AbstractMatrix})
+    N = length(arrV)
+    psiV, MPS_back = pullback(MPS, arrV, N)
+    (psiVcompr, conv_info), compr_back = pullback(compress, psiV, 2)   # your custom rrule
+
+    # The scalar overlap, with BOTH MPS arguments held open so we can pull back
+    # through each leg separately. Use Zygote for this cheap, multilinear part.
+    func = (A, B) -> real(sproduct(A, B))
+    cost, ovlp_back = pullback(func, psiV, psiVcompr)
+
+    function cost_compress_pullback(c̄)
+        # 1. Pull c̄ back through the overlap to BOTH legs.
+        ΔpsiV_direct, ΔpsiVcompr = ovlp_back(c̄)        # adjoints w.r.t. bra and ket
+
+        # 2. Pull ΔpsiVcompr back through compress to its input psiV.
+        #    compr_back returns (NoTangent(), Δ_into_psiV, NoTangent()).
+        (ΔpsiV_viacompr,) = compr_back((ΔpsiVcompr, nothing))
+
+        # 3. Sum the two contributions to psiV's adjoint.
+        ΔpsiV = ΔpsiV_direct .+ ΔpsiV_viacompr
+
+        # 4. Pull ΔpsiV_total back through MPS(arrV, N) to arrV.
+        (ΔarrV,) = MPS_back(ΔpsiV)
+
+        return NoTangent(), ΔarrV
+    end
+
+    return cost, cost_compress_pullback
+end
+
+cost_compress(V_array)
+gradient(cost_compress, V_array)[1]
+fg_compress = arrV -> withgrad_Riemannian(cost_compress, arrV)
+res, tes = fg_compress(V_array)
+testGrad(() -> genPointLC(N, χ), arrV -> genTanLC(arrV), fg_compress, innerLC, retractLC)

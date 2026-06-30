@@ -2031,20 +2031,45 @@ end
 # =========================================================
 
 """
-Mξ_j ≈ P_{A_j}(self-term only) - ξ_j Σ_j, dropping cross-site contributions.
-Cheap to build and invert since each block is small (n_j × n_j).
+Block-diagonal (Jacobi) preconditioner for the Hessian.
+
+The site-diagonal block of H is exactly the curvature term:
+  M_j[ξ_j] = 2 ξ_j Σ_j          (j < N,  right-multiplication)
+  M_N[ξ_N] = 2 ξ_N              (center: the norm-term identity)
+We store (2Σ_j)^{-1} per isometric site so that applying M_j^{-1} is one
+small (χ' × χ') matrix multiply. Σ_j is Hermitian PSD at the optimum; we
+symmetrize and floor the eigenvalues in absolute value to guarantee the
+preconditioner is SPD (required for PCG) and robust to small off-optimum noise.
 """
-function build_preconditioner_blocks(arrA, Σ, self_term_operator)
-    # self_term_operator[j] should encode P_{A_j}(D_A g_j[·]) restricted to site j alone
-    # (the "local Hessian" ignoring how a perturbation propagates to other sites).
-    # In the simplest practical version this is often well-approximated by just -Σ_j alone
-    # (the curvature/rank-1 correction), since the local ambient curvature term is typically
-    # small/cheap to neglect first — start there, add the self_term back in if convergence is slow.
-    return [build_local_block(arrA[j], Σ[j], self_term_operator[j]) for j in eachindex(arrA)]
+function build_preconditioner_blocks(arrA, Σ; reg = 1e-8)
+    N = length(arrA)
+    blocks = Vector{Any}(undef, N)
+    for j in 1:N-1
+        S = 2 .* Σ[j]
+        S = (S + S') / 2                          # Hermitian up to roundoff at convergence
+        vals, vecs = eigen(Hermitian(S))
+        scale = maximum(abs, vals)
+        floor = reg * max(scale, one(scale))
+        invvals = 1 ./ max.(abs.(vals), floor)    # abs ⇒ SPD even if slightly indefinite
+        blocks[j] = vecs * Diagonal(invvals) * vecs'   # (2Σ_j)^{-1}, regularized
+    end
+    blocks[N] = nothing                            # center handled analytically in apply
+    return blocks
 end
 
+"""
+Apply M^{-1} to a tangent vector ξ. Solves M_j[out_j] = ξ_j site-by-site:
+  out_j = ξ_j (2Σ_j)^{-1}       (j < N)
+  out_N = ξ_N / 2               (center)
+"""
 function apply_preconditioner(blocks, ξ)
-    return [solve_local_block(blocks[j], ξ[j]) for j in eachindex(ξ)]  # small dense solves
+    N = length(ξ)
+    out = similar(ξ)
+    for j in 1:N-1
+        out[j] = ξ[j] * blocks[j]
+    end
+    out[N] = ξ[N] / 2
+    return out
 end
 
 # =========================================================
@@ -2062,7 +2087,7 @@ end
 # 5. Preconditioned CG (matrix-free), self-adjoint H
 # =========================================================
 
-function pcg_solve(hvp, precond, b, x0; tol=1e-10, maxiter=100)
+function pcg_solve(hvp, precond, b, x0; tol=1e-8, maxiter=100)
     x = deepcopy(x0)
     r = b .- hvp(x)
     z = precond(r)
@@ -2096,9 +2121,11 @@ is inserted into the B-slot (held open) instead of propagated into another A_k.
 function mixed_partial_adjoint(ψ::MPS, arrψ::Vector{<:AbstractArray}, ϕ::MPS, λ::Vector{<:AbstractArray}, L0::Vector{ITensor}, R0::Vector{ITensor})
     N = length(ψ)
     L1, R1 = build_defect_environments(ψ, ϕ, λ, L0, R0)
-
+    λten = [ITensor(λ[j], inds(ϕ[j])) for j in 1:N]
     # Construct the defect environment of the tensor Bk for each k (leaving a hole at Bk)
-    Bk_defect_envs_tensors = [L1[k]*ϕ[k]*R0[k+1] + L0[k]*ϕ[k]*R1[k+1] for k in 1:N]
+    Bk_defect_envs_tensors = [L1[k]*ϕ[k]*R0[k+1] + L0[k]*ϕ[k]*R1[k+1] + L0[k]*λten[k]*R0[k+1] for k in 1:N]
+    # last term is the j=k diagonal term, which was absent in the hessian since differentiating twice by the same Aj gives zero
+    # instead here we can have a hole both in Ak and Bk for the same k
     Bk_defect_envs = toMatricesLC(Bk_defect_envs_tensors; check_og=false)   # convert to matrices
 
     ΔB = -2*Bk_defect_envs  # for all j = 1, ..., N
@@ -2152,120 +2179,75 @@ function compress(ψ::MPS, χ::Int; maxiter::Int = 10000, gradtol::Float64 = 1e-
 end
 
 
-function ChainRulesCore.rrule(::typeof(compress), ψ::MPS, χ::Int; kwargs...)
-    (ψA, convergence_info) = compress(ψ, χ; kwargs...)
+function ChainRulesCore.rrule(::typeof(compress), ψ::MPS, χ::Int; maxiter::Int = 10000, gradtol::Float64 = 1e-8, verbosity::Int = 2)
+    N = length(ψ)
+    sites = siteinds(ψ)
+
+    # Build warm start to speed up compression
+    ψapprox = move_center(ψ, 1)
+    ψapprox = move_center(ψapprox, N; trunc=(maxrank=χ,))
+    ovlp0 = abs(sproduct(ψ, ψapprox))
+    @info "Overlap after truncated SVD: $(ovlp0)"
+
+    ψ, back_og = Zygote.pullback(move_center, ψ, N)
+
+    arrA0 = toMatricesLC(ψapprox)
+
+    cost_func = arrA::Vector{<:AbstractArray} -> begin
+        ψA = MPS(arrA, N; sites = sites)
+        return snorm(ψA)^2 - 2*real(sproduct(ψ, ψA))
+    end
+
+    fg = arrA::Vector{<:AbstractArray} -> begin
+        func, grad = withgradient(cost_func, arrA)
+        grad = projectLC(arrA, grad[1])
+        return func, grad
+    end
+
+    m = 5
+    algorithm = LBFGS(m; maxiter = maxiter, gradtol = gradtol, verbosity = verbosity)
+
+    # optimize and store results
+    arrAmin, fmin, gradmin, numfg, normgradhistory = optimize(fg, arrA0, algorithm; 
+                                                            retract = retractLC, 
+                                                            transport! = transportLC!, 
+                                                            isometrictransport = true, 
+                                                            inner = innerLC)
+    
+    ψcompr = MPS(arrAmin, N; sites=sites)
+    ovlpmin = abs(sproduct(ψ, ψcompr))
+    @info "Final overlap: $(ovlpmin)"
+    
+    (ψA, convergence_info) = (ψcompr, (fmin=fmin, gradmin=gradmin, numfg=numfg, normgradhistory=normgradhistory))
 
     function compress_pullback(Δout)
         ΔψA, _ = Δout
 
         arrψ = toMatricesLC(ψ)
         arrψA = toMatricesLC(ψA)
-        ΔarrψA = toMatricesLC(ΔψA)
+        ΔarrψA = toMatricesLC(ΔψA; check_og=false)
 
         projΔarrψA = projectLC(arrψA, ΔarrψA)
         normal_comp = norm(projΔarrψA - ΔarrψA)
-        normal_comp > 1e-12 && @warn "compress_pullback expects a tangent incoming adjoint ΔψA, but a normal component was found.\nnorm(projΔψA - ΔψA) = $(normal_comp)"
+        normal_comp > 1e-12 && @warn "compress_pullback expects a tangent incoming adjoint ΔψA, but a normal component was found.\nnorm(projΔψA - ΔψA) = $(normal_comp).\nProjecting onto tangent space."
+        ΔarrψA = projΔarrψA
 
         L0, R0 = build_environments(ψ, ψA)
         Σ = compute_sigma(ψ, ψA, arrψA, L0, R0)
 
-        hvp(ξ::AbstractArray) = hessian_vector_product(ψ, ψA, arrψA, ξ, L0, R0, Σ)
-        blocks = build_preconditioner_blocks(arrψA, Σ, nothing)  # see note in step 3
+        hvp(ξ::Vector{<:AbstractMatrix}) = hessian_vector_product(ψ, ψA, arrψA, ξ, L0, R0, Σ)
+        blocks = build_preconditioner_blocks(arrψA, Σ; reg=1e-8)  # see note in step 3
         precond(r) = apply_preconditioner(blocks, r)
 
         λ0 = warm_start(ψ, ψA, arrψA, ΔarrψA, L0, R0, Σ)
-        λ, _ = pcg_solve(hvp, precond, -ΔarrψA, λ0)
+        λ, _ = pcg_solve(hvp, precond, -ΔarrψA, λ0; tol = gradtol)
 
         Δarrψ = mixed_partial_adjoint(ψ, arrψ, ψA, λ, L0, R0)
         Δψ = toITensors(Δarrψ, N; check_og=false, sites=siteinds(ψ), links=linkinds(ψ))
+        (Δψ,) = back_og(Δψ)
 
         return (NoTangent(), Δψ, NoTangent())
     end
 
-    return ψA, compress_pullback
+    return (ψA, convergence_info), compress_pullback
 end
-
-
-
-# Real Riemannian metric (must match what pcg_solve/warm_start use)
-tinner(x, y) = innerLC(x, y)
-tnorm(x)     = sqrt(innerLC(x, x))
-
-# Random tangent at arrA (Grassmann sites projected, center site free)
-function random_tangent(arrA)
-    D = [randn(ComplexF64, size(a)) for a in arrA]
-    return projectLC(arrA, D)
-end
-
-# Standalone Riemannian gradient, mirroring `fg` inside `compress`
-function riem_grad(arrA, ψ, sites, N)
-    cost = a -> begin
-        ψA = MPS(a, N; sites=sites)
-        return snorm(ψA)^2 - 2*real(sproduct(ψ, ψA))
-    end
-    _, grad = withgradient(cost, arrA)
-    return projectLC(arrA, grad[1])
-end
-
-# ---- Test 1: self-adjointness of the implemented HVP ----
-# ⟨ξ, Hη⟩ == ⟨Hξ, η⟩  for the real metric. No gradients/retraction needed.
-function test_self_adjoint(hvp, arrA; ntrials=5)
-    println("== self-adjointness ==")
-    for _ in 1:ntrials
-        ξ = random_tangent(arrA)
-        η = random_tangent(arrA)
-        a = tinner(ξ, hvp(η))
-        b = tinner(hvp(ξ), η)
-        println("  rel.asym = ", abs(a - b) / max(abs(a), abs(b), 1e-30))
-    end
-end
-
-# ---- Test 2: HVP vs central-difference of the re-projected gradient ----
-# At the converged point, (P_A grad(R_A(tξ)) - P_A grad(R_A(-tξ)))/2t  ->  Hess[ξ].
-function test_fd_hvp(hvp, arrA, ψ, sites, N; ts=[1e-3, 1e-4, 1e-5, 1e-6])
-    println("== FD vs HVP (central difference) ==")
-    ξ  = random_tangent(arrA)
-    Hξ = hvp(ξ)
-    for t in ts
-        Ap, _ = retractLC(arrA, ξ,  t)
-        Am, _ = retractLC(arrA, ξ, -t)
-        gp = projectLC(arrA, riem_grad(Ap, ψ, sites, N))   # transport back to T_A
-        gm = projectLC(arrA, riem_grad(Am, ψ, sites, N))
-        fd = [(p - m) / (2t) for (p, m) in zip(gp, gm)]
-        relerr = tnorm(fd .- Hξ) / max(tnorm(Hξ), 1e-30)
-        println("  t = $t   rel.err = $relerr")
-    end
-    # Scalar (Rayleigh) cross-check — most robust to retraction higher-order terms
-    println("  scalar check (⟨ξ,Hξ⟩):")
-    for t in ts
-        Ap, _ = retractLC(arrA, ξ,  t)
-        Am, _ = retractLC(arrA, ξ, -t)
-        hp = tinner(ξ, projectLC(arrA, riem_grad(Ap, ψ, sites, N)))
-        hm = tinner(ξ, projectLC(arrA, riem_grad(Am, ψ, sites, N)))
-        fd = (hp - hm) / (2t)
-        ex = tinner(ξ, Hξ)
-        println("    t = $t   rel.err = $(abs(fd - ex)/max(abs(ex),1e-30))")
-    end
-end
-
-# ---- Driver ----
-function run_hvp_tests(ψ::MPS, χ::Int)
-    ψA, _ = compress(ψ, χ; gradtol=1e-12)
-    N     = length(ψ)
-    sites = siteinds(ψ)
-    arrψA = toMatricesLC(ψA)
-
-    L0, R0 = build_environments(ψ, ψA)
-    Σ      = compute_sigma(ψ, ψA, arrψA, L0, R0)
-    hvp(ξ) = hessian_vector_product(ψ, ψA, arrψA, ξ, L0, R0, Σ)
-
-    test_self_adjoint(hvp, arrψA)
-    test_fd_hvp(hvp, arrψA, ψ, sites, N)
-end
-
-
-N = 10
-sites = siteinds("Qubit", N)
-psi = random_mps(ComplexF64, sites; linkdims=4)
-orthogonalize!(psi, N)
-run_hvp_tests(psi, 2)

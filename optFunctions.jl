@@ -123,10 +123,10 @@ function retract(arrU::Vector{<:AbstractMatrix}, arrX::Vector{<:AbstractMatrix},
 end
 
 function inner(arrU::Vector{<:AbstractMatrix}, arrX::Vector{<:AbstractMatrix}, arrY::Vector{<:AbstractMatrix})
-    return real(tr(arrX'*arrY))
+    return real(dot(arrX, arrY))
 end
 function inner(arrX::Vector{<:AbstractMatrix}, arrY::Vector{<:AbstractMatrix})
-    return real(tr(arrX'*arrY))
+    return real(dot(arrX, arrY))
 end
 
 function inner(U::AbstractMatrix, X::AbstractMatrix, Y::AbstractMatrix)
