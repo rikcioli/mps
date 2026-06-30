@@ -1110,6 +1110,10 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_
 
     # Preparing the maxranks for svd trunc
     #trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
+    strat = to_strategy(trunc)
+    if !(strat isa MatrixAlgebraKit.NoTruncation)
+        strat = truncdegen(strat; atol=2*eps())
+    end
     
     # by default to_right == true, meaning we sweep from left to right
     ψ = move_center(ψ, to_right ? 1 : N)
@@ -1141,7 +1145,7 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_
             ((W1, W2), err), _ = SVDcontract(tensors, linds; 
                                     move_ogc = (to_right ? :right : :left), 
                                     normalize = normalize,
-                                    trunc = trunc)
+                                    trunc = strat)
             push!(errs, err)
             W1 = noprime(W1, tags="Site")
             W2 = noprime(W2, tags="Site")
@@ -1172,6 +1176,10 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
 
     # Preparing the maxranks for svd trunc
     #trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
+    strat = to_strategy(trunc)
+    if !(strat isa MatrixAlgebraKit.NoTruncation)
+        strat = truncdegen(strat; atol=2*eps())
+    end
     
     sites = siteinds(ψ)
     ψfinal = copy(ψ)
@@ -1201,7 +1209,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
             ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
                                                 move_ogc = (to_right ? :right : :left),
                                                 normalize = normalize,
-                                                trunc = trunc)
+                                                trunc = strat)
             push!(tapes, tape_j)
             push!(errs, err)
             W1 = noprime(W1, tags="Site")
