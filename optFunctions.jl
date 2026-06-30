@@ -136,6 +136,8 @@ function inner(X::AbstractMatrix, Y::AbstractMatrix)
     return real(tr(X'*Y))
 end
 
+
+
 #parallel transport
 """transport tangent vector ξ along the retraction of x in the direction η (same type as a gradient) 
 with step length α, can be in place but the return value is used. 
@@ -168,80 +170,206 @@ function extractU(M::AbstractMatrix)
     return W
 end
 
+### # =========================================================
+### # Left isometry:  V ∈ ℂ^{m×n}, m ≥ n,  V†V = Iₙ
+### # =========================================================
+### 
+### """
+### Project D onto the tangent space of the left-isometry manifold at V.
+### Tangent condition: V†Z skew-Hermitian
+### ⟹  Z = (I - VV†)D + V·skew(V†D) = D - V·herm(V†D)
+### """
+### function projectL(V::AbstractMatrix, D::AbstractMatrix)
+###     return D - V * herm(V' * D)
+### end
+### 
+### # function projectL(arrV::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix})
+### #     return arrD .- arrV .* herm.([V' for V in arrV] .* arrD)
+### # end
+### 
+### """
+### Polar retraction: move V along tangent vector Z with step t.
+### Returns the new isometry and the transported tangent vector.
+### """
+### function retractL(V::AbstractMatrix, Z::AbstractMatrix, t::Float64)
+###     V   = extractU(V)       # extractU works for isometries too
+###     V_new = extractU(V + t * Z)
+###     Z_new = projectL(V_new, Z)          # transport by re-projection
+###     return V_new, Z_new
+### end
+### 
+### function retractL(arrV::Vector{<:AbstractMatrix}, arrZ::Vector{<:AbstractMatrix}, t::Float64)
+###     arrV     = extractU.(arrV)
+###     arrV_new = extractU.(arrV .+ t .* arrZ)
+###     arrZ_new = projectL.(arrV_new, arrZ)  # transport by re-projection
+###     return arrV_new, arrZ_new
+### end
+### 
+### """
+### Transport tangent vector ξ to the tangent space at V_new (re-projection transport).
+### Signature mirrors transport! for unitaries.
+### """
+### function transportL!(ξ, arrV::Vector{<:AbstractMatrix}, η, α, arrV_new::Vector{<:AbstractMatrix})
+###     return projectL(arrV_new, ξ)
+### end
+### 
+### # =========================================================
+### # Right isometry:  W ∈ ℂ^{m×n}, m ≤ n,  WW† = Iₘ
+### # =========================================================
+### 
+### 
+### """
+### Project D onto the tangent space of the right-isometry manifold at W.
+### Tangent condition: ZW† skew-Hermitian
+### ⟹  Z = D(I - W†W) + skew(DW†)W = D - herm(DW†)·W
+### """
+### function projectR(W::AbstractMatrix, D::AbstractMatrix)
+###     return D - herm(D * W') * W
+### end
+### 
+### # function projectR(arrW::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix})
+### #     return arrD .- herm.([D * W' for (D, W) in zip(arrD, arrW)]) .* arrW
+### # end
+### 
+### """
+### Polar retraction for right isometry.
+### """
+### function retractR(W::AbstractMatrix, Z::AbstractMatrix, t::Float64)
+###     W     = extractU(W)
+###     W_new = extractU(W + t * Z)
+###     Z_new = projectR(W_new, Z)
+###     return W_new, Z_new
+### end
+### 
+### function retractR(arrW::Vector{<:AbstractMatrix}, arrZ::Vector{<:AbstractMatrix}, t::Float64)
+###     arrW     = extractU.(arrW)
+###     arrW_new = extractU.(arrW .+ t .* arrZ)
+###     arrZ_new = projectR.(arrW_new, arrZ)
+###     return arrW_new, arrZ_new
+### end
+### 
+### """
+### Transport tangent vector ξ to the tangent space at W_new (re-projection transport).
+### """
+### function transportR!(ξ, arrW::Vector{<:AbstractMatrix}, η, α, arrW_new::Vector{<:AbstractMatrix})
+###     return projectR(arrW_new, ξ)
+### end
+### 
+### # =========================================================
+### # Random initializers
+### # =========================================================
+### 
+### function random_left_isometry(m::Int, n::Int)
+###     # m ≥ n
+###     F = qr((randn(m, n) + randn(m, n) * im) / sqrt(2))
+###     return Matrix(F.Q)[:, 1:n]
+### end
+### 
+### function random_right_isometry(m::Int, n::Int)
+###     # m ≤ n: just conjugate-transpose a left isometry
+###     return Matrix(random_left_isometry(n, m)')
+### end
+
+
+### GRASSMANN 
+
 # =========================================================
-# Left isometry:  V ∈ ℂ^{m×n}, m ≥ n,  V†V = Iₙ
+# Helper: thin QR with deterministic sign (R diagonal > 0)
+# =========================================================
+
+function extractQ(M::AbstractMatrix)
+    n = size(M, 2)
+    F = qr(M)
+    Q = Matrix(F.Q[:, 1:n])
+    d = sign.(diag(F.R))
+    d[d .== 0] .= 1
+    return Q .* d'   # rescale columns of Q (equivalently Q*Diagonal(d))
+end
+
+# =========================================================
+# Left isometry / Grassmann:  V ∈ ℂ^{m×n}, m ≥ n,  V†V = Iₙ
+# represents the column space of V (subspace, not the basis itself)
 # =========================================================
 
 """
-Project D onto the tangent space of the left-isometry manifold at V.
-Tangent condition: V†Z skew-Hermitian
-⟹  Z = (I - VV†)D + V·skew(V†D) = D - V·herm(V†D)
+Project D onto the tangent space of the Grassmann manifold at V.
+Tangent condition: V†Z = 0   (exact, not just skew-Hermitian part)
+⟹  Z = (I - VV†)D = D - V·(V†D)
 """
 function projectL(V::AbstractMatrix, D::AbstractMatrix)
-    return D - V * herm(V' * D)
+    return D - V * (V' * D)
 end
 
 # function projectL(arrV::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix})
-#     return arrD .- arrV .* herm.([V' for V in arrV] .* arrD)
+#     return arrD .- arrV .* (V' for V in arrV] .* arrD)
 # end
 
 """
-Polar retraction: move V along tangent vector Z with step t.
-Returns the new isometry and the transported tangent vector.
+QR retraction: move V along tangent vector Z with step t.
+Returns the new representative (orthonormal basis) and transported tangent vector.
 """
 function retractL(V::AbstractMatrix, Z::AbstractMatrix, t::Float64)
-    V   = extractU(V)       # extractU works for isometries too
-    V_new = extractU(V + t * Z)
-    Z_new = projectL(V_new, Z)          # transport by re-projection
+    V     = extractQ(V)            # extractQ also works for isometries
+    V_new = extractQ(V + t * Z)
+    Z_new = projectL(V_new, Z)     # transport by re-projection
     return V_new, Z_new
 end
 
 function retractL(arrV::Vector{<:AbstractMatrix}, arrZ::Vector{<:AbstractMatrix}, t::Float64)
-    arrV     = extractU.(arrV)
-    arrV_new = extractU.(arrV .+ t .* arrZ)
-    arrZ_new = projectL.(arrV_new, arrZ)  # transport by re-projection
+    arrV     = extractQ.(arrV)
+    arrV_new = extractQ.(arrV .+ t .* arrZ)
+    arrZ_new = projectL.(arrV_new, arrZ)
     return arrV_new, arrZ_new
 end
 
 """
 Transport tangent vector ξ to the tangent space at V_new (re-projection transport).
-Signature mirrors transport! for unitaries.
 """
 function transportL!(ξ, arrV::Vector{<:AbstractMatrix}, η, α, arrV_new::Vector{<:AbstractMatrix})
     return projectL(arrV_new, ξ)
 end
 
+
 # =========================================================
-# Right isometry:  W ∈ ℂ^{m×n}, m ≤ n,  WW† = Iₘ
+# Helper: thin QR with deterministic sign, for wide isometries
+# (apply extractQ to the transpose, then transpose back)
 # =========================================================
 
+function extractQ_wide(M::AbstractMatrix)
+    return extractQ(M')'
+end
+
+# =========================================================
+# Right isometry / Grassmann:  W ∈ ℂ^{m×n}, m ≤ n,  WW† = Iₘ
+# represents the row space of W
+# =========================================================
 
 """
-Project D onto the tangent space of the right-isometry manifold at W.
-Tangent condition: ZW† skew-Hermitian
-⟹  Z = D(I - W†W) + skew(DW†)W = D - herm(DW†)·W
+Project D onto the tangent space of the Grassmann manifold at W.
+Tangent condition: ZW† = 0   (exact, not just skew-Hermitian part)
+⟹  Z = D(I - W†W) = D - (DW†)·W
 """
 function projectR(W::AbstractMatrix, D::AbstractMatrix)
-    return D - herm(D * W') * W
+    return D - (D * W') * W
 end
 
 # function projectR(arrW::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix})
-#     return arrD .- herm.([D * W' for (D, W) in zip(arrD, arrW)]) .* arrW
+#     return arrD .- [(D * W') * W for (D, W) in zip(arrD, arrW)]
 # end
 
 """
-Polar retraction for right isometry.
+QR retraction for right isometry (Grassmann).
 """
 function retractR(W::AbstractMatrix, Z::AbstractMatrix, t::Float64)
-    W     = extractU(W)
-    W_new = extractU(W + t * Z)
+    W     = extractQ_wide(W)
+    W_new = extractQ_wide(W + t * Z)
     Z_new = projectR(W_new, Z)
     return W_new, Z_new
 end
 
 function retractR(arrW::Vector{<:AbstractMatrix}, arrZ::Vector{<:AbstractMatrix}, t::Float64)
-    arrW     = extractU.(arrW)
-    arrW_new = extractU.(arrW .+ t .* arrZ)
+    arrW     = extractQ_wide.(arrW)
+    arrW_new = extractQ_wide.(arrW .+ t .* arrZ)
     arrZ_new = projectR.(arrW_new, arrZ)
     return arrW_new, arrZ_new
 end
@@ -253,6 +381,7 @@ function transportR!(ξ, arrW::Vector{<:AbstractMatrix}, η, α, arrW_new::Vecto
     return projectR(arrW_new, ξ)
 end
 
+
 # =========================================================
 # Random initializers
 # =========================================================
@@ -260,7 +389,7 @@ end
 function random_left_isometry(m::Int, n::Int)
     # m ≥ n
     F = qr((randn(m, n) + randn(m, n) * im) / sqrt(2))
-    return Matrix(F.Q)[:, 1:n]
+    return extractQ(M)
 end
 
 function random_right_isometry(m::Int, n::Int)
@@ -269,31 +398,119 @@ function random_right_isometry(m::Int, n::Int)
 end
 
 
+
+
+### FUNCTIONS FOR ACTUAL MPS, WHICH ARE ARRAYS OF ISOMETRIES + 1 GENERAL MATRIX (the orthogonality center)
+
 function projectMixed(arrA::Vector{<:AbstractArray}, arrD::Vector{<:AbstractArray}, ogc::Int)
     projD = similar(arrD)
+    N = length(arrD)
     for j in 1:ogc-1
         projD[j] = projectL(arrA[j], arrD[j])
     end
     projD[ogc] = arrD[ogc]
-    for j in ogc+1:length(arrD)
+    for j in ogc+1:N
+        projD[j] = projectR(arrA[j], arrD[j])
+    end
+    return projD
+end
+
+"Projector for array of matrices representing an MPS in the Left Canonical form"
+function projectLC(arrA::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix})
+    projD = similar(arrD)
+    N = length(projD)
+    for j in 1:N-1
+        projD[j] = projectL(arrA[j], arrD[j])
+    end
+    projD[N] = arrD[N]
+    return projD
+end
+
+"Projector for array of matrices representing an MPS in the Right Canonical form"
+function projectRC(arrA::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix})
+    projD = similar(arrD)
+    N = length(projD)
+    projD[1] = arrD[1]
+    for j in 2:N
         projD[j] = projectR(arrA[j], arrD[j])
     end
     return projD
 end
 
 function retractMixed(arrA::Vector{<:AbstractArray}, arrD::Vector{<:AbstractArray}, t::Float64, ogc::Int)
+    N = length(arrD)
     Anew = similar(arrA)
     Dnew = similar(arrD)
     for j in 1:ogc-1
         Anew[j], Dnew[j] = retractL(arrA[j], arrD[j], t)
     end
     Anew[ogc], Dnew[ogc] = (arrA[ogc] + t*arrD[ogc], arrD[ogc])
-    for j in ogc+1:length(arrD)
+    for j in ogc+1:N
         Anew[j], Dnew[j] = retractR(arrA[j], arrD[j], t)
     end
     return Anew, Dnew
 end
 
+function retractLC(arrA::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix}, t::Float64)
+    N = length(arrD)
+    Anew = similar(arrA)
+    Dnew = similar(arrD)
+
+    for j in 1:N-1
+        Anew[j], Dnew[j] = retractL(arrA[j], arrD[j], t)
+    end
+    Anew[N], Dnew[N] = (arrA[N] + t*arrD[N], arrD[N])
+    return Anew, Dnew
+end
+
+function retractRC(arrA::Vector{<:AbstractMatrix}, arrD::Vector{<:AbstractMatrix}, t::Float64)
+    N = length(arrD)
+    Anew = similar(arrA)
+    Dnew = similar(arrD)
+
+    Anew[1], Dnew[1] = (arrA[1] + t*arrD[1], arrD[1])
+    for j in 2:N
+        Anew[j], Dnew[j] = retractR(arrA[j], arrD[j], t)
+    end
+    return Anew, Dnew
+end
+
+function innerMixed(arrV::Vector{<:AbstractArray}, arrX::Vector{<:AbstractArray}, arrY::Vector{<:AbstractArray})
+    return real(sum(arrX[j][:]'*arrY[j][:] for j in eachindex(arrX)))
+end
+
 function innerMixed(arrX::Vector{<:AbstractArray}, arrY::Vector{<:AbstractArray})
     return real(sum(arrX[j][:]'*arrY[j][:] for j in eachindex(arrX)))
+end
+
+function innerLC(arrV::Vector{<:AbstractMatrix}, arrX::Vector{<:AbstractMatrix}, arrY::Vector{<:AbstractMatrix})
+    return inner(arrV, arrX, arrY)
+end
+
+function innerLC(arrX::Vector{<:AbstractMatrix}, arrY::Vector{<:AbstractMatrix})
+    return inner(arrX, arrY)
+end
+
+function innerRC(arrV::Vector{<:AbstractMatrix}, arrX::Vector{<:AbstractMatrix}, arrY::Vector{<:AbstractMatrix})
+    return inner(arrV, arrX, arrY)
+end
+
+function innerRC(arrX::Vector{<:AbstractMatrix}, arrY::Vector{<:AbstractMatrix})
+    return inner(arrX, arrY)
+end
+
+function normMixed(arrX::Vector{<:AbstractArray})
+    return sqrt(innerMixed(arrX, arrX))
+end
+
+function transportMixed!(ξ, arrV::Vector{<:AbstractArray}, η, α, arrV_new::Vector{<:AbstractArray}, ogc::Int)
+    return projectMixed(arrV_new, ξ, ogc)
+end
+
+function transportLC!(ξ, arrV::Vector{<:AbstractArray}, η, α, arrV_new::Vector{<:AbstractArray})
+    return projectLC(arrV_new, ξ)
+end
+
+function transportRC!(ξ, arrV::Vector{<:AbstractArray}, η, α, arrV_new::Vector{<:AbstractArray})
+    return projectRC(arrV_new, ξ)
 end
