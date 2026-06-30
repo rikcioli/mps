@@ -3,6 +3,7 @@ include("optFunctions.jl")
 using ITensors, ITensorMPS
 using LinearAlgebra
 using KrylovKit
+using OptimKit
 using ChainRulesCore
 using MatrixAlgebraKit
 using MatrixAlgebraKit: default_pullback_rank_atol, default_pullback_gauge_atol,
@@ -464,6 +465,50 @@ function toMatrices(V::Union{MPS, Vector{<:ITensor}}, ogc::Int)
     return Vfinal
 end
 
+"Convert a left-canonical ITensors.MPS object ψ into a Vector{Matrix{ComplexF64}} of left isometries + one generic matrix at site N.
+Can be also used to convert Vector{ITensor} object representing tangent vectors, in which case check_og must be set to false."
+function toMatricesLC(ψ::Union{MPS, Vector{<:ITensor}}; check_og = true)
+    N = length(ψ)
+    check_og && !is_orthogonal(ψ, N) && throw(ErrorException("Trying to convert MPS to vector of left isometries, but the MPS is NOT orthogonal at site N"))
+    
+    sites = siteinds(ψ)
+    d = only(Set(space.(sites)))    # all sites must have equal physical space
+    dimlinks = space.(linkinds(ψ))
+    allinds = ordered_inds(ψ)
+
+    Vmat = [Array{ComplexF64}(ψ[j], allinds[j]) for j in 1:N]
+
+    Vfinal = Vector{Matrix{ComplexF64}}(undef, N)
+    for j in 1:N-1
+        Vfinal[j] = reshape(Vmat[j], (j==1 ? d : dimlinks[j-1]*d, dimlinks[j]))
+    end
+    Vfinal[N] = Vmat[N]
+
+    return Vfinal
+end
+
+"Convert a right-canonical ITensors.MPS object ψ into a Vector{Matrix{ComplexF64}} of right isometries + one generic matrix at site 1."
+function toMatricesRC(ψ::Union{MPS, Vector{<:ITensor}}; check_og = true)
+    N = length(ψ)
+    check_og && !is_orthogonal(ψ, 1) && throw(ErrorException("Trying to convert MPS to vector of right isometries, but the MPS is NOT orthogonal at site 1"))
+    
+    sites = siteinds(ψ)
+    d = only(Set(space.(sites)))    # all sites must have equal physical space
+    dimlinks = space.(linkinds(ψ))
+    allinds = ordered_inds(ψ)
+
+    Vmat = [Array{ComplexF64}(ψ[j], allinds[j]) for j in 1:N]
+
+    Vfinal = Vector{Matrix{ComplexF64}}(undef, N)
+    Vfinal[1] = Vmat[1]
+    for j in 2:N
+        Vfinal[j] = reshape(Vmat[j], (dimlinks[j-1], j==N ? d : d*dimlinks[j]))
+    end
+
+    return Vfinal
+end
+
+
 ### CURRENTLY NOT USED ANYWHERE, AS IT SEEMS IT'S NOT NEEDED
 "Project vector D onto tangent space in V"
 function project(V::Union{MPS, Vector{<:ITensor}}, D::Union{MPS, Vector{<:ITensor}}, ogc::Int)
@@ -629,6 +674,11 @@ function snorm(ψ::MPS)
     return isortho(ψ) ? norm(ψ[only(ortho_lims(ψ))]) : sqrt(sproduct(ψ, ψ))
 end
 
+"Computes the squared norm of the MPS."
+function snorm_sq(ψ::MPS)
+    return isortho(ψ) ? norm(ψ[only(ortho_lims(ψ))])^2 : sproduct(ψ, ψ)
+end
+
 function ChainRulesCore.rrule(::typeof(snorm), ψ::MPS)
 
     if isortho(ψ)
@@ -652,6 +702,30 @@ function ChainRulesCore.rrule(::typeof(snorm), ψ::MPS)
             return (NoTangent(), Δψ)
         end
         return n, snorm_pullback_all
+    end
+end
+
+function ChainRulesCore.rrule(::typeof(snorm_sq), ψ::MPS)
+
+    if isortho(ψ)
+        ogc = only(ortho_lims(ψ))
+        C = ψ[ogc]
+        n2 = norm(C)^2
+        function snorm_sq_pullback_og(Δn2)
+            ΔC = 2*Δn2*C
+            Δψ = [ITensor(inds(T)) for T in ψ]
+            Δψ[ogc] = ΔC
+            return (NoTangent(), Δψ)
+        end
+        return n, snorm_pullback_og
+    else
+        n2, back_sproduct = pullback(sproduct, ψ, ψ)
+        function snorm_sq_pullback_all(Δn2)
+            Δψ1, Δψ2 = back_sproduct(Δn2)
+            Δψ = Δψ1 + Δψ2
+            return (NoTangent(), Δψ)
+        end
+        return n2, snorm_sq_pullback_all
     end
 end
 
@@ -1852,3 +1926,346 @@ end
 # 
 #     return nrm2, norm_pullback
 # end
+
+
+
+### MPS COMPRESSION
+
+
+# =========================================================
+# 1. Environments (you likely already have these from `compress`)
+# =========================================================
+
+"""
+Build cumulative L⁽⁰⁾[j], R⁽⁰⁾[j]: ⟨ψ|ϕ⟩ transfer matrices,
+contracted up to (excluding) site j.
+"""
+function build_environments(ψ::MPS, ϕ::MPS)
+    @assert siteinds(ψ) == siteinds(ϕ)
+    @assert linkinds(ψ) != linkinds(ϕ)
+
+    N = length(ψ)
+    L0 = Vector{ITensor}(undef, N+1)   # L0[j] = contraction of sites 1..j-1
+    R0 = Vector{ITensor}(undef, N+1)   # R0[j] = contraction of sites j+1..N
+    L0[1] = ITensor(1)
+    R0[N+1] = ITensor(1)
+    for j in 1:N
+        L0[j+1] = L0[j]*dag(ψ[j])*ϕ[j] 
+    end
+    for j in N:-1:1
+        R0[j] = R0[j+1]*dag(ψ[j])*ϕ[j]
+    end
+    return L0, R0
+end
+
+
+"""
+Σ_j = A_j† E_j* for j < N (free at the converged point; reused as Hessian's rank-1 correction)
+Where E_j has been reshaped to an isometry of the same shape as A_j.
+This currently only works for MPS ψ = (B1, ..., BN) and ϕ = (A1, ..., AN) orthogonalized at site N"
+"""
+function compute_sigma(ψ::MPS, ϕ::MPS, arrϕ::Vector{<:AbstractArray}, L0::Vector{ITensor}, R0::Vector{ITensor})
+    N = length(ϕ)
+    check_orthogonal(ϕ, N)
+
+    # Construct environment of tensor Aj for each j by leaving a hole at Aj
+    Ej_tensors = [L0[j]*dag(ψ[j])*R0[j+1] for j in 1:N]
+    Ej = toMatricesLC(Ej_tensors; check_og=false) # Convert from ITensors to array of matrices
+
+    Σ = [arrϕ[j]' * conj(Ej[j]) for j in 1:N-1]     # last site is not an isometry, doesn't have this term
+
+    return Σ
+end
+
+# =========================================================
+# 2. Hessian-vector product, O(N) via tagged ("one-defect") sweeps
+# =========================================================
+
+"""
+Build L1[j], R1[j]: cumulative environments with exactly one ξ-defect inserted
+somewhere to the left (L1) / right (R1) of site j.
+The ψ is conjugated since the environment is computed from <ψ|ϕ>.
+"""
+function build_defect_environments(ψ::MPS, ϕ::MPS, ξ::Vector{<:AbstractArray}, L0::Vector{ITensor}, R0::Vector{ITensor})
+    N = length(ψ)
+    L1 = Vector{ITensor}(undef, N+1)
+    R1 = Vector{ITensor}(undef, N+1)
+    L1[1] = ITensor(0)
+    R1[N+1] = ITensor(0)
+    ξten = [ITensor(ξ[j], inds(ϕ[j])) for j in eachindex(ξ)]
+    for j in 1:N
+        L1[j+1] = L1[j]*dag(ψ[j])*ϕ[j] + L0[j]*dag(ψ[j])*ξten[j]
+    end
+    for j in N:-1:1
+        R1[j] = R1[j+1]*dag(ψ[j])*ϕ[j] + R0[j+1]*dag(ψ[j])*ξten[j]
+    end
+    return L1, R1
+end
+
+"""
+Riemannian Hessian-vector product: Hess f(A,B)[ξ] = {P_{A_j}(Σ_k≠j E_j(A;A_k→ξ_k)) - ξ_j Σ_j}_j
+where ψ = (B1, ..., BN) and ϕ = (A1, ..., AN). Currently works only if orthogonality center of ϕ is at N.
+"""
+function hessian_vector_product(ψ::MPS, ϕ::MPS, arrϕ::Vector{<:AbstractArray}, ξ::Vector{<:AbstractArray}, L0::Vector{ITensor}, R0::Vector{ITensor}, Σ::Vector{<:AbstractArray})
+    N = length(ψ)
+    check_orthogonal(ϕ, N)
+
+    L1, R1 = build_defect_environments(ψ, ϕ, ξ, L0, R0)
+    
+    # Construct the defect environment of the tensor Aj for each j (leaving a hole at Aj)
+    Aj_defect_envs_tensors = [L1[j]*dag(ψ[j])*R0[j+1] + L0[j]*dag(ψ[j])*R1[j+1] for j in eachindex(ψ)]
+    Aj_defect_envs = toMatricesLC(Aj_defect_envs_tensors; check_og=false)   # converts ITensors to array of matrices
+
+    Hξ = similar(ξ)     # Hessian vector product will be a tangent vector
+    for j in 1:N-1      # first the term that comes by differentiating the projector on Aj
+        Hξ[j] = 2*ξ[j]*Σ[j]
+    end
+    Hξ[N] = 2*ξ[N]
+    Hξ -= 2*projectLC(arrϕ, conj(Aj_defect_envs))   # then the projector of the derivative of the environment Ej
+
+    return Hξ
+end
+
+# =========================================================
+# 3. Block-diagonal (site-local) preconditioner
+# =========================================================
+
+"""
+Mξ_j ≈ P_{A_j}(self-term only) - ξ_j Σ_j, dropping cross-site contributions.
+Cheap to build and invert since each block is small (n_j × n_j).
+"""
+function build_preconditioner_blocks(arrA, Σ, self_term_operator)
+    # self_term_operator[j] should encode P_{A_j}(D_A g_j[·]) restricted to site j alone
+    # (the "local Hessian" ignoring how a perturbation propagates to other sites).
+    # In the simplest practical version this is often well-approximated by just -Σ_j alone
+    # (the curvature/rank-1 correction), since the local ambient curvature term is typically
+    # small/cheap to neglect first — start there, add the self_term back in if convergence is slow.
+    return [build_local_block(arrA[j], Σ[j], self_term_operator[j]) for j in eachindex(arrA)]
+end
+
+function apply_preconditioner(blocks, ξ)
+    return [solve_local_block(blocks[j], ξ[j]) for j in eachindex(ξ)]  # small dense solves
+end
+
+# =========================================================
+# 4. Warm start (Rayleigh-quotient scaled — no call history available)
+# =========================================================
+
+function warm_start(ψ, ψA, arrψA, ΔarrψA, L0, R0, Σ)
+    HΔarrψA = hessian_vector_product(ψ, ψA, arrψA, ΔarrψA, L0, R0, Σ)
+    μ = innerLC(ΔarrψA, HΔarrψA) / innerLC(ΔarrψA, ΔarrψA)
+    μ = abs(μ) < 1e-12 ? one(μ) : μ  # guard against degenerate Rayleigh quotient
+    return [-a/μ for a in ΔarrψA]
+end
+
+# =========================================================
+# 5. Preconditioned CG (matrix-free), self-adjoint H
+# =========================================================
+
+function pcg_solve(hvp, precond, b, x0; tol=1e-10, maxiter=100)
+    x = deepcopy(x0)
+    r = b .- hvp(x)
+    z = precond(r)
+    p = deepcopy(z)
+    rz_old = innerLC(r, z)
+    b_norm = max(sqrt(innerLC(b,b)), 1e-30)
+
+    for iter in 1:maxiter
+        sqrt(innerLC(r,r)) / b_norm < tol && return x, iter
+        Hp = hvp(p)
+        α = rz_old / innerLC(p, Hp)
+        x = x .+ α .* p
+        r = r .- α .* Hp
+        z = precond(r)
+        rz_new = innerLC(r, z)
+        β = rz_new / rz_old
+        p = z .+ β .* p
+        rz_old = rz_new
+    end
+    return x, maxiter
+end
+
+# =========================================================
+# 6. Mixed partial adjoint (D_B g)* [λ], then project onto T_B
+# =========================================================
+
+"""
+(D_B g(A,B))*[λ]: same "one-defect" sweep structure as the Hessian, but the defect
+is inserted into the B-slot (held open) instead of propagated into another A_k.
+"""
+function mixed_partial_adjoint(ψ::MPS, arrψ::Vector{<:AbstractArray}, ϕ::MPS, λ::Vector{<:AbstractArray}, L0::Vector{ITensor}, R0::Vector{ITensor})
+    N = length(ψ)
+    L1, R1 = build_defect_environments(ψ, ϕ, λ, L0, R0)
+
+    # Construct the defect environment of the tensor Bk for each k (leaving a hole at Bk)
+    Bk_defect_envs_tensors = [L1[k]*ϕ[k]*R0[k+1] + L0[k]*ϕ[k]*R1[k+1] for k in 1:N]
+    Bk_defect_envs = toMatricesLC(Bk_defect_envs_tensors; check_og=false)   # convert to matrices
+
+    ΔB = -2*Bk_defect_envs  # for all j = 1, ..., N
+    ΔB = projectLC(arrψ, ΔB)
+    # here projection is not strictly necessary since it will be projected at the end of the chain anyway
+    # we put it here to make this function self consistent, without postponing the projection to later steps of the chain
+
+    return ΔB
+end
+
+# =========================================================
+# 7. The rrule itself
+# =========================================================
+
+function compress(ψ::MPS, χ::Int; maxiter::Int = 10000, gradtol::Float64 = 1e-8, verbosity::Int = 2)
+    N = length(ψ)
+    sites = siteinds(ψ)
+
+    # Build warm start to speed up compression
+    ψapprox = move_center(ψ, 1)
+    ψapprox = move_center(ψapprox, N; trunc=(maxrank=χ,))
+    ovlp0 = abs(sproduct(ψ, ψapprox))
+    @info "Overlap after truncated SVD: $(ovlp0)"
+    arrA0 = toMatricesLC(ψapprox)
+
+    cost_func = arrA::Vector{<:AbstractArray} -> begin
+        ψA = MPS(arrA, N; sites = sites)
+        return snorm(ψA)^2 - 2*real(sproduct(ψ, ψA))
+    end
+
+    fg = arrA::Vector{<:AbstractArray} -> begin
+        func, grad = withgradient(cost_func, arrA)
+        grad = projectLC(arrA, grad[1])
+        return func, grad
+    end
+
+    m = 5
+    algorithm = LBFGS(m; maxiter = maxiter, gradtol = gradtol, verbosity = verbosity)
+
+    # optimize and store results
+    arrAmin, fmin, gradmin, numfg, normgradhistory = optimize(fg, arrA0, algorithm; 
+                                                            retract = retractLC, 
+                                                            transport! = transportLC!, 
+                                                            isometrictransport = true, 
+                                                            inner = innerLC)
+    
+    ψcompr = MPS(arrAmin, N; sites=sites)
+    ovlpmin = abs(sproduct(ψ, ψcompr))
+    @info "Final overlap: $(ovlpmin)"
+    return (ψcompr, (fmin=fmin, gradmin=gradmin, numfg=numfg, normgradhistory=normgradhistory))
+end
+
+
+function ChainRulesCore.rrule(::typeof(compress), ψ::MPS, χ::Int; kwargs...)
+    (ψA, convergence_info) = compress(ψ, χ; kwargs...)
+
+    function compress_pullback(Δout)
+        ΔψA, _ = Δout
+
+        arrψ = toMatricesLC(ψ)
+        arrψA = toMatricesLC(ψA)
+        ΔarrψA = toMatricesLC(ΔψA)
+
+        projΔarrψA = projectLC(arrψA, ΔarrψA)
+        normal_comp = norm(projΔarrψA - ΔarrψA)
+        normal_comp > 1e-12 && @warn "compress_pullback expects a tangent incoming adjoint ΔψA, but a normal component was found.\nnorm(projΔψA - ΔψA) = $(normal_comp)"
+
+        L0, R0 = build_environments(ψ, ψA)
+        Σ = compute_sigma(ψ, ψA, arrψA, L0, R0)
+
+        hvp(ξ::AbstractArray) = hessian_vector_product(ψ, ψA, arrψA, ξ, L0, R0, Σ)
+        blocks = build_preconditioner_blocks(arrψA, Σ, nothing)  # see note in step 3
+        precond(r) = apply_preconditioner(blocks, r)
+
+        λ0 = warm_start(ψ, ψA, arrψA, ΔarrψA, L0, R0, Σ)
+        λ, _ = pcg_solve(hvp, precond, -ΔarrψA, λ0)
+
+        Δarrψ = mixed_partial_adjoint(ψ, arrψ, ψA, λ, L0, R0)
+        Δψ = toITensors(Δarrψ, N; check_og=false, sites=siteinds(ψ), links=linkinds(ψ))
+
+        return (NoTangent(), Δψ, NoTangent())
+    end
+
+    return ψA, compress_pullback
+end
+
+
+
+# Real Riemannian metric (must match what pcg_solve/warm_start use)
+tinner(x, y) = innerLC(x, y)
+tnorm(x)     = sqrt(innerLC(x, x))
+
+# Random tangent at arrA (Grassmann sites projected, center site free)
+function random_tangent(arrA)
+    D = [randn(ComplexF64, size(a)) for a in arrA]
+    return projectLC(arrA, D)
+end
+
+# Standalone Riemannian gradient, mirroring `fg` inside `compress`
+function riem_grad(arrA, ψ, sites, N)
+    cost = a -> begin
+        ψA = MPS(a, N; sites=sites)
+        return snorm(ψA)^2 - 2*real(sproduct(ψ, ψA))
+    end
+    _, grad = withgradient(cost, arrA)
+    return projectLC(arrA, grad[1])
+end
+
+# ---- Test 1: self-adjointness of the implemented HVP ----
+# ⟨ξ, Hη⟩ == ⟨Hξ, η⟩  for the real metric. No gradients/retraction needed.
+function test_self_adjoint(hvp, arrA; ntrials=5)
+    println("== self-adjointness ==")
+    for _ in 1:ntrials
+        ξ = random_tangent(arrA)
+        η = random_tangent(arrA)
+        a = tinner(ξ, hvp(η))
+        b = tinner(hvp(ξ), η)
+        println("  rel.asym = ", abs(a - b) / max(abs(a), abs(b), 1e-30))
+    end
+end
+
+# ---- Test 2: HVP vs central-difference of the re-projected gradient ----
+# At the converged point, (P_A grad(R_A(tξ)) - P_A grad(R_A(-tξ)))/2t  ->  Hess[ξ].
+function test_fd_hvp(hvp, arrA, ψ, sites, N; ts=[1e-3, 1e-4, 1e-5, 1e-6])
+    println("== FD vs HVP (central difference) ==")
+    ξ  = random_tangent(arrA)
+    Hξ = hvp(ξ)
+    for t in ts
+        Ap, _ = retractLC(arrA, ξ,  t)
+        Am, _ = retractLC(arrA, ξ, -t)
+        gp = projectLC(arrA, riem_grad(Ap, ψ, sites, N))   # transport back to T_A
+        gm = projectLC(arrA, riem_grad(Am, ψ, sites, N))
+        fd = [(p - m) / (2t) for (p, m) in zip(gp, gm)]
+        relerr = tnorm(fd .- Hξ) / max(tnorm(Hξ), 1e-30)
+        println("  t = $t   rel.err = $relerr")
+    end
+    # Scalar (Rayleigh) cross-check — most robust to retraction higher-order terms
+    println("  scalar check (⟨ξ,Hξ⟩):")
+    for t in ts
+        Ap, _ = retractLC(arrA, ξ,  t)
+        Am, _ = retractLC(arrA, ξ, -t)
+        hp = tinner(ξ, projectLC(arrA, riem_grad(Ap, ψ, sites, N)))
+        hm = tinner(ξ, projectLC(arrA, riem_grad(Am, ψ, sites, N)))
+        fd = (hp - hm) / (2t)
+        ex = tinner(ξ, Hξ)
+        println("    t = $t   rel.err = $(abs(fd - ex)/max(abs(ex),1e-30))")
+    end
+end
+
+# ---- Driver ----
+function run_hvp_tests(ψ::MPS, χ::Int)
+    ψA, _ = compress(ψ, χ; gradtol=1e-12)
+    N     = length(ψ)
+    sites = siteinds(ψ)
+    arrψA = toMatricesLC(ψA)
+
+    L0, R0 = build_environments(ψ, ψA)
+    Σ      = compute_sigma(ψ, ψA, arrψA, L0, R0)
+    hvp(ξ) = hessian_vector_product(ψ, ψA, arrψA, ξ, L0, R0, Σ)
+
+    test_self_adjoint(hvp, arrψA)
+    test_fd_hvp(hvp, arrψA, ψ, sites, N)
+end
+
+
+N = 10
+sites = siteinds("Qubit", N)
+psi = random_mps(ComplexF64, sites; linkdims=4)
+orthogonalize!(psi, N)
+run_hvp_tests(psi, 2)
