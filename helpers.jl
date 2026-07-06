@@ -275,11 +275,11 @@ end
 
 "Returns number of unitaries in a depth-τ brickwork circuit of 2-qubit gates on N qubits.
 Set shift=1 if you want the first gate to act on qubits (2,3) instead of (1,2)"
-function n_unitaries(N, τ, shift=0)
+function n_unitaries(N, τ; shift=0)
     return div(N-1,2)*τ + mod(N-1,2)*div(τ+1-shift,2)
 end
 
-function n_unitaries_layer(N, t, shift=0)
+function n_unitaries_layer(N, t; shift=0)
     div(N, 2) - mod(N+1,2)*mod(t+shift+1, 2)
 end
 
@@ -334,15 +334,46 @@ function to_layer(ψ::MPS)
 end
 
 "Construct a random brickwork circuit of 2-qubit unitaries of depth τ on N qubits."
-function random_circuit(N::Int, τ::Int)
-    return [Matrix{ComplexF64}(random_unitary(4)) for _ in 1:n_unitaries(N, τ)]
+function random_circuit(N::Int, τ::Int; shift=0)
+    return [Matrix{ComplexF64}(random_unitary(4)) for _ in 1:n_unitaries(N, τ; shift)]
 end
 
 "Add a layer of unitaries close to the identity to a circuit of previous size N and depth τ"
-function add_layer(arrU::Vector{<:AbstractMatrix}, N::Int, τ::Int)
-    nU_τp1 = n_unitaries_layer(N, τ+1)
+function add_layer(arrU::Vector{<:AbstractMatrix}, N::Int, τ::Int; shift = 0)
+    nU_τp1 = n_unitaries_layer(N, τ+1; shift)
     Vs = skew([randn(ComplexF64, 4, 4) for _ in 1:nU_τp1])
     newU = [retract(Matrix{ComplexF64}(I, (4,4)), V, 0.01)[1] for V in Vs]
     arrUnext = vcat(arrU, newU)
     return arrUnext
+end
+
+"Reshape array of unitaries representing a circuit into list of arrays, each representing nlayers"
+function group(arrU::Vector{<:AbstractMatrix}, N::Int, nlayers::Int; shift = 0)
+    nU = length(arrU)
+    arrU_grouped::Vector{Vector{<:AbstractMatrix}} = []
+    if iseven(nlayers)
+        nUlayer = n_unitaries(N, nlayers; shift)
+        j = 1
+        while j < nU
+            layer = arrU[j:nUlayer+j-1]
+            push!(arrU_grouped, layer)
+            j += nUlayer
+        end
+    else
+        nUlayer1 = n_unitaries(N, nlayers; shift)
+        nUlayer2 = n_unitaries(N, nlayers; shift = Int(!Bool(shift)))
+        j = 1
+        while j < nU
+            layer = arrU[j:nUlayer1+j-1]
+            push!(arrU_grouped, layer)
+            j += nUlayer1
+            if j < nU
+                layer = arrU[j:nUlayer2+j-1]
+                push!(arrU_grouped, layer)
+                j += nUlayer2
+            end
+        end
+    end
+
+    return arrU_grouped
 end
