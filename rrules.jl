@@ -2133,18 +2133,50 @@ end
 # 5. Preconditioned CG (matrix-free), self-adjoint H
 # =========================================================
 
-function pcg_solve(hvp, precond, b, x0; tol=1e-8, maxiter=100)
+function pcg_solve(hvp, precond, b, x0; tol=1e-8, maxiter=100, verbosity=1,
+                   stagnation_window=10, stagnation_ratio=0.999)
     x = deepcopy(x0)
     r = b .- hvp(x)
     z = precond(r)
     p = deepcopy(z)
     rz_old = innerLC(r, z)
-    b_norm = max(sqrt(innerLC(b,b)), 1e-30)
+    b_norm = max(sqrt(real(innerLC(b, b))), 1e-30)
+
+    resnorms = Float64[sqrt(real(innerLC(r, r))) / b_norm]
+    converged = false
+    breakdown = nothing          # :curvature, :nan, :precond, or nothing
+    used_iters = 0
+
+    # preconditioner should be SPD ⇒ <r, M⁻¹r> > 0; a nonpositive value signals trouble
+    if real(rz_old) ≤ 0
+        breakdown = :precond
+        verbosity ≥ 1 && @warn "pcg_solve: preconditioner not SPD (⟨r,z⟩ = $(rz_old)); \
+                                results unreliable."
+    end
 
     for iter in 1:maxiter
-        sqrt(innerLC(r,r)) / b_norm < tol && return x, iter
+        used_iters = iter
+        relres = resnorms[end]
+        relres < tol && (converged = true; break)
+
         Hp = hvp(p)
-        α = rz_old / innerLC(p, Hp)
+        pHp = real(innerLC(p, Hp))
+
+        # --- curvature / breakdown guards (the load-bearing ones) ---
+        if !isfinite(pHp) || any(!isfinite, real.(innerLC(r, r)))
+            breakdown = :nan
+            verbosity ≥ 1 && @warn "pcg_solve: non-finite value at iter $iter; aborting."
+            break
+        end
+        if pHp ≤ 1e-14 * max(1.0, abs(real(rz_old)))
+            breakdown = :curvature
+            verbosity ≥ 1 && @warn "pcg_solve: non-positive/near-zero curvature \
+                (pᵀHp = $pHp) at iter $iter — Hessian indefinite off-optimum. \
+                Returning last positive-curvature iterate; λ may be inaccurate."
+            break                         # x still holds the last good iterate
+        end
+
+        α = rz_old / pHp
         x = x .+ α .* p
         r = r .- α .* Hp
         z = precond(r)
@@ -2152,8 +2184,27 @@ function pcg_solve(hvp, precond, b, x0; tol=1e-8, maxiter=100)
         β = rz_new / rz_old
         p = z .+ β .* p
         rz_old = rz_new
+
+        push!(resnorms, sqrt(real(innerLC(r, r))) / b_norm)
+        verbosity ≥ 2 && @info "pcg_solve iter $iter: relres = $(resnorms[end])"
+
+        # --- stagnation guard ---
+        if iter > stagnation_window &&
+           resnorms[end] > stagnation_ratio * resnorms[end - stagnation_window]
+            verbosity ≥ 1 && @warn "pcg_solve: stagnating (relres $(resnorms[end]) barely \
+                moved over $stagnation_window iters); likely ill-conditioned."
+        end
     end
-    return x, maxiter
+
+    relres = resnorms[end]
+    if !converged && isnothing(breakdown)
+        verbosity ≥ 1 && @warn "pcg_solve: did NOT converge in $maxiter iters \
+            (relres = $relres, tol = $tol)."
+    end
+
+    info = (; converged, breakdown, iters=used_iters, relres,
+            resnorm=sqrt(real(innerLC(r, r))), resnorms, b_norm)
+    return x, info
 end
 
 # =========================================================
@@ -2300,6 +2351,7 @@ TODO: normalize option after each compression, saving the discarded norm in betw
 """
 function apply_brickwork_variational(Uarray::Vector{<:AbstractMatrix}, ψ::MPS, χ::Int; kwargs...)
     N = length(ψ)
+    compression_depth = 2       # number of layers after which to compress
     Uarrs = group(Uarray, N, 2)
     lognorm_factors = Float64[]
     for (batch_no, arr) in enumerate(Uarrs)
