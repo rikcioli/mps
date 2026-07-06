@@ -355,7 +355,7 @@ function group(arrU::Vector{<:AbstractMatrix}, N::Int, nlayers::Int; shift = 0)
         nUlayer = n_unitaries(N, nlayers; shift)
         j = 1
         while j < nU
-            layer = arrU[j:nUlayer+j-1]
+            layer = arrU[j : min(nUlayer+j-1, length(arrU))]
             push!(arrU_grouped, layer)
             j += nUlayer
         end
@@ -364,11 +364,11 @@ function group(arrU::Vector{<:AbstractMatrix}, N::Int, nlayers::Int; shift = 0)
         nUlayer2 = n_unitaries(N, nlayers; shift = Int(!Bool(shift)))
         j = 1
         while j < nU
-            layer = arrU[j:nUlayer1+j-1]
+            layer = arrU[j : min(nUlayer1+j-1, length(arrU))]
             push!(arrU_grouped, layer)
             j += nUlayer1
             if j < nU
-                layer = arrU[j:nUlayer2+j-1]
+                layer = arrU[j : min(nUlayer2+j-1, length(arrU))]
                 push!(arrU_grouped, layer)
                 j += nUlayer2
             end

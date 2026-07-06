@@ -2133,7 +2133,7 @@ end
 # 5. Preconditioned CG (matrix-free), self-adjoint H
 # =========================================================
 
-function pcg_solve(hvp, precond, b, x0; tol=1e-8, maxiter=100, verbosity=1,
+function pcg_solve(hvp, precond, b, x0; tol=1e-8, maxiter=100, verbosity=0,
                    stagnation_window=10, stagnation_ratio=0.999)
     x = deepcopy(x0)
     r = b .- hvp(x)
@@ -2150,7 +2150,7 @@ function pcg_solve(hvp, precond, b, x0; tol=1e-8, maxiter=100, verbosity=1,
     # preconditioner should be SPD ⇒ <r, M⁻¹r> > 0; a nonpositive value signals trouble
     if real(rz_old) ≤ 0
         breakdown = :precond
-        verbosity ≥ 1 && @warn "pcg_solve: preconditioner not SPD (⟨r,z⟩ = $(rz_old)); \
+        @warn "pcg_solve: preconditioner not SPD (⟨r,z⟩ = $(rz_old)); \
                                 results unreliable."
     end
 
@@ -2165,14 +2165,15 @@ function pcg_solve(hvp, precond, b, x0; tol=1e-8, maxiter=100, verbosity=1,
         # --- curvature / breakdown guards (the load-bearing ones) ---
         if !isfinite(pHp) || any(!isfinite, real.(innerLC(r, r)))
             breakdown = :nan
-            verbosity ≥ 1 && @warn "pcg_solve: non-finite value at iter $iter; aborting."
+            verbosity ≥ 0 && @warn "pcg_solve: non-finite value at iter $iter; aborting."
             break
         end
         if pHp ≤ 1e-14 * max(1.0, abs(real(rz_old)))
             breakdown = :curvature
-            verbosity ≥ 1 && @warn "pcg_solve: non-positive/near-zero curvature \
+            (relres > 1e-6 || verbosity ≥ 1) && @warn "pcg_solve: non-positive/near-zero curvature \
                 (pᵀHp = $pHp) at iter $iter — Hessian indefinite off-optimum. \
-                Returning last positive-curvature iterate; λ may be inaccurate."
+                Returning last positive-curvature iterate; λ may be inaccurate. \
+                relres = $(resnorms[end])."
             break                         # x still holds the last good iterate
         end
 
@@ -2186,19 +2187,19 @@ function pcg_solve(hvp, precond, b, x0; tol=1e-8, maxiter=100, verbosity=1,
         rz_old = rz_new
 
         push!(resnorms, sqrt(real(innerLC(r, r))) / b_norm)
-        verbosity ≥ 2 && @info "pcg_solve iter $iter: relres = $(resnorms[end])"
+        verbosity ≥ 1 && @info "pcg_solve iter $iter: relres = $(resnorms[end])"
 
         # --- stagnation guard ---
         if iter > stagnation_window &&
            resnorms[end] > stagnation_ratio * resnorms[end - stagnation_window]
-            verbosity ≥ 1 && @warn "pcg_solve: stagnating (relres $(resnorms[end]) barely \
+            verbosity ≥ 0 && @warn "pcg_solve: stagnating (relres $(resnorms[end]) barely \
                 moved over $stagnation_window iters); likely ill-conditioned."
         end
     end
 
     relres = resnorms[end]
     if !converged && isnothing(breakdown)
-        verbosity ≥ 1 && @warn "pcg_solve: did NOT converge in $maxiter iters \
+        verbosity ≥ 0 && @warn "pcg_solve: did NOT converge in $maxiter iters \
             (relres = $relres, tol = $tol)."
     end
 
@@ -2359,10 +2360,14 @@ function apply_brickwork_variational(Uarray::Vector{<:AbstractMatrix}, ψ::MPS, 
                                     shift=Int(isodd(compression_depth)),
                                     to_right=iseven(compression_depth) || (isodd(compression_depth) && iseven(batch_no)), 
                                     kwargs...)
-        ψtcompr, convergence_info = compress(ψt, χ)
-        ψtcompr_normalized, logn = normalize_logn(ψtcompr)
-        ψ = ψtcompr_normalized
-        push!(lognorm_factors, logn)
+        if batch_no < length(Uarrs)
+            ψtcompr, convergence_info = compress(ψt, χ; verbosity = 0)
+            ψtcompr_normalized, logn = normalize_logn(ψtcompr)
+            push!(lognorm_factors, logn)
+            ψ = ψtcompr_normalized
+        else
+            ψ = ψt
+        end
     end
 
     return ψ, lognorm_factors
@@ -2387,14 +2392,19 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_variational), Uarray::Vec
         ψt, back_brick = pullback(apply_brickwork_local, arr, ψ)
         push!(pullback_apply_brickworks, back_brick)
 
-        (ψtcompr, convergence_info), back_compress = pullback(compress, ψt, χ)
-        push!(pullback_compress, back_compress)
+        if batch_no < length(Uarrs)
+            compress_noverb = (psi, chi) -> compress(psi, chi; verbosity=0)
+            (ψtcompr, convergence_info), back_compress = pullback(compress_noverb, ψt, χ)
+            push!(pullback_compress, back_compress)
 
-        (ψtcompr_normalized, logn), back_logn = pullback(normalize_logn, ψtcompr)
-        push!(lognorm_factors, logn)
-        push!(pullback_lognorms, back_logn)
+            (ψtcompr_normalized, logn), back_logn = pullback(normalize_logn, ψtcompr)
+            push!(lognorm_factors, logn)
+            push!(pullback_lognorms, back_logn)
 
-        ψ = ψtcompr_normalized
+            ψ = ψtcompr_normalized
+        else
+            ψ = ψt
+        end
     end
 
     function apply_brickwork_variational_pullback(Δout)
@@ -2403,10 +2413,17 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_variational), Uarray::Vec
         ΔUarrs::Vector{Vector{Matrix{ComplexF64}}} = []
 
         for j in eachindex(Uarrs)
-            k = lastindex(Uarrs) - j + 1
-            Δψtcompr_normalized = Δψ
-            (Δψtcompr,) = pullback_lognorms[k]((Δψtcompr_normalized, Δlognorm_factors[k]))
-            (Δψt,) = pullback_compress[k]((Δψtcompr, NoTangent()))
+            k = lastindex(Uarrs)-j+1
+            local Δψt
+
+            if k < length(Uarrs)
+                Δψtcompr_normalized = Δψ
+                (Δψtcompr,) = pullback_lognorms[k]((Δψtcompr_normalized, Δlognorm_factors[k]))
+                (Δψt,) = pullback_compress[k]((Δψtcompr, NoTangent()))
+            else
+                Δψt = Δψ
+            end
+
             (Δarr, Δψ) = pullback_apply_brickworks[k](Δψt)
             push!(ΔUarrs, Δarr)
         end
