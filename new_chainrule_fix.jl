@@ -1222,6 +1222,8 @@ run_mixed_adjoint_test(psi, 2)
 
 # GRADIENT OF compress 
 
+
+
 function genPointLC(N, χ)
     ψ = random_mps(ComplexF64, siteinds("Qubit", N); linkdims=χ)
     orthogonalize!(ψ, N)
@@ -1234,13 +1236,34 @@ function genTanLC(arrV)
     return projectLC(arrV, D)
 end
 
+function genPoint(N::Int, χ::Int, b::Int)
+    ψ = random_mps(ComplexF64, siteinds("Qubit", N); linkdims=χ)
+    orthogonalize!(ψ, N)
+    orthogonalize!(ψ, 1)
+    orthogonalize!(ψ, b)
+    arrV = toMatrices(ψ, b)
+    return arrV
+end
+
+function genPointRC(N, χ)
+    ψ = random_mps(ComplexF64, siteinds("Qubit", N); linkdims=χ)
+    orthogonalize!(ψ, 1)
+    arrV = toMatricesRC(ψ)
+    return arrV
+end
+
+function genTanRC(arrV)
+    D = [randn(ComplexF64, size(a)) for a in arrV]
+    return projectRC(arrV, D)
+end
+
 
 N = 4; χ = 4
-V_array = genPointLC(N, χ)
 
+W_array = Vector{Matrix{ComplexF64}}(genPoint(N, χ, 1))
 withgrad_Riemannian = (func, arrV, args...) -> begin
     val, grad = withgradient(func, arrV, args...)
-    Rgrad = projectLC(arrV, grad[1])
+    Rgrad = projectRC(arrV, grad[1])
     return val, Rgrad
 end
 
@@ -1261,15 +1284,14 @@ end
 
 function cost_compress(arrV::Vector{<:AbstractMatrix})
     N = length(arrV)
-    psiV = MPS(arrV, N)
+    psiV = MPS(arrV, 1)
     psiVcompr, _ = compress(psiV, 2)
-    @show psiVcompr
     return real(sproduct(psiV, psiVcompr))
 end
 
 function ChainRulesCore.rrule(::typeof(cost_compress), arrV::Vector{<:AbstractMatrix})
     N = length(arrV)
-    psiV, MPS_back = pullback(MPS, arrV, N)
+    psiV, MPS_back = pullback(MPS, arrV, 1)
     (psiVcompr, conv_info), compr_back = pullback(compress, psiV, 2)   # your custom rrule
 
     # The scalar overlap, with BOTH MPS arguments held open so we can pull back
@@ -1297,8 +1319,68 @@ function ChainRulesCore.rrule(::typeof(cost_compress), arrV::Vector{<:AbstractMa
     return cost, cost_compress_pullback
 end
 
-cost_compress(V_array)
-gradient(cost_compress, V_array)[1]
+cost_compress(W_array)
+gradient(cost_compress, W_array)[1]
 fg_compress = arrV -> withgrad_Riemannian(cost_compress, arrV)
-res, tes = fg_compress(V_array)
-testGrad(() -> genPointLC(N, χ), arrV -> genTanLC(arrV), fg_compress, innerLC, retractLC)
+res, tes = fg_compress(W_array)
+testGrad(() -> Vector{Matrix{ComplexF64}}(genPoint(N, χ, 1)), arrV -> genTanRC(arrV), fg_compress, innerRC, retractRC)
+
+
+
+
+
+### Test scaling with bond dimension
+
+chirange = 2 .^(6:7)
+trials = 5
+results2 = let chirange=chirange, trials=trials
+    N = 30
+    sites = siteinds("Qubit", N)
+    ftimes = Float64[]
+    gtimes = Float64[]
+    for χ in chirange
+        @show χ
+        ftime_χ = Float64[]
+        gtime_χ = Float64[]
+        for _ in 1:trials
+            Varr = genPointRC(N, χ)
+            ftime = @elapsed cost_compress(Varr)
+            gtime = @elapsed gradient(cost_compress, Varr)
+            push!(ftime_χ, ftime)
+            push!(gtime_χ, gtime)
+        end
+        push!(ftimes, sum(ftime_χ)/trials)
+        push!(gtimes, sum(gtime_χ)/trials)
+    end
+    ftimes, gtimes    
+end
+
+chirange = 2 .^(2:5)
+Plots.plot(xlabel="chi", ylabel="t (s)")
+Plots.plot!(chirange, results[1], label="tf")
+Plots.plot!(chirange, results[2], label="tg")
+Plots.plot!(chirange, 3e-2*chirange, yscale=:log10, xscale=:log10, label="O(chi)")
+Plots.plot!(chirange, 3e-3*chirange .^2, yscale=:log10, xscale=:log10, label="O(chi^2)")
+Plots.plot!(chirange, 1e-7*chirange .^3, yscale=:log10, xscale=:log10, label="O(chi^3)", legend=:bottomright)
+
+
+
+### GRADIENT OF APPLY BRICKWORK VARIATIONAL
+
+N = 4; χ = 2
+sites = siteinds("Qubit", N)
+psi = random_mps(ComplexF64, sites; linkdims = χ)
+orthogonalize!(psi, 1)
+nU = n_unitaries(N, 6)
+U_array = [random_unitary(4) for _ in 1:nU]
+
+
+function cost_applyU(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    ψ2, lognorm_factors = apply_brickwork_variational(arrU, ψ, 2)
+    return -log(abs(sproduct(ψ, ψ2))) - sum(lognorm_factors)
+end
+cost_applyU(U_array, psi)
+cost_applyU_red = arrU -> cost_applyU(arrU, psi)
+gradient(cost_applyU_red, U_array)
+fg_cost_applyU = arrU -> withgrad_Riemannian(cost_applyU_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_applyU, inner, retract)
