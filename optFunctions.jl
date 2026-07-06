@@ -389,7 +389,7 @@ end
 function random_left_isometry(m::Int, n::Int)
     # m ≥ n
     F = qr((randn(m, n) + randn(m, n) * im) / sqrt(2))
-    return extractQ(M)
+    return Matrix(F.Q)
 end
 
 function random_right_isometry(m::Int, n::Int)

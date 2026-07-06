@@ -222,6 +222,13 @@ function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_og
     M_ten = (cL*M_ten)*cR
 
     M = Matrix{ComplexF64}(M_ten, cLind, cRind)
+    #_, S, _ = svd_compact(M)  #Only needed for diagnostics
+    #if length(diag(S)) > 2
+    #    if S[2,2] - S[3,3] < 1e-8 && S[3,3] > 1e-12
+    #        @warn "Found degeneracy"
+    #        @show diag(S)
+    #    end 
+    #end
     U, S, Vdg, err = svd_trunc(M; kwargs...)
     Snorm = norm(S)
     if normalize
@@ -273,7 +280,7 @@ function SVDcontract_pullback(ΔMf, tape::SVDcontractTape)
     end
 
     ΔM = zero(M)
-    svd_trunc_pullback!(ΔM, M, (U, S, Vdg), (ΔU, ΔS, ΔVdg), gauge_atol = 1e-12)
+    svd_trunc_pullback!(ΔM, M, (U, S, Vdg), (ΔU, ΔS, ΔVdg), gauge_atol = 1e-8)
 
     ΔM_ten = ITensor(ΔM, cLind, cRind)
     ΔM_ten *= dag(cR)
@@ -362,7 +369,7 @@ function ITensorMPS.MPS(V::Vector{<:AbstractArray}, ogc; check_og=true, sites=no
 end
 
 "Convert vector of isometries with orthogonality center ogc into an MPS.
-The pullback treats the adjoint of the MPS as if it was a vector of isometries."
+The pullback treats the adjoint of the MPS as if it was a vector of matrices."
 function ChainRulesCore.rrule(::typeof(ITensorMPS.MPS), V::Vector{<:AbstractArray}, ogc::Int; check_og=true, sites=nothing, links=nothing)
     check_og && check_orthogonal(V, ogc)
     N = length(V)
@@ -674,11 +681,6 @@ function snorm(ψ::MPS)
     return isortho(ψ) ? norm(ψ[only(ortho_lims(ψ))]) : sqrt(sproduct(ψ, ψ))
 end
 
-"Computes the squared norm of the MPS."
-function snorm_sq(ψ::MPS)
-    return isortho(ψ) ? norm(ψ[only(ortho_lims(ψ))])^2 : sproduct(ψ, ψ)
-end
-
 function ChainRulesCore.rrule(::typeof(snorm), ψ::MPS)
 
     if isortho(ψ)
@@ -705,6 +707,11 @@ function ChainRulesCore.rrule(::typeof(snorm), ψ::MPS)
     end
 end
 
+"Computes the squared norm of the MPS."
+function snorm_sq(ψ::MPS)
+    return isortho(ψ) ? norm(ψ[only(ortho_lims(ψ))])^2 : sproduct(ψ, ψ)
+end
+
 function ChainRulesCore.rrule(::typeof(snorm_sq), ψ::MPS)
 
     if isortho(ψ)
@@ -727,6 +734,42 @@ function ChainRulesCore.rrule(::typeof(snorm_sq), ψ::MPS)
         end
         return n2, snorm_sq_pullback_all
     end
+end
+
+function slognorm(ψ::MPS)
+    return log(norm(ψ))/2
+end
+
+function normalize_logn(ψ::MPS)
+    @assert isortho(ψ)
+    ogc = only(ortho_lims(ψ))
+    ψn = copy(ψ)
+    n = snorm(ψ)
+    ψn[ogc] /= n
+    return ψn, log(n)
+end
+
+function ChainRulesCore.rrule(::typeof(normalize_logn), ψ::MPS)
+    @assert isortho(ψ)
+    ogc = only(ortho_lims(ψ))
+    ψn = copy(ψ)
+    n = snorm(ψ)
+    ψn[ogc] /= n
+
+    function pullback_normalize_logn(Δy)
+        Δψn, Δlogn = Δy
+        Δψ = copy(Δψn)
+
+        # scalar inner product between the cotangent of An and An itself
+        alpha = real(dot(Δψn[ogc], ψn[ogc]))
+
+        # derivative w.r.t. A
+        Δψ[ogc] = (Δψn[ogc] - ψn[ogc]*alpha + Δlogn*ψn[ogc])/n
+
+        return (NoTangent(), Δψ)
+    end
+
+    return (ψn, log(n)), pullback_normalize_logn
 end
 
 ### PRODUCT OF AN MPO WITH AN MPS, TENSOR BY TENSOR
@@ -1112,7 +1155,7 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_
     #trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
     strat = to_strategy(trunc)
     if !(strat isa MatrixAlgebraKit.NoTruncation)
-        strat = truncdegen(strat; atol=2*eps())
+        strat = truncdegen(strat; atol=1e-12)
     end
     
     # by default to_right == true, meaning we sweep from left to right
@@ -1178,7 +1221,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
     #trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
     strat = to_strategy(trunc)
     if !(strat isa MatrixAlgebraKit.NoTruncation)
-        strat = truncdegen(strat; atol=2*eps())
+        strat = truncdegen(strat; atol=1e-12)
     end
     
     sites = siteinds(ψ)
@@ -1328,7 +1371,6 @@ end
 - APPLY VECTOR OF UNITARIES IN A BRICKWORK PATTERN, SWEEPING LEFT TO RIGHT AND BACK
 - Normalize after every SVD.
 - return normalizes state, and logs = log(s) where s is the norm
-- TODO: to right and shift = 1???
 """
 function apply_brickwork_normalize(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), post_factorize_callback=identity)
     N = length(ψ)
@@ -1392,8 +1434,7 @@ function apply_brickwork_normalize(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; sh
     post_factorize_callback(errs)
     final_ogc = to_right ? lastj+1 : lastj
     set_ortho_lims!(ψfinal, final_ogc:final_ogc)
-    logs = sum(lognorm_factors)
-    return ψfinal, logs
+    return ψfinal, lognorm_factors
 end
 
 function ChainRulesCore.rrule(::typeof(apply_brickwork_normalize), Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), post_factorize_callback=identity)
@@ -1405,7 +1446,6 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_normalize), Uarray::Vecto
 
     # Preparing the maxranks for svd trunc
     d_loc = space(siteind(ψ,1))
-
 
     sites = siteinds(ψ)
     ψfinal = copy(ψ)
@@ -1452,7 +1492,6 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_normalize), Uarray::Vecto
 
             push!(lognorm_factors,logn)
             push!(pull_lognorms,pull_logn)
-  
 
             push!(tapes, tape_j)
             push!(errs, err)
@@ -1468,15 +1507,14 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_normalize), Uarray::Vecto
             end
         end
     end
-    logs,pull_sumlogs  = pullback(sum,lognorm_factors)
+    #logs,pull_sumlogs  = pullback(sum,lognorm_factors)
 
     post_factorize_callback(errs)
     final_ogc = to_right ? lastj+1 : lastj
     set_ortho_lims!(ψfinal, final_ogc:final_ogc)
  
     function apply_brickwork_normalize_pullback(Δout)
-        Δψfinal, Δlogs = Δout
-        Δlognorm_factors, = pull_sumlogs(Δlogs)
+        Δψfinal, Δlognorm_factors = Δout
         Δψ = copy(Δψfinal)
         ΔUarray = [zeros(ComplexF64, size(U)) for U in Uarray]
         i = nU; pb_n = length(tapes);
@@ -1518,7 +1556,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_normalize), Uarray::Vecto
         # note it's a VECTOR, not an MPS, since it will NOT be orthogonalized in general
         return (NoTangent(), ΔUarray, Δψ)
     end
-    return (ψfinal, logs), apply_brickwork_normalize_pullback
+    return (ψfinal, lognorm_factors), apply_brickwork_normalize_pullback
 end
 
 
@@ -2137,10 +2175,7 @@ function mixed_partial_adjoint(ψ::MPS, arrψ::Vector{<:AbstractArray}, ϕ::MPS,
     Bk_defect_envs = toMatricesLC(Bk_defect_envs_tensors; check_og=false)   # convert to matrices
 
     ΔB = -2*Bk_defect_envs  # for all j = 1, ..., N
-    ΔB = projectLC(arrψ, ΔB)
-    # here projection is not strictly necessary since it will be projected at the end of the chain anyway
-    # we put it here to make this function self consistent, without postponing the projection to later steps of the chain
-
+    # we DO NOT project on Grassmann tangent space here, as all the other functions are defined for Stiefel
     return ΔB
 end
 
@@ -2155,8 +2190,6 @@ function compress(ψ::MPS, χ::Int; maxiter::Int = 10000, gradtol::Float64 = 1e-
     # Build warm start to speed up compression
     ψapprox = move_center(ψ, 1)
     ψapprox = move_center(ψapprox, N; trunc=(maxrank=χ,))
-    ovlp0 = abs(sproduct(ψ, ψapprox))
-    @info "Overlap after truncated SVD: $(ovlp0)"
     arrA0 = toMatricesLC(ψapprox)
 
     cost_func = arrA::Vector{<:AbstractArray} -> begin
@@ -2181,9 +2214,38 @@ function compress(ψ::MPS, χ::Int; maxiter::Int = 10000, gradtol::Float64 = 1e-
                                                             inner = innerLC)
     
     ψcompr = MPS(arrAmin, N; sites=sites)
-    ovlpmin = abs(sproduct(ψ, ψcompr))
-    @info "Final overlap: $(ovlpmin)"
-    return (ψcompr, (fmin=fmin, gradmin=gradmin, numfg=numfg, normgradhistory=normgradhistory))
+    convergence_info = (fmin=fmin, gradmin=gradmin, numfg=numfg, normgradhistory=normgradhistory)
+
+    return (ψcompr, convergence_info)
+end
+
+function compress_pullback(Δψcompr::Vector{ITensor}, ψ::MPS, ψcompr::MPS; gradtol = 1e-8)
+    N = length(ψ)
+    ψA = copy(ψcompr)
+    ΔψA = copy(Δψcompr)
+
+    arrψ = toMatricesLC(ψ)
+    arrψA = toMatricesLC(ψA)
+    ΔarrψA = toMatricesLC(ΔψA; check_og=false)
+
+    projΔarrψA = projectLC(arrψA, ΔarrψA)
+    #normal_comp = norm(projΔarrψA - ΔarrψA)
+    #normal_comp > 1e-12 && @warn "compress_pullback expects a tangent incoming adjoint ΔψA, but a normal component was found.\nnorm(projΔψA - ΔψA) = $(normal_comp).\nProjecting onto tangent space."
+    ΔarrψA = projΔarrψA
+
+    L0, R0 = build_environments(ψ, ψA)
+    Σ = compute_sigma(ψ, ψA, arrψA, L0, R0)
+
+    hvp(ξ::Vector{<:AbstractMatrix}) = hessian_vector_product(ψ, ψA, arrψA, ξ, L0, R0, Σ)
+    blocks = build_preconditioner_blocks(arrψA, Σ; reg=1e-8)  # see note in step 3
+    precond(r) = apply_preconditioner(blocks, r)
+
+    λ0 = warm_start(ψ, ψA, arrψA, ΔarrψA, L0, R0, Σ)
+    λ, _ = pcg_solve(hvp, precond, -ΔarrψA, λ0; tol = gradtol)
+
+    Δarrψ = mixed_partial_adjoint(ψ, arrψ, ψA, λ, L0, R0)
+    Δψ = toITensors(Δarrψ, N; check_og=false, sites=siteinds(ψ), links=linkinds(ψ))
+    return Δψ
 end
 
 
@@ -2193,20 +2255,17 @@ function ChainRulesCore.rrule(::typeof(compress), ψ::MPS, χ::Int; maxiter::Int
 
     # Build warm start to speed up compression
     ψapprox = move_center(ψ, 1)
-    ψapprox = move_center(ψapprox, N; trunc=(maxrank=χ,))
-    ovlp0 = abs(sproduct(ψ, ψapprox))
-    @info "Overlap after truncated SVD: $(ovlp0)"
-
-    ψ, back_og = Zygote.pullback(move_center, ψ, N)
-
+    ψapprox = move_center(ψapprox, N; trunc=(maxrank=χ,))   # TODO: replace with randomized svd
     arrA0 = toMatricesLC(ψapprox)
 
-    cost_func = arrA::Vector{<:AbstractArray} -> begin
+    ψ, back_og = Zygote.pullback(move_center, ψ, N) # needed cause the fixed point is solved in left canonical form
+
+    cost_func = arrA::Vector{<:AbstractMatrix} -> begin
         ψA = MPS(arrA, N; sites = sites)
         return snorm(ψA)^2 - 2*real(sproduct(ψ, ψA))
     end
 
-    fg = arrA::Vector{<:AbstractArray} -> begin
+    fg = arrA::Vector{<:AbstractMatrix} -> begin
         func, grad = withgradient(cost_func, arrA)
         grad = projectLC(arrA, grad[1])
         return func, grad
@@ -2222,40 +2281,87 @@ function ChainRulesCore.rrule(::typeof(compress), ψ::MPS, χ::Int; maxiter::Int
                                                             isometrictransport = true, 
                                                             inner = innerLC)
     
-    ψcompr = MPS(arrAmin, N; sites=sites)
-    ovlpmin = abs(sproduct(ψ, ψcompr))
-    @info "Final overlap: $(ovlpmin)"
-    
-    (ψA, convergence_info) = (ψcompr, (fmin=fmin, gradmin=gradmin, numfg=numfg, normgradhistory=normgradhistory))
+    ψcompr = MPS(arrAmin, N; sites=sites)    
+    convergence_info = (fmin=fmin, gradmin=gradmin, numfg=numfg, normgradhistory=normgradhistory)
 
-    function compress_pullback(Δout)
-        ΔψA, _ = Δout
-
-        arrψ = toMatricesLC(ψ)
-        arrψA = toMatricesLC(ψA)
-        ΔarrψA = toMatricesLC(ΔψA; check_og=false)
-
-        projΔarrψA = projectLC(arrψA, ΔarrψA)
-        normal_comp = norm(projΔarrψA - ΔarrψA)
-        normal_comp > 1e-12 && @warn "compress_pullback expects a tangent incoming adjoint ΔψA, but a normal component was found.\nnorm(projΔψA - ΔψA) = $(normal_comp).\nProjecting onto tangent space."
-        ΔarrψA = projΔarrψA
-
-        L0, R0 = build_environments(ψ, ψA)
-        Σ = compute_sigma(ψ, ψA, arrψA, L0, R0)
-
-        hvp(ξ::Vector{<:AbstractMatrix}) = hessian_vector_product(ψ, ψA, arrψA, ξ, L0, R0, Σ)
-        blocks = build_preconditioner_blocks(arrψA, Σ; reg=1e-8)  # see note in step 3
-        precond(r) = apply_preconditioner(blocks, r)
-
-        λ0 = warm_start(ψ, ψA, arrψA, ΔarrψA, L0, R0, Σ)
-        λ, _ = pcg_solve(hvp, precond, -ΔarrψA, λ0; tol = gradtol)
-
-        Δarrψ = mixed_partial_adjoint(ψ, arrψ, ψA, λ, L0, R0)
-        Δψ = toITensors(Δarrψ, N; check_og=false, sites=siteinds(ψ), links=linkinds(ψ))
-        (Δψ,) = back_og(Δψ)
-
+    function compress_pullback_Zygote(Δout)
+        Δψcompr, _ = Δout
+        Δψ = compress_pullback(Δψcompr, ψ, ψcompr; gradtol)
+        (Δψ,) = back_og(Δψ) 
         return (NoTangent(), Δψ, NoTangent())
     end
 
-    return (ψA, convergence_info), compress_pullback
+    return (ψcompr, convergence_info), compress_pullback_Zygote
+end
+
+
+"""
+TODO: normalize option after each compression, saving the discarded norm in between
+"""
+function apply_brickwork_variational(Uarray::Vector{<:AbstractMatrix}, ψ::MPS, χ::Int; kwargs...)
+    N = length(ψ)
+    Uarrs = group(Uarray, N, 2)
+    lognorm_factors = Float64[]
+    for (batch_no, arr) in enumerate(Uarrs)
+        ψt = apply_brickwork(arr, ψ; normalize=false, 
+                                    shift=Int(isodd(compression_depth)),
+                                    to_right=iseven(compression_depth) || (isodd(compression_depth) && iseven(batch_no)), 
+                                    kwargs...)
+        ψtcompr, convergence_info = compress(ψt, χ)
+        ψtcompr_normalized, logn = normalize_logn(ψtcompr)
+        ψ = ψtcompr_normalized
+        push!(lognorm_factors, logn)
+    end
+
+    return ψ, lognorm_factors
+end
+
+
+function ChainRulesCore.rrule(::typeof(apply_brickwork_variational), Uarray::Vector{<:AbstractMatrix}, ψ::MPS, χ::Int; kwargs...)
+    N = length(ψ)
+    compression_depth = 2       # number of layers after which to compress
+    Uarrs = group(Uarray, N, compression_depth)
+    lognorm_factors = Float64[]
+    pullback_apply_brickworks = []
+    pullback_lognorms = []
+    pullback_compress = []
+
+    for (batch_no, arr) in enumerate(Uarrs)
+        apply_brickwork_local = (Uarr, ϕ) -> apply_brickwork(Uarr, ϕ; 
+                                                normalize=false, 
+                                                shift=Int(isodd(compression_depth)),
+                                                to_right=iseven(compression_depth) || (isodd(compression_depth) && iseven(batch_no)), 
+                                                kwargs...)
+        ψt, back_brick = pullback(apply_brickwork_local, arr, ψ)
+        push!(pullback_apply_brickworks, back_brick)
+
+        (ψtcompr, convergence_info), back_compress = pullback(compress, ψt, χ)
+        push!(pullback_compress, back_compress)
+
+        (ψtcompr_normalized, logn), back_logn = pullback(normalize_logn, ψtcompr)
+        push!(lognorm_factors, logn)
+        push!(pullback_lognorms, back_logn)
+
+        ψ = ψtcompr_normalized
+    end
+
+    function apply_brickwork_variational_pullback(Δout)
+        Δψ, Δlognorm_factors = Δout
+        Δψ = copy(Δψ)
+        ΔUarrs::Vector{Vector{Matrix{ComplexF64}}} = []
+
+        for j in eachindex(Uarrs)
+            k = lastindex(Uarrs) - j + 1
+            Δψtcompr_normalized = Δψ
+            (Δψtcompr,) = pullback_lognorms[k]((Δψtcompr_normalized, Δlognorm_factors[k]))
+            (Δψt,) = pullback_compress[k]((Δψtcompr, NoTangent()))
+            (Δarr, Δψ) = pullback_apply_brickworks[k](Δψt)
+            push!(ΔUarrs, Δarr)
+        end
+        ΔUarray = reduce(vcat, reverse(ΔUarrs))
+
+        return (NoTangent(), ΔUarray, Δψ, NoTangent())
+    end
+
+    return (ψ, lognorm_factors), apply_brickwork_variational_pullback
 end
