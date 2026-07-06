@@ -866,7 +866,7 @@ if false
     end
 end
 
-if true
+if false
     let
         pathname = "testdata\\rand\\mps1\\"
         N = 20
@@ -875,10 +875,10 @@ if true
         psi = read(f,"psi",MPS)
         close(f)
 
-        prepare_start(psi, pathname*"maxerr_test\\"; maxerror=1e-8, maxiter=20000)
+        #prepare_start(psi, pathname*"var2_test\\"; maxrank=2, maxiter=20000)
 
         while true
-            status = continue_inversion(psi, 20, pathname*"maxerr_test\\", invert_maxerr)
+            status = continue_inversion(psi, 20, pathname*"var2_test\\", invert_maxrank_variational)
             status == :done && break
         end
     end
@@ -946,10 +946,10 @@ if false
 end
 
 
-if false
+if true
     let
-        pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/xy/g0h0.5/"
-        Nlist = [20, 40, 60, 80, 100]
+        pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/xxz/Jz2.5/"
+        Nlist = [60,100,140,180,220,260,300]
         psis = MPS[]
         for N in Nlist
             f = h5open(pathname*"$(N)_mps.h5","r")
@@ -959,7 +959,12 @@ if false
         end
 
         Threads.@threads for psi in psis
-            runinversion2(psi, 30; pathname = pathname*"trunc/")
+            prepare_start(psi, pathname*"trunc/"; maxiter=20000)
+
+            while true
+                status = continue_inversion(psi, 30, pathname*"trunc/", invert_maxrank)
+                status == :done && break
+            end
         end
     end
 end
