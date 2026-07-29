@@ -240,6 +240,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
     maxrank = instr.maxrank
     if isnothing(maxrank)
         maxrank = chimax
+        instr.maxrank = maxrank
     end
     zeromps = MPS(sites, ["0" for _ in 1:N])
     orthogonalize!(zeromps, 1)
@@ -383,6 +384,7 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
     maxrank = instr.maxrank
     if isnothing(maxrank)
         maxrank = chimax
+        instr.maxrank = maxrank
     end
     zeromps = MPS(sites, ["0" for _ in 1:N])
     orthogonalize!(zeromps, 1)
@@ -526,6 +528,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
     maxrank = instr.maxrank
     if isnothing(maxrank)
         maxrank = chimax
+        instr.maxrank = maxrank
     end
     zeromps = MPS(sites, ["0" for _ in 1:N])
     orthogonalize!(zeromps, 1)
