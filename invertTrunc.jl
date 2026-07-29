@@ -149,6 +149,7 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
     fmin = NaN
     gradmin = nothing
     total_nghist::Matrix{Float64} = savefile.normgradhistory
+    total_time_prior::Float64 = get(savefile, :time, 0.0)
     # this will be reshaped before final save
 
 
@@ -164,6 +165,8 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
     end
 
     normgradvec = Float64[]
+    t_start = Base.time()
+
     function checkpoint_finalize!(x, f, g, numiter)
         gnorm = sqrt(inner(x, g, g))
         push!(normgradvec, f)
@@ -180,9 +183,10 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
             vc = copy(normgradvec)
             ckpt_normgradhistory = permutedims(reshape(vc, 2, n))
             cum_nghist = vcat(total_nghist, ckpt_normgradhistory)
+            cum_time   = total_time_prior + (Base.time() - t_start)
 
             ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,  # current arrU and gradient at arrU
-                    cost=f, overlap_cost=overlap_cost, err=err, # current function values
+                    cost=f, overlap_cost=overlap_cost, err=err, time=cum_time,       # current function values, err and time
                     converged=false, finished=false)                                 # mid-run ⇒ not converged
             save_object(pathname*"N$(N)_T$(tau).jld2", ckpt)
 
@@ -196,13 +200,14 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
 
     @show tau
 
-    time = @elapsed arrUmin, fmin, gradmin, numfg, normgradhistory =
+    elapsed = @elapsed arrUmin, fmin, gradmin, numfg, normgradhistory =
         optimize(fg, arrUmin, algorithm;
                 retract = retract, transport! = transport!,
                 isometrictransport = true, inner = inner,
                 finalize! = checkpoint_finalize!)
 
     cum_nghist = vcat(total_nghist, normgradhistory)
+    cum_time = total_time_prior + elapsed
 
 
     # --- final diagnostics (overlap term reported separately from penalty) ---
@@ -218,7 +223,7 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
     result_tau = (N=N, tau=tau, arrU=arrUmin, gradmin=gradmin, # current arrU and gradient at arrU
                   gradnorm=final_gnorm, numfg=numfg, normgradhistory=cum_nghist,      # OptimKit's other returns
                   cost=fmin, overlap_cost=overlap_cost, err=err,            # current function values
-                  converged=converged, finished=finished, time=time)   # mid-run ⇒ not converged
+                  converged=converged, finished=finished, time=cum_time)   # mid-run ⇒ not converged
     save_object(pathname*"N$(N)_T$(tau).jld2", result_tau)
 
     new_instr = copy(instr)
@@ -271,6 +276,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
     fmin = NaN
     gradmin = nothing
     total_nghist::Matrix{Float64} = savefile.normgradhistory
+    total_time_prior::Float64 = get(savefile, :time, 0.0)   # cumulative seconds from earlier runs
     # this will be reshaped before final save
 
 
@@ -288,6 +294,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
     normgradvec = Float64[]
     n_stall = 100          # window to check for a frozen gradient
     stall_atol = 1e-14      # essentially bit-frozen
+    t_start = Base.time()
     function checkpoint_finalize!(x, f, g, numiter)
         gnorm = sqrt(inner(x, g, g))
         push!(normgradvec, f)
@@ -303,13 +310,13 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
                 # Only a problem if frozen AND not legitimately converged
                 converged_ok = gnorm <= gradtol*sqrt(nU)
                 if spread <= stall_atol && !converged_ok
+                    errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
+                                spread=spread, n_stall=n_stall, stall_atol=stall_atol)
+                    save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                     error("Gradient norm frozen (spread=$spread) over last $n_stall iterations at " *
                         "tau=$tau, iter=$numiter, gnorm=$gnorm, but NOT converged " *
                         "(gradtol=$(gradtol*sqrt(nU))). Likely an exact spectral degeneracy at the " *
                         "truncation cut made the SVD-adjoint gradient singular. The optimizer is stuck.")
-                    errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
-                                spread=spread, n_stall=n_stall, stall_atol=stall_atol)
-                    save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                 end
             end
         end
@@ -325,9 +332,10 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
             vc = copy(normgradvec)
             ckpt_normgradhistory = permutedims(reshape(vc, 2, n))
             cum_nghist = vcat(total_nghist, ckpt_normgradhistory)
+            cum_time   = total_time_prior + (Base.time() - t_start)
 
             ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,  # current arrU and gradient at arrU
-                    cost=f, overlap_cost=overlap_cost, err=err, # current function values
+                    cost=f, overlap_cost=overlap_cost, err=err, time=cum_time,       # current function values, err and time
                     converged=false, finished=false)                                 # mid-run ⇒ not converged
             save_object(pathname*"N$(N)_T$(tau).jld2", ckpt)
 
@@ -341,13 +349,14 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
 
     @show tau
 
-    time = @elapsed arrUmin, fmin, gradmin, numfg, normgradhistory =
+    elapsed = @elapsed arrUmin, fmin, gradmin, numfg, normgradhistory =
         optimize(fg, arrUmin, algorithm;
                 retract = retract, transport! = transport!,
                 isometrictransport = true, inner = inner,
                 finalize! = checkpoint_finalize!)
 
     cum_nghist = vcat(total_nghist, normgradhistory)
+    cum_time = total_time_prior + elapsed
 
 
     # --- final diagnostics (overlap term reported separately from penalty) ---
@@ -363,7 +372,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
     result_tau = (N=N, tau=tau, arrU=arrUmin, gradmin=gradmin, # current arrU and gradient at arrU
                   gradnorm=final_gnorm, numfg=numfg, normgradhistory=cum_nghist,      # OptimKit's other returns
                   cost=fmin, overlap_cost=overlap_cost, err=err,            # current function values
-                  converged=converged, finished=finished, time=time)   # mid-run ⇒ not converged
+                  converged=converged, finished=finished, time=cum_time)   # mid-run ⇒ not converged
     save_object(pathname*"N$(N)_T$(tau).jld2", result_tau)
 
     new_instr = copy(instr)
@@ -414,6 +423,7 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
     fmin = NaN
     gradmin = nothing
     total_nghist::Matrix{Float64} = savefile.normgradhistory
+    total_time_prior::Float64 = get(savefile, :time, 0.0)   # cumulative seconds from earlier runs
     # this will be reshaped before final save
 
 
@@ -431,6 +441,7 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
     normgradvec = Float64[]
     n_stall = 100          # window to check for a frozen gradient
     stall_atol = 1e-14      # essentially bit-frozen
+    t_start = Base.time()
     function checkpoint_finalize!(x, f, g, numiter)
         gnorm = sqrt(inner(x, g, g))
         push!(normgradvec, f)
@@ -446,13 +457,13 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
                 # Only a problem if frozen AND not legitimately converged
                 converged_ok = gnorm <= gradtol*sqrt(nU)
                 if spread <= stall_atol && !converged_ok
+                    errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
+                                spread=spread, n_stall=n_stall, stall_atol=stall_atol)
+                    save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                     error("Gradient norm frozen (spread=$spread) over last $n_stall iterations at " *
                         "tau=$tau, iter=$numiter, gnorm=$gnorm, but NOT converged " *
                         "(gradtol=$(gradtol*sqrt(nU))). Likely an exact spectral degeneracy at the " *
                         "truncation cut made the SVD-adjoint gradient singular. The optimizer is stuck.")
-                    errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
-                                spread=spread, n_stall=n_stall, stall_atol=stall_atol)
-                    save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                 end
             end
         end
@@ -468,9 +479,10 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
             vc = copy(normgradvec)
             ckpt_normgradhistory = permutedims(reshape(vc, 2, n))
             cum_nghist = vcat(total_nghist, ckpt_normgradhistory)
+            cum_time   = total_time_prior + (Base.time() - t_start)
 
             ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,  # current arrU and gradient at arrU
-                    cost=f, overlap_cost=overlap_cost, err=err, # current function values
+                    cost=f, overlap_cost=overlap_cost, err=err, time=cum_time, # current function values
                     converged=false, finished=false)                                 # mid-run ⇒ not converged
             save_object(pathname*"N$(N)_T$(tau).jld2", ckpt)
 
@@ -484,13 +496,14 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
 
     @show tau
 
-    time = @elapsed arrUmin, fmin, gradmin, numfg, normgradhistory =
+    elapsed = @elapsed arrUmin, fmin, gradmin, numfg, normgradhistory =
         optimize(fg, arrUmin, algorithm;
                 retract = retract, transport! = transport!,
                 isometrictransport = true, inner = inner,
                 finalize! = checkpoint_finalize!)
 
     cum_nghist = vcat(total_nghist, normgradhistory)
+    cum_time = total_time_prior + elapsed
 
 
     # --- final diagnostics (overlap term reported separately from penalty) ---
@@ -506,7 +519,7 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
     result_tau = (N=N, tau=tau, arrU=arrUmin, gradmin=gradmin, # current arrU and gradient at arrU
                   gradnorm=final_gnorm, numfg=numfg, normgradhistory=cum_nghist,      # OptimKit's other returns
                   cost=fmin, overlap_cost=overlap_cost, err=err,            # current function values
-                  converged=converged, finished=finished, time=time)   # mid-run ⇒ not converged
+                  converged=converged, finished=finished, time=cum_time)   # mid-run ⇒ not converged
     save_object(pathname*"N$(N)_T$(tau).jld2", result_tau)
 
     new_instr = copy(instr)
@@ -578,6 +591,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
     fmin = NaN
     gradmin = nothing
     total_nghist::Matrix{Float64} = savefile.normgradhistory
+    total_time_prior::Float64 = get(savefile, :time, 0.0)
 
     @show tau
 
@@ -668,12 +682,13 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
     n_stall = 100
     stall_atol = 1e-14
     normgradvec = Float64[]
+    t_start = Base.time()
     function checkpoint_finalize!(x, f, g, numiter)
         gnorm = sqrt(inner(x, g, g))
         push!(normgradvec, f)
         push!(normgradvec, gnorm)
 
-        if numiter % 100 == 0
+        if numiter % n_stall == 0
             # --- breakage detection: has the gradient norm been frozen for n_stall iters? ---
             # normgradvec stores [f, gnorm] pairs, so gnorm entries are at even indices.
             niters_recorded = length(normgradvec) ÷ 2
@@ -683,13 +698,13 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
                 # Only a problem if frozen AND not legitimately converged
                 converged_ok = gnorm <= gradtol*sqrt(nU)
                 if spread <= stall_atol && !converged_ok
+                    errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
+                                spread=spread, n_stall=n_stall, stall_atol=stall_atol)
+                    save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                     error("Gradient norm frozen (spread=$spread) over last $n_stall iterations at " *
                         "tau=$tau, iter=$numiter, gnorm=$gnorm, but NOT converged " *
                         "(gradtol=$(gradtol*sqrt(nU))). Likely an exact spectral degeneracy at the " *
                         "truncation cut made the SVD-adjoint gradient singular. The optimizer is stuck.")
-                    errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
-                                spread=spread, n_stall=n_stall, stall_atol=stall_atol)
-                    save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                 end
             end
         end
@@ -706,9 +721,10 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
             vc = copy(normgradvec)
             ckpt_normgradhistory = permutedims(reshape(vc, 2, n))
             cum_nghist = vcat(total_nghist, ckpt_normgradhistory)
+            cum_time   = total_time_prior + (Base.time() - t_start)
 
             ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,  # current arrU and gradient at arrU
-                    aug_cost=f, overlap_cost=overlap_cost, penalty_cost=Σε, err=err, # current function values
+                    aug_cost=f, overlap_cost=overlap_cost, penalty_cost=Σε, err=err, time=cum_time, # current function values
                     converged=false, finished=false)                                 # mid-run ⇒ not converged
             save_object(pathname*"N$(N)_T$(tau).jld2", ckpt)
 
@@ -723,13 +739,14 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
         return x, f, g
     end
 
-    time = @elapsed arrUmin, fmin, gradmin, numfg, normgradhistory =
+    elapsed = @elapsed arrUmin, fmin, gradmin, numfg, normgradhistory =
         optimize(fg, arrUmin, algorithm;
                 retract = retract, transport! = transport!,
                 isometrictransport = true, inner = inner,
                 finalize! = checkpoint_finalize!)
 
     cum_nghist = vcat(total_nghist, normgradhistory)
+    cum_time = total_time_prior + elapsed
 
 
     # --- final diagnostics (overlap term reported separately from penalty) ---
@@ -747,7 +764,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
                   gradnorm=final_gnorm, numfg=numfg, normgradhistory=cum_nghist,      # OptimKit's other returns
                   aug_cost=fmin, overlap_cost=overlap_cost, penalty_cost=Σε_final, err=err,            # current function values
                   λ=λ, ρ=ρ, Σε_max=Σε_max,       # outer loop parameters
-                  converged=converged, finished=finished, time=time)   # mid-run ⇒ not converged
+                  converged=converged, finished=finished, time=cum_time)   # mid-run ⇒ not converged
     save_object(pathname*"N$(N)_T$(tau).jld2", result_tau)
 
     new_instr = copy(instr)
@@ -778,7 +795,7 @@ function prepare_start(psi::MPS, pathname::String; kwargs...)
     
 
     savefile = (N=N, tau=1, arrU=U_start, gradnorm=Inf, numfg=0, 
-                normgradhistory=Matrix{Float64}(undef, 0, 2), 
+                normgradhistory=Matrix{Float64}(undef, 0, 2), time=0.0,
                 converged=false, finished=false)
     save_object(pathname*"N$(N)_T1.jld2", savefile)
 end
@@ -801,7 +818,7 @@ function continue_inversion(psi::MPS, maxtau::Int, pathname::String, invertFunct
                 "Adding a layer, continuing at depth $(newtau)."
             warmU = add_layer(result.arrU, N, last_tau)
             savefile = (N=N, tau=newtau, arrU=warmU, gradnorm=Inf, numfg=0,
-                        normgradhistory=Matrix{Float64}(undef, 0, 2),
+                        normgradhistory=Matrix{Float64}(undef, 0, 2), time=0.0,
                         converged=false, finished=false)
             save_object(pathname*"N$(N)_T$(newtau).jld2", savefile)
             invertFunction(psi, newtau, pathname; resuming = false)
