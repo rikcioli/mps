@@ -65,7 +65,7 @@ function H_spin(sites, Jx::Real, Jy::Real, Jz::Real, hx::Real, hy::Real, hz::Rea
     os = OpSum()
     N = length(sites)
     for j=1:N-1
-        os += Jx,"Sx",j,"Sz",j+1
+        os += Jx,"Sx",j,"Sx",j+1
         os += Jy,"Sy",j,"Sy",j+1
         os += Jz,"Sz",j,"Sz",j+1
         os += hx,"Sx",j

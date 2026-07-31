@@ -79,8 +79,23 @@ end
 
 ### CUSTOM MPS METHODS ###
 
+# "Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
+# function applyAD(U::Matrix{T}, psi::MPS, b::Integer; kargs...) where {T}
+#     psi_og = orthogonalize(psi, b)
+#     s = siteinds(psi)
+#     operator = op(U, s[b+1], s[b])
+# 
+#     wf = noprime((psi_og[b]*psi_og[b+1])*operator)
+#     indsb = uniqueinds(psi_og[b], psi_og[b+1])
+#     U, S, V = svd(wf, indsb; kargs...)
+#     psi_og[b] = U
+#     psi_og[b+1] = S*V
+#     return psi_og
+# end
+
+
 "Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
-function apply(U::Matrix, psi::MPS, b::Integer; cutoff = 1E-14)
+function apply(U::Matrix{T}, psi::MPS, b::Integer; cutoff = nothing) where {T}
     psi = deepcopy(psi)
     orthogonalize!(psi, b)
     s = siteinds(psi)
@@ -88,14 +103,14 @@ function apply(U::Matrix, psi::MPS, b::Integer; cutoff = 1E-14)
 
     wf = noprime((psi[b]*psi[b+1])*operator)
     indsb = uniqueinds(psi[b], psi[b+1])
-    U, S, V = svd(wf, indsb, cutoff = cutoff)
+    U, S, V = svd(wf, indsb; cutoff = cutoff)
     psi[b] = U
     psi[b+1] = S*V
     return psi
 end
 
 "Apply 2-qubit matrix U to sites b and b+1 of MPS psi"
-function apply!(U::Matrix, psi::MPS, b::Integer; cutoff = 1E-15)
+function apply!(U::Matrix{T}, psi::MPS, b::Integer; cutoff = nothing) where {T}
     orthogonalize!(psi, b)
     s = siteinds(psi)
     operator = op(U, s[b+1], s[b])
@@ -147,11 +162,11 @@ function entropy(psi::Union{MPS, MPO})
     return [entropy(psi, b) for b in 1:length(psi)-1]
 end
 
-"Truncate mps at position b until bond dimension of link (b, b+1) becomes 1"
-function cut!(psi::MPS, b::Integer; cutoff=1e-16)
+"Truncate and renormalize mps at position b to bond dimension 1"
+function cut!(psi::MPS, b::Integer; kargs...)
     orthogonalize!(psi, b)
     indsb = uniqueinds(psi[b], psi[b+1])
-    U, S, V = svd(psi[b]*psi[b+1], indsb, cutoff = cutoff)
+    U, S, V = svd(psi[b]*psi[b+1], indsb; kargs...)
 
     u, v = inds(S)
     w = Index(1)
@@ -159,6 +174,12 @@ function cut!(psi::MPS, b::Integer; cutoff=1e-16)
     projV = ITensor([1; [0 for _ in 1:v.space-1]], (w,v))
     psi[b] = U*projU
     psi[b+1] = projV*V
+end
+
+function cut!(psi::MPS; kargs...)
+    for b in 1:length(psi)-1
+        cut!(psi, b; kargs...)
+    end
 end
 
 function cut(psi::MPS, pos_list::Vector{<:Integer}; cutoff=1e-18)
@@ -294,7 +315,7 @@ function H_spin(sites, Jx::Real, Jy::Real, Jz::Real, hx::Real, hy::Real, hz::Rea
     os = OpSum()
     N = length(sites)
     for j=1:N-1
-        os += Jx,"Sx",j,"Sz",j+1
+        os += Jx,"Sx",j,"Sx",j+1
         os += Jy,"Sy",j,"Sy",j+1
         os += Jz,"Sz",j,"Sz",j+1
         os += hx,"Sx",j
