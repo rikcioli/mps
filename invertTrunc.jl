@@ -94,13 +94,6 @@ function initialize_gs(H::MPO, sites; nsweeps = 5, maxdim = [10,20,100,100,200],
     return energy, psi
 end
 
-function XXZ(N::Int)
-    sites = siteinds("S=1/2", N)
-    Hamiltonian = H_heisenberg(sites, -1., -1., -0.5, -0.1, -0.1)
-    energy, psi0 = initialize_gs(Hamiltonian, sites; nsweeps = 10, cutoff = 1e-12, maxdim = [10,50,100,100,100,100,100,100,100,100])
-    return energy, psi0
-end
-
 function XY(N::Int)
     sites = siteinds("S=1/2", N)
     Hamiltonian = H_XY(sites, 0.0, 0.5)
@@ -108,7 +101,41 @@ function XY(N::Int)
     return energy, psi0
 end
 
+function ising(N::Int)
+    sites = siteinds("S=1/2", N; conserve_szparity=true)
+    H = H_spin(sites, -1., 0., 0., 0., 0., -1.5)
+    psi0 = MPS(sites,"Up")
 
+    E0, psi = dmrg(H, psi0; nsweeps=20, maxdim=[20,60,100,200,200],
+               cutoff=1e-12, noise=[1e-6,1e-8,1e-10,0.0])
+    return E0, psi
+end
+
+function H_xxz(sites; Jxy=1.0, Jz=2.5, hs=0.0, hz=0.0)
+    N = length(sites)
+    os = OpSum()
+    for j in 1:N-1
+        os += Jxy/2, "S+", j, "S-", j+1
+        os += Jxy/2, "S-", j, "S+", j+1     # same coefficient => Hermitian
+        os += Jz,    "Sz", j, "Sz", j+1
+    end
+    for j in 1:N
+        os += -hs*(-1)^j, "Sz", j           # STAGGERED — this is what was missing
+        os += hz,         "Sz", j
+    end
+    return MPO(os, sites)
+end
+
+
+function XXZ(N::Int)
+    sites = siteinds("S=1/2", N; conserve_qns=true)
+    H = H_xxz(sites; Jxy=1.0, Jz=2.5, hs=0.05)
+    psi0 = MPS(sites, [isodd(n) ? "Up" : "Dn" for n=1:N])
+
+    E0, psi = dmrg(H, psi0; nsweeps=20, maxdim=[20,60,100,200,200],
+               cutoff=1e-12, noise=[1e-6,1e-8,1e-10,0.0])
+    return E0, psi
+end
 
 
 
@@ -868,71 +895,10 @@ function things_to_put_somewhere()
 end
 
 
-if false
-    let
-        pathname = "testdata\\rand\\mps1\\"
-        N = 20
-
-        f = h5open(pathname*"$(N)_mps.h5","r")
-        psi = read(f,"psi",MPS)
-        close(f)
-
-        prepare_start(psi, pathname*"trunc2AL_test\\"; maxrank=2, maxiter=20000)
-
-        while true
-            status = continue_inversion(psi, 20, pathname*"trunc2AL_test\\", invert3)
-            status == :done && break
-        end
-    end
-end
-
-if false
-    let
-        pathname = "testdata\\rand\\mps1\\"
-        N = 20
-
-        f = h5open(pathname*"$(N)_mps.h5","r")
-        psi = read(f,"psi",MPS)
-        close(f)
-
-        #prepare_start(psi, pathname*"var2_test\\"; maxrank=2, maxiter=20000)
-
-        while true
-            status = continue_inversion(psi, 20, pathname*"var2_test\\", invert_maxrank_variational)
-            status == :done && break
-        end
-    end
-end
 
 
 
-if false
-    let
-        Nlist = [20]
-        for N in Nlist
-            runinversion2(N, 12; pathname = "testdata\\rand\\")
-        end
-    end
-end
 
-
-if false
-    let
-        pathname = "testdata/XY/"
-        Nlist = [40]
-        psis = MPS[]
-        for N in Nlist
-            f = h5open(pathname*"$(N)_mps.h5","r")
-            psi = read(f,"psi",MPS)
-            close(f)
-            push!(psis, psi)
-        end
-
-        for psi in psis
-            runinversion2(psi, 30; maxerror=1e-6, pathname = pathname)
-        end
-    end
-end
 
 
 if false
@@ -953,17 +919,7 @@ if false
     end
 end
 
-if false
-    let
-        N=60
-        pathname = "testdata\\rand\\mps1\\"
-        f = h5open(pathname*"$(N)_mps.h5","r")
-        psi = read(f,"psi",MPS)
-        close(f)
 
-        continue_inversion(psi, 3; maxrank=8, pathname = pathname*"test\\")
-    end
-end
 
 
 if true
@@ -972,9 +928,40 @@ if true
         Nlist = [60,100,140,180,220,260,300]
         psis = MPS[]
         for N in Nlist
-            f = h5open(pathname*"$(N)_mps.h5","r")
-            psi = read(f,"psi",MPS)
+            E, psi = XXZ(N)
+            f = h5open(pathname*"$(N)_mps.h5","w")
+            write(f, "psi", psi)
             close(f)
+            # f = h5open(pathname*"$(N)_mps.h5","r")
+            # psi = read(f,"psi",MPS)
+            # close(f)
+            push!(psis, psi)
+        end
+
+        Threads.@threads for psi in psis
+            prepare_start(psi, pathname*"trunc/"; maxiter=20000)
+
+            while true
+                status = continue_inversion(psi, 30, pathname*"trunc/", invert_maxrank)
+                status == :done && break
+            end
+        end
+    end
+end
+
+if false
+    let
+        pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/ising/g1.5/"
+        Nlist = [60,100,140,180,220,260,300]
+        psis = MPS[]
+        for N in Nlist
+            E, psi = ising(N)
+            f = h5open(pathname*"$(N)_mps.h5","w")
+            write(f, "psi", psi)
+            close(f)
+            # f = h5open(pathname*"$(N)_mps.h5","r")
+            # psi = read(f,"psi",MPS)
+            # close(f)
             push!(psis, psi)
         end
 
@@ -990,34 +977,3 @@ if true
 end
 
 
-if false
-    let
-        pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/randMPS/mps1/"
-        Nlist = 20:20:100
-        psis = MPS[]
-        for N in Nlist
-            f = h5open(pathname*"$(N)_mps.h5","r")
-            psi = read(f,"psi",MPS)
-            close(f)
-            push!(psis, psi)
-        end
-
-        Threads.@threads for psi in psis
-            continue_inversion(psi, 30; maxrank=8, pathname = pathname*"trunc8/")
-        end
-    end
-end
-
-
-if false
-    let
-        pathname = "testdata\\rand\\mps1\\"
-        N = 20
-        f = h5open(pathname*"$(N)_mps.h5","r")
-        psi = read(f,"psi",MPS)
-        close(f)
-
-        run3(psi, 30; maxrank=2, pathname = pathname*"trunc2AL\\")
-        #continue_inversion(psi, 30; maxrank=2, pathname = pathname*"trunc2AL\\")
-    end
-end
