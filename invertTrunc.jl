@@ -184,7 +184,7 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
     maxiter = instr.maxiter
     gradtol = instr.gradtol
         
-    algorithm = LBFGS(m; maxiter = maxiter, gradtol = gradtol*sqrt(nU), verbosity = 2)
+    algorithm = LBFGS(m; maxiter = maxiter, gradtol = gradtol, verbosity = 2)
     fg = arrU -> begin
         func, grad = withgradient(cost_function, arrU)
         grad = project(arrU, grad[1])
@@ -242,7 +242,7 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
     overlap_cost  = (-log(abs(sproduct(ψ, ϕf))), -sum(lognorm_f))
     err = 1 - exp(-sum(overlap_cost))
     final_gnorm = isempty(normgradhistory) ? sqrt(inner(arrUmin, gradmin, gradmin)) : normgradhistory[end, 2]
-    converged = final_gnorm <= gradtol*sqrt(nU)      # did the final LBFGS actually converge?
+    converged = final_gnorm <= gradtol      # did the final LBFGS actually converge?
     finished = true
     @show err, converged, finished
 
@@ -311,7 +311,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
     maxiter = instr.maxiter
     gradtol = instr.gradtol
         
-    algorithm = LBFGS(m; maxiter = maxiter, gradtol = gradtol*sqrt(nU), verbosity = 2)
+    algorithm = LBFGS(m; maxiter = maxiter, gradtol = gradtol, verbosity = 2)
     fg = arrU -> begin
         func, grad = withgradient(cost_function, arrU)
         grad = project(arrU, grad[1])
@@ -335,14 +335,14 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
                 recent_gnorms = @view normgradvec[end - 2*n_stall + 2 : 2 : end]   # last n_stall gnorms
                 spread = maximum(recent_gnorms) - minimum(recent_gnorms)
                 # Only a problem if frozen AND not legitimately converged
-                converged_ok = gnorm <= gradtol*sqrt(nU)
+                converged_ok = gnorm <= gradtol
                 if spread <= stall_atol && !converged_ok
                     errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
                                 spread=spread, n_stall=n_stall, stall_atol=stall_atol)
                     save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                     error("Gradient norm frozen (spread=$spread) over last $n_stall iterations at " *
                         "tau=$tau, iter=$numiter, gnorm=$gnorm, but NOT converged " *
-                        "(gradtol=$(gradtol*sqrt(nU))). Likely an exact spectral degeneracy at the " *
+                        "(gradtol=$(gradtol)). Likely an exact spectral degeneracy at the " *
                         "truncation cut made the SVD-adjoint gradient singular. The optimizer is stuck.")
                 end
             end
@@ -391,7 +391,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
     overlap_cost  = (-log(abs(sproduct(ψ, ϕf))), -sum(lognorm_f))
     err = 1 - exp(-sum(overlap_cost))
     final_gnorm = isempty(normgradhistory) ? sqrt(inner(arrUmin, gradmin, gradmin)) : normgradhistory[end, 2]
-    converged = final_gnorm <= gradtol*sqrt(nU)      # did the final LBFGS actually converge?
+    converged = final_gnorm <= gradtol      # did the final LBFGS actually converge?
     finished = true
     @show err, converged, finished
 
@@ -458,7 +458,7 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
     maxiter = instr.maxiter
     gradtol = instr.gradtol
         
-    algorithm = LBFGS(m; maxiter = maxiter, gradtol = gradtol*sqrt(nU), verbosity = 2)
+    algorithm = LBFGS(m; maxiter = maxiter, gradtol = gradtol, verbosity = 2)
     fg = arrU -> begin
         func, grad = withgradient(cost_function, arrU)
         grad = project(arrU, grad[1])
@@ -482,14 +482,14 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
                 recent_gnorms = @view normgradvec[end - 2*n_stall + 2 : 2 : end]   # last n_stall gnorms
                 spread = maximum(recent_gnorms) - minimum(recent_gnorms)
                 # Only a problem if frozen AND not legitimately converged
-                converged_ok = gnorm <= gradtol*sqrt(nU)
+                converged_ok = gnorm <= gradtol
                 if spread <= stall_atol && !converged_ok
                     errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
                                 spread=spread, n_stall=n_stall, stall_atol=stall_atol)
                     save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                     error("Gradient norm frozen (spread=$spread) over last $n_stall iterations at " *
                         "tau=$tau, iter=$numiter, gnorm=$gnorm, but NOT converged " *
-                        "(gradtol=$(gradtol*sqrt(nU))). Likely an exact spectral degeneracy at the " *
+                        "(gradtol=$(gradtol)). Likely an exact spectral degeneracy at the " *
                         "truncation cut made the SVD-adjoint gradient singular. The optimizer is stuck.")
                 end
             end
@@ -538,7 +538,7 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
     overlap_cost  = (-log(abs(sproduct(ψ, ϕf))), -sum(lognorm_f))
     err = 1 - exp(-sum(overlap_cost))
     final_gnorm = isempty(normgradhistory) ? sqrt(inner(arrUmin, gradmin, gradmin)) : normgradhistory[end, 2]
-    converged = final_gnorm <= gradtol*sqrt(nU)      # did the final LBFGS actually converge?
+    converged = final_gnorm <= gradtol      # did the final LBFGS actually converge?
     finished = true
     @show err, converged, finished
 
@@ -627,7 +627,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
         m = instr.m
         inner_maxiter = instr.inner_maxiter
         inner_gradtol = instr.inner_gradtol
-        algorithm = LBFGS(m; maxiter = inner_maxiter, gradtol = inner_gradtol*sqrt(nU), verbosity = 1)
+        algorithm = LBFGS(m; maxiter = inner_maxiter, gradtol = inner_gradtol, verbosity = 1)
 
         iter_no = 0
         Σε = 0.
@@ -698,7 +698,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
     maxiter = instr.maxiter
     gradtol = instr.gradtol
         
-    algorithm = LBFGS(m; maxiter = maxiter, gradtol = gradtol*sqrt(nU), verbosity = 2)
+    algorithm = LBFGS(m; maxiter = maxiter, gradtol = gradtol, verbosity = 2)
     cost_function = arrU -> aug_lagrangian(arrU, λ, ρ)
     fg = arrU -> begin
         func, grad = withgradient(cost_function, arrU)
@@ -723,14 +723,14 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
                 recent_gnorms = @view normgradvec[end - 2*n_stall + 2 : 2 : end]   # last n_stall gnorms
                 spread = maximum(recent_gnorms) - minimum(recent_gnorms)
                 # Only a problem if frozen AND not legitimately converged
-                converged_ok = gnorm <= gradtol*sqrt(nU)
+                converged_ok = gnorm <= gradtol
                 if spread <= stall_atol && !converged_ok
                     errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
                                 spread=spread, n_stall=n_stall, stall_atol=stall_atol)
                     save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                     error("Gradient norm frozen (spread=$spread) over last $n_stall iterations at " *
                         "tau=$tau, iter=$numiter, gnorm=$gnorm, but NOT converged " *
-                        "(gradtol=$(gradtol*sqrt(nU))). Likely an exact spectral degeneracy at the " *
+                        "(gradtol=$(gradtol)). Likely an exact spectral degeneracy at the " *
                         "truncation cut made the SVD-adjoint gradient singular. The optimizer is stuck.")
                 end
             end
@@ -782,7 +782,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
     err = 1 - exp(-sum(overlap_cost))
     Σε_final = total_discarded(lognorm_f)
     final_gnorm = isempty(normgradhistory) ? sqrt(inner(arrUmin, gradmin, gradmin)) : normgradhistory[end, 2]
-    converged = final_gnorm <= gradtol*sqrt(nU)      # did the final LBFGS actually converge?
+    converged = final_gnorm <= gradtol      # did the final LBFGS actually converge?
     finished = true
     @show err, Σε_final, λ, converged, finished
 
@@ -898,6 +898,32 @@ end
 
 
 
+if true
+    let
+        pathname = "testdata\\ising\\g1.5\\"
+        Nlist = [20]
+        psis = MPS[]
+        for N in Nlist
+            #E, psi = ising(N)
+            #f = h5open(pathname*"$(N)_mps.h5","w")
+            #write(f, "psi", psi)
+            #close(f)
+            f = h5open(pathname*"$(N)_mps.h5","r")
+            psi = read(f,"psi",MPS)
+            close(f)
+            push!(psis, dense(psi))
+        end
+
+        for psi in psis
+            prepare_start(psi, pathname; maxiter=20000, maxrank=20)
+
+            while true
+                status = continue_inversion(psi, 30, pathname, invert_maxrank)
+                status == :done && break
+            end
+        end
+    end
+end
 
 
 
@@ -922,7 +948,7 @@ end
 
 
 
-if true
+if false
     let
         pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/xxz/Jz2.5/"
         Nlist = [60,100,140,180,220,260,300]
