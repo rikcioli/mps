@@ -290,11 +290,11 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
 
 
     # --- overlap-only objective (no penalty) ---
-    overlap_only = (lognorm_factors, ϕ) -> -log(abs(sproduct(ψ, ϕ))) - sum(lognorm_factors)
+    overlap_only = (Snorms, ϕ) -> -log(abs(sproduct(ψ, ϕ))) - sum(log.(Snorms))
 
     cost_function = arrU -> begin
-        ϕ, lognorm_factors = apply_brickwork_normalize(arrU, zeromps; trunc=trunc)
-        return overlap_only(lognorm_factors, ϕ)
+        ϕ, Snorms = apply_brickwork(arrU, zeromps; trunc=trunc)
+        return overlap_only(Snorms, ϕ)
     end
 
     # initialize outputs so the save block is always well-defined,
@@ -350,8 +350,8 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
 
         if numiter % N_checkpoint == 0
             # compute lightweight diagnostics at this point
-            ϕ, lognorm_f = apply_brickwork_normalize(x, zeromps; trunc=trunc)
-            overlap_cost = (-log(abs(sproduct(ψ, ϕ))), -sum(lognorm_f))
+            ϕ, Snorms = apply_brickwork(x, zeromps; trunc=trunc)
+            overlap_cost = (-log(abs(sproduct(ψ, ϕ))), -sum(log.(Snorms)))
             err          = 1 - exp(-sum(overlap_cost))
             gnorm        = sqrt(inner(x, g, g))
 
@@ -387,8 +387,8 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
 
 
     # --- final diagnostics (overlap term reported separately from penalty) ---
-    ϕf, lognorm_f = apply_brickwork_normalize(arrUmin, zeromps; trunc=trunc)
-    overlap_cost  = (-log(abs(sproduct(ψ, ϕf))), -sum(lognorm_f))
+    ϕf, Snormsf = apply_brickwork(arrUmin, zeromps; trunc=trunc)
+    overlap_cost  = (-log(abs(sproduct(ψ, ϕf))), -sum(log.(Snormsf)))
     err = 1 - exp(-sum(overlap_cost))
     final_gnorm = isempty(normgradhistory) ? sqrt(inner(arrUmin, gradmin, gradmin)) : normgradhistory[end, 2]
     converged = final_gnorm <= gradtol      # did the final LBFGS actually converge?
@@ -915,7 +915,7 @@ if true
         end
 
         for psi in psis
-            prepare_start(psi, pathname; maxiter=20000, maxrank=20)
+            #prepare_start(psi, pathname; maxiter=20000, maxrank=20)
 
             while true
                 status = continue_inversion(psi, 30, pathname, invert_maxrank)
