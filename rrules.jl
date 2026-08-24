@@ -95,41 +95,41 @@ anti-hermitian part of `U' * ΔU + Vᴴ * ΔVᴴ'`, restricted to rows `i` and c
 which `abs(S[i] - S[j]) < degeneracy_atol`, is not small compared to `gauge_atol`.
 """
 function svd_trunc_pullback!(
-        ΔA::AbstractMatrix, A, USVᴴ, ΔUSVᴴ;
-        rank_atol::Real = 0,
-        degeneracy_atol::Real = default_pullback_rank_atol(USVᴴ[2]),
+        ΔA::AbstractMatrix, UsVᴴfull, p::Integer, ΔUSVᴴ;
+        degeneracy_atol::Real = default_pullback_rank_atol(Diagonal(view(UsVᴴfull[2], 1:p))),
         gauge_atol::Real = default_pullback_gauge_atol(ΔUSVᴴ[1], ΔUSVᴴ[3])
     )
-
-    # Extract the SVD components
-    U, Smat, Vᴴ = USVᴴ
-    m, n = size(U, 1), size(Vᴴ, 2)
+    Uf, sf, Vfdg = UsVᴴfull
+    m, n = size(Uf, 1), size(Vfdg, 2)
     (m, n) == size(ΔA) || throw(DimensionMismatch())
-    p = size(U, 2)
-    p == size(Vᴴ, 1) || throw(DimensionMismatch())
-    S = diagview(Smat)
-    p == length(S) || throw(DimensionMismatch())
+    r = length(sf); q = r - p
+
+    U     = view(Uf, :, 1:p)
+    S     = view(sf, 1:p)
+    Vᴴ    = view(Vfdg, 1:p, :)
+    Udis  = view(Uf, :, (p+1):r)
+    σ     = view(sf, (p+1):r)
+    Vdisᴴ = view(Vfdg, (p+1):r, :)
 
     # Extract and check the cotangents
     ΔU, ΔSmat, ΔVᴴ = ΔUSVᴴ
-    UΔU = fill!(similar(U, (p, p)), 0)
-    VΔV = fill!(similar(Vᴴ, (p, p)), 0)
+    UΔU = fill!(similar(Uf, (p, p)), 0)
+    VΔV = fill!(similar(Vfdg, (p, p)), 0)
     if !iszerotangent(ΔU)
         (m, p) == size(ΔU) || throw(DimensionMismatch())
         mul!(UΔU, U', ΔU)
     end
+    UΔU_keep = copy(UΔU)   # needed when m > r; must be taken BEFORE the projection below
     if !iszerotangent(ΔVᴴ)
         (p, n) == size(ΔVᴴ) || throw(DimensionMismatch())
         mul!(VΔV, Vᴴ, ΔVᴴ')
-        # ΔVᴴ -= VΔVp' * Vᴴr but one less allocation without overwriting ΔVᴴ
         ΔVᴴ = mul!(copy(ΔVᴴ), VΔV', Vᴴ, -1, 1)
     end
 
-    # Project onto antihermitian part; hermitian part outside of Grassmann tangent space
     aUΔU = project_antihermitian!(UΔU)
     aVΔV = project_antihermitian!(VΔV)
 
-    # check whether cotangents arise from gauge-invariance objective function
+    # gauge check within the kept block
     mask = abs.(S' .- S) .< degeneracy_atol
     Δgauge = norm(view(aUΔU, mask) + view(aVΔV, mask), Inf)
     Δgauge ≤ gauge_atol ||
@@ -142,51 +142,61 @@ function svd_trunc_pullback!(
         p == length(ΔS) || throw(DimensionMismatch())
         diagview(UdΔAV) .+= real.(ΔS)
     end
-    ΔA = mul!(ΔA, U, UdΔAV * Vᴴ, 1, 1) # add the contribution to ΔA
+    ΔA = mul!(ΔA, U, UdΔAV * Vᴴ, 1, 1)
 
-    # add contribution from orthogonal complement
-    Ũ = qr_null(U)
-    Ṽᴴ = lq_null(Vᴴ)
-    m̃ = m - p
-    ñ = n - p
-    Ã = Ũ' * A * Ṽᴴ'
-    ÃÃ = similar(A, (m̃ + ñ, m̃ + ñ))
-    fill!(ÃÃ, 0)
-    view(ÃÃ, (1:m̃), m̃ .+ (1:ñ)) .= Ã
-    view(ÃÃ, m̃ .+ (1:ñ), 1:m̃) .= Ã'
-
-    rhs = similar(Ũ, (m̃ + ñ, p))
-    if !iszerotangent(ΔU)
-        mul!(view(rhs, 1:m̃, :), Ũ', ΔU)
-    else
-        fill!(view(rhs, 1:m̃, :), 0)
+    # kept–discarded block (analytic; replaces qr_null/lq_null/Ã/linsolve)
+    rX = fill!(similar(Uf, (q, p)), 0)
+    rY = fill!(similar(Uf, (q, p)), 0)
+    if q > 0
+        iszerotangent(ΔU)  || mul!(rX, Udis', ΔU)
+        iszerotangent(ΔVᴴ) || mul!(rY, Vdisᴴ, ΔVᴴ')
+        Gm = inv_safe.(S' .- σ, degeneracy_atol)   # guarded: the singular factor
+        Gp = inv_safe.(S' .+ σ, degeneracy_atol)
+        Pc = (rX .+ rY) .* Gm
+        Mc = (rX .- rY) .* Gp
+        ΔA = mul!(ΔA, Udis, ((Pc .+ Mc) ./ 2) * Vᴴ, 1, 1)
+        ΔA = mul!(ΔA, U, ((Pc .- Mc) ./ 2)' * Vdisᴴ, 1, 1)
+        S[p] - σ[1] > degeneracy_atol ||
+            @warn "truncation cut inside a degenerate cluster: gap = $(S[p] - σ[1])"
     end
-    if !iszerotangent(ΔVᴴ)
-        mul!(view(rhs, m̃ .+ (1:ñ), :), Ṽᴴ, ΔVᴴ')
-    else
-        fill!(view(rhs, m̃ .+ (1:ñ), :), 0)
-    end
-    #XY = sylvester(ÃÃ, -Smat, rhs)     # INSTEAD WE USE KrilovKit LINSOLVE
-    # replace XY = sylvester(ÃÃ, -Smat, rhs) with linsolve
-    Smat⁻¹ = diagm(inv_safe.(S, degeneracy_atol))
-    f(xy) = ÃÃ * xy * Smat⁻¹ - xy
-    XY₀ = zeros(KrylovKit.scalartype(ÃÃ), size(ÃÃ, 2), size(Smat⁻¹, 1))
-    XY, info = linsolve(f, -rhs * Smat⁻¹, XY₀; maxiter=100)
 
-    X = view(XY, 1:m̃, :)
-    Y = view(XY, m̃ .+ (1:ñ), :)
-    ΔA = mul!(ΔA, Ũ, X * Vᴴ, 1, 1)
-    ΔA = mul!(ΔA, U, Y' * Ṽᴴ, 1, 1)
+    # directions outside the compact SVD (σ̃ = 0), only when M is rectangular
+    s⁻¹ = inv_safe.(S, degeneracy_atol)
+    if m > r && !iszerotangent(ΔU)
+        ΔU⊥ = ΔU - U * UΔU_keep
+        q > 0 && (ΔU⊥ .-= Udis * rX)
+        ΔA = mul!(ΔA, ΔU⊥ .* s⁻¹', Vᴴ, 1, 1)
+    end
+    if n > r && !iszerotangent(ΔVᴴ)
+        ΔVᴴ⊥ = q > 0 ? ΔVᴴ - rY' * Vdisᴴ : copy(ΔVᴴ)
+        ΔA = mul!(ΔA, U, s⁻¹ .* ΔVᴴ⊥, 1, 1)
+    end
     return ΔA
 end
 
+
+using MatrixAlgebraKit: TruncationStrategy, NoTruncation, notrunc, findtruncated
+
+_as_strategy(t::TruncationStrategy) = t
+_as_strategy(::Nothing) = notrunc()
+_as_strategy(t::NamedTuple) = isempty(t) ? notrunc() : TruncationStrategy(; t...)
+
+"Number of leading values kept by `strategy`, normalizing whatever `findtruncated` returns."
+function _keptrank(sf::AbstractVector, strategy)
+    ind = findtruncated(sf, strategy)
+    ind isa Colon && return length(sf)          # NoTruncation keeps everything
+    idx = ind isa AbstractVector{Bool} ? findall(ind) : sort!(collect(Int, ind))
+    isempty(idx) && return 0
+    idx == 1:length(idx) ||
+        error("this pullback requires the kept values to be the leading 1:p, got $idx")
+    return length(idx)
+end
 
 
 
 ### HELPER TAPE STRUCT FOR SVDCONTRACT, THE SUBROUTINE WHICH IS PRESENT
 ### IN ALL THE FUNCTIONS THAT REQUIRE TRUNCATION
 struct SVDcontractTape
-    # ITensor data
     move_ogc::Symbol
     normalize::Bool
     tensors::Vector{ITensor}
@@ -194,11 +204,12 @@ struct SVDcontractTape
     cL::ITensor
     cR::ITensor
     bondind::Index
-    # SVD data
-    M::Matrix{ComplexF64}
-    U::Matrix{ComplexF64}
-    S::Diagonal{Float64, Vector{Float64}}
-    Vdg::Matrix{ComplexF64}
+    # SVD data — full compact factors, kept rank p
+    msize::Tuple{Int,Int}
+    Uf::Matrix{ComplexF64}      # m × r,  r = min(m,n)
+    sf::Vector{Float64}         # length r
+    Vfdg::Matrix{ComplexF64}    # r × n
+    p::Int                      # kept rank
     Snorm::Float64
 end
    
@@ -206,7 +217,7 @@ end
 "Contracts all the tensors in a Vector{ITensor} in order
 and computes a truncated SVD of the result with the left indices specified by linds.
 Also returns truncation error."
-function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_ogc=:right, normalize=false, kwargs...)
+function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_ogc=:right, normalize=false, trunc=NamedTuple())
     n = length(tensors)
     tensors = copy(tensors)
     prods = Array{ITensor, 1}(undef, n)
@@ -229,7 +240,14 @@ function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_og
     #        @show diag(S)
     #    end 
     #end
-    U, S, Vdg, err = svd_trunc(M; kwargs...)
+
+    # Actual SVD
+    Uf, Sf, Vfdg = svd_compact(M)
+    sf = diagview(Sf)
+    p = _keptrank(sf, _as_strategy(trunc))
+    U = Uf[:, 1:p];   S = Diagonal(sf[1:p]);   Vdg = Vfdg[1:p, :]
+    err = norm(view(sf, (p+1):length(sf)))
+
     Snorm = norm(S)
     if normalize
         S /= Snorm
@@ -246,7 +264,7 @@ function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_og
     MR_ten *= dag(cR)
 
     out = ((ML_ten, MR_ten), Snorm, err)
-    tape = SVDcontractTape(move_ogc, normalize, tensors, prods, cL, cR, bondind, M, U, S, Vdg, Snorm)
+    tape = SVDcontractTape(move_ogc, normalize, tensors, prods, cL, cR, bondind, size(M), Uf, sf, Vfdg, p, Snorm)
 
     return out, tape
 end
@@ -254,7 +272,10 @@ end
 
 function SVDcontract_pullback(ΔMf, ΔSnorm, tape::SVDcontractTape)
     ΔML_ten, ΔMR_ten = ΔMf
-    (; move_ogc, normalize, tensors, prods, cL, cR, bondind, M, U, S, Vdg, Snorm) = tape
+    (; move_ogc, normalize, tensors, prods, cL, cR, bondind, msize, Uf, sf, Vfdg, p, Snorm) = tape
+    U = view(Uf, :, 1:p); Vdg = view(Vfdg, 1:p, :)
+    S  = Diagonal(sf[1:p])                    # unnormalized, as computed by svd_compact
+    Sn = normalize ? S / Snorm : S            # what the forward pass actually returned
 
     ΔML_ten *= cL
     ΔMR_ten *= cR
@@ -265,27 +286,26 @@ function SVDcontract_pullback(ΔMf, ΔSnorm, tape::SVDcontractTape)
 
     local ΔU, ΔS, ΔVdg
     if move_ogc==:right
-        ΔU = ΔML 
+        ΔU = ΔML
         ΔS = Diagonal(diag(ΔMR*Vdg'))
-        ΔVdg = S'*ΔMR
+        ΔVdg = Sn'*ΔMR
     else
-        ΔU = ΔML*S'
+        ΔU = ΔML*Sn'
         ΔS = Diagonal(diag(U'*ΔML))
         ΔVdg = ΔMR
     end
 
     if normalize
-        ΔS = ΔS/Snorm - S*dot(S, ΔS)/Snorm
-        S *= Snorm
+        ΔS = ΔS/Snorm - Sn*dot(Sn, ΔS)/Snorm
     end
 
-    # NEW: contribution from returning Snorm = norm(S₀).
+    # contribution from returning Snorm = norm(S₀).
     if !isnothing(ΔSnorm) && !iszero(ΔSnorm)
         ΔS += ΔSnorm * Diagonal(diag(S)) / Snorm
     end
 
-    ΔM = zero(M)
-    svd_trunc_pullback!(ΔM, M, (U, S, Vdg), (ΔU, ΔS, ΔVdg), gauge_atol = 1e-8)
+    ΔM = fill!(similar(Uf, msize), 0)
+    svd_trunc_pullback!(ΔM, (Uf, sf, Vfdg), p, (ΔU, ΔS, ΔVdg); gauge_atol = 1e-12)
 
     ΔM_ten = ITensor(ΔM, cLind, cRind)
     ΔM_ten *= dag(cR)
