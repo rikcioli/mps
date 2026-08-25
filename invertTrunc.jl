@@ -20,7 +20,7 @@ Base.@kwdef mutable struct InversionInstructions
     atol::Float64 = 1e-8
     maxiter::Int = 1000000
     gradtol::Float64 = 1e-8
-    N_checkpoint::Int = 5000
+    n_checkpoint::Int = 5000
     skip_outer::Bool = false
     m::Int = 5                                      
     Σε_max::Float64 = 1e-2
@@ -152,7 +152,7 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
 
     trunc = (maxerror=maxerror, atol=instr.atol)
     nU = n_unitaries(N, tau)
-    N_checkpoint = instr.N_checkpoint
+    n_checkpoint = instr.n_checkpoint
 
     savefile = load_object(pathname*"N$(N)_T$(tau).jld2")
     arrU0 = savefile.arrU
@@ -199,7 +199,7 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
         push!(normgradvec, f)
         push!(normgradvec, gnorm)
 
-        if numiter % N_checkpoint == 0
+        if numiter % n_checkpoint == 0
             # compute lightweight diagnostics at this point
             ϕ, lognorm_f = apply_brickwork_normalize(x, zeromps; trunc=trunc)
             overlap_cost = (-log(abs(sproduct(ψ, ϕ))), -sum(lognorm_f))
@@ -279,7 +279,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
 
     trunc = (maxrank=maxrank, atol=instr.atol)
     nU = n_unitaries(N, tau)
-    N_checkpoint = instr.N_checkpoint
+    n_checkpoint = instr.n_checkpoint
 
     savefile = load_object(pathname*"N$(N)_T$(tau).jld2")
     arrU0 = savefile.arrU
@@ -313,7 +313,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
     end
 
     # === value-based (windowed) convergence settings =======================
-    n_check        = 500       # check the infidelity every n_check iterations
+    n_conv        = 500       # check the infidelity every n_conv iterations
     err_reltol     = 1e-3      # stop when the relative decrease over the window < this
     err_floor_atol = 1e-13     # also stop if the absolute change is below the arithmetic
                                # floor — REPLACE with your measured ε_C (Double64 test)
@@ -334,7 +334,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
         # f == sum(overlap_cost), so the infidelity is err = -expm1(-f);
         # expm1 avoids cancellation when f is exponentially small.
         # MUST run before the stall block so a value-converged run isn't flagged as stuck.
-        if numiter % n_check == 0
+        if numiter % n_conv == 0
             err_now = -expm1(-f)
             if !isnan(last_ckpt_err[])
                 Δ = last_ckpt_err[] - err_now                       # > 0 means error decreased
@@ -367,7 +367,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
             end
         end
 
-        if numiter % N_checkpoint == 0
+        if numiter % n_checkpoint == 0
             ϕ, Snorms = apply_brickwork(x, zeromps; trunc=trunc)
             overlap_cost = (-log(abs(sproduct(ψ, ϕ))), -sum(log.(Snorms)))
             err          = -expm1(-sum(overlap_cost))
@@ -447,7 +447,7 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
     orthogonalize!(zeromps, 1)
 
     nU = n_unitaries(N, tau)
-    N_checkpoint = instr.N_checkpoint
+    n_checkpoint = instr.n_checkpoint
 
     savefile = load_object(pathname*"N$(N)_T$(tau).jld2")
     arrU0 = savefile.arrU
@@ -516,7 +516,7 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
             end
         end
 
-        if numiter % N_checkpoint == 0
+        if numiter % n_checkpoint == 0
             # compute lightweight diagnostics at this point
             ϕ, lognorm_f = apply_brickwork_variational(x, zeromps, maxrank)
             overlap_cost = (-log(abs(sproduct(ψ, ϕ))), -sum(lognorm_f))
@@ -605,7 +605,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
     skip_outer = instr.skip_outer
     trunc = (maxrank=maxrank, atol=instr.atol)
     nU = n_unitaries(N, tau)
-    N_checkpoint = instr.N_checkpoint
+    n_checkpoint = instr.n_checkpoint
 
     savefile = load_object(pathname*"N$(N)_T$(tau).jld2")
     arrU0 = savefile.arrU
@@ -757,7 +757,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
             end
         end
 
-        if numiter % N_checkpoint == 0
+        if numiter % n_checkpoint == 0
             # compute lightweight diagnostics at this point
             ϕ, lognorm_f = apply_brickwork_normalize(x, zeromps; trunc=trunc)
             overlap_cost = (-log(abs(sproduct(ψ, ϕ))), -sum(lognorm_f))
