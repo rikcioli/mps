@@ -286,10 +286,8 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
     if isnothing(arrU0)
         arrU0 = random_circuit(N, tau)
     end
-    arrU0 = Vector{Matrix{ComplexF64}}(arrU0) 
+    arrU0 = Vector{Matrix{ComplexF64}}(arrU0)
 
-
-    # --- overlap-only objective (no penalty) ---
     overlap_only = (Snorms, ϕ) -> -log(abs(sproduct(ψ, ϕ))) - sum(log.(Snorms))
 
     cost_function = arrU -> begin
@@ -297,20 +295,16 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
         return overlap_only(Snorms, ϕ)
     end
 
-    # initialize outputs so the save block is always well-defined,
-    # even if outer_iters == 0 or the first optimize call fails to assign.
     arrUmin = arrU0
     fmin = NaN
     gradmin = nothing
     total_nghist::Matrix{Float64} = savefile.normgradhistory
-    total_time_prior::Float64 = get(savefile, :time, 0.0)   # cumulative seconds from earlier runs
-    # this will be reshaped before final save
-
+    total_time_prior::Float64 = get(savefile, :time, 0.0)
 
     m = instr.m
     maxiter = instr.maxiter
     gradtol = instr.gradtol
-        
+
     algorithm = LBFGS(m; maxiter = maxiter, gradtol = gradtol, verbosity = 2)
     fg = arrU -> begin
         func, grad = withgradient(cost_function, arrU)
@@ -318,41 +312,65 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
         return func, grad
     end
 
+    # === value-based (windowed) convergence settings =======================
+    n_check        = 500       # check the infidelity every n_check iterations
+    err_reltol     = 1e-3      # stop when the relative decrease over the window < this
+    err_floor_atol = 1e-13     # also stop if the absolute change is below the arithmetic
+                               # floor — REPLACE with your measured ε_C (Double64 test)
+    converged_by_value = Ref(false)
+    last_ckpt_err      = Ref(NaN)
+    # =======================================================================
+
     normgradvec = Float64[]
-    n_stall = 100          # window to check for a frozen gradient
-    stall_atol = 1e-14      # essentially bit-frozen
+    n_stall = 100
+    stall_atol = 1e-14
     t_start = Base.time()
     function checkpoint_finalize!(x, f, g, numiter)
         gnorm = sqrt(inner(x, g, g))
         push!(normgradvec, f)
         push!(normgradvec, gnorm)
 
+        # --- windowed value-based convergence check --------------------------
+        # f == sum(overlap_cost), so the infidelity is err = -expm1(-f);
+        # expm1 avoids cancellation when f is exponentially small.
+        # MUST run before the stall block so a value-converged run isn't flagged as stuck.
+        if numiter % n_check == 0
+            err_now = -expm1(-f)
+            if !isnan(last_ckpt_err[])
+                Δ = last_ckpt_err[] - err_now                       # > 0 means error decreased
+                if abs(Δ) < err_floor_atol                          # within the noise floor ⇒ converged
+                    converged_by_value[] = true
+                elseif Δ ≥ 0 && Δ / abs(err_now) < err_reltol       # decreasing, but slowly ⇒ converged
+                    converged_by_value[] = true
+                end
+                # Δ < 0 and above the floor ⇒ error rose meaningfully ⇒ keep going
+            end
+            last_ckpt_err[] = err_now
+        end
+
         if numiter % n_stall == 0
-            # --- breakage detection: has the gradient norm been frozen for n_stall iters? ---
-            # normgradvec stores [f, gnorm] pairs, so gnorm entries are at even indices.
             niters_recorded = length(normgradvec) ÷ 2
             if niters_recorded >= n_stall
-                recent_gnorms = @view normgradvec[end - 2*n_stall + 2 : 2 : end]   # last n_stall gnorms
+                recent_gnorms = @view normgradvec[end - 2*n_stall + 2 : 2 : end]
                 spread = maximum(recent_gnorms) - minimum(recent_gnorms)
-                # Only a problem if frozen AND not legitimately converged
-                converged_ok = gnorm <= gradtol
+                # A frozen gradient is the EXPECTED converged state now, so a value-
+                # converged run must not be flagged as stuck.
+                converged_ok = (gnorm <= gradtol) || converged_by_value[]
                 if spread <= stall_atol && !converged_ok
-                    errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
+                    errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f,
                                 spread=spread, n_stall=n_stall, stall_atol=stall_atol)
                     save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                     error("Gradient norm frozen (spread=$spread) over last $n_stall iterations at " *
-                        "tau=$tau, iter=$numiter, gnorm=$gnorm, but NOT converged " *
-                        "(gradtol=$(gradtol)). Likely an exact spectral degeneracy at the " *
-                        "truncation cut made the SVD-adjoint gradient singular. The optimizer is stuck.")
+                        "tau=$tau, iter=$numiter, gnorm=$gnorm, but NOT converged. Likely an exact " *
+                        "spectral degeneracy at the truncation cut made the SVD-adjoint gradient singular.")
                 end
             end
         end
 
         if numiter % N_checkpoint == 0
-            # compute lightweight diagnostics at this point
             ϕ, Snorms = apply_brickwork(x, zeromps; trunc=trunc)
             overlap_cost = (-log(abs(sproduct(ψ, ϕ))), -sum(log.(Snorms)))
-            err          = 1 - exp(-sum(overlap_cost))
+            err          = -expm1(-sum(overlap_cost))
             gnorm        = sqrt(inner(x, g, g))
 
             n = length(normgradvec) ÷ 2
@@ -361,9 +379,9 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
             cum_nghist = vcat(total_nghist, ckpt_normgradhistory)
             cum_time   = total_time_prior + (Base.time() - t_start)
 
-            ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,  # current arrU and gradient at arrU
-                    cost=f, overlap_cost=overlap_cost, err=err, time=cum_time,       # current function values, err and time
-                    converged=false, finished=false)                                 # mid-run ⇒ not converged
+            ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,
+                    cost=f, overlap_cost=overlap_cost, err=err, time=cum_time,
+                    converged=false, finished=false)
             save_object(pathname*"N$(N)_T$(tau).jld2", ckpt)
 
             ckpt_instr = copy(instr)
@@ -374,32 +392,35 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
         return x, f, g
     end
 
+    # Converged if the windowed infidelity criterion fired (gradtol kept as a
+    # harmless fallback that, in practice, essentially never triggers here).
+    hasconverged = (x, f, g, normg) -> (converged_by_value[] || normg < gradtol)
+
     @show tau
 
     elapsed = @elapsed arrUmin, fmin, gradmin, numfg, normgradhistory =
         optimize(fg, arrUmin, algorithm;
                 retract = retract, transport! = transport!,
                 isometrictransport = true, inner = inner,
-                finalize! = checkpoint_finalize!)
+                finalize! = checkpoint_finalize!,
+                hasconverged = hasconverged)
 
     cum_nghist = vcat(total_nghist, normgradhistory)
     cum_time = total_time_prior + elapsed
 
-
     # --- final diagnostics (overlap term reported separately from penalty) ---
     ϕf, Snormsf = apply_brickwork(arrUmin, zeromps; trunc=trunc)
     overlap_cost  = (-log(abs(sproduct(ψ, ϕf))), -sum(log.(Snormsf)))
-    err = 1 - exp(-sum(overlap_cost))
+    err = -expm1(-sum(overlap_cost))
     final_gnorm = isempty(normgradhistory) ? sqrt(inner(arrUmin, gradmin, gradmin)) : normgradhistory[end, 2]
-    converged = final_gnorm <= gradtol      # did the final LBFGS actually converge?
+    converged = converged_by_value[] || (final_gnorm <= gradtol)   # value criterion counts
     finished = true
     @show err, converged, finished
 
-        
-    result_tau = (N=N, tau=tau, arrU=arrUmin, gradmin=gradmin, # current arrU and gradient at arrU
-                  gradnorm=final_gnorm, numfg=numfg, normgradhistory=cum_nghist,      # OptimKit's other returns
-                  cost=fmin, overlap_cost=overlap_cost, err=err,            # current function values
-                  converged=converged, finished=finished, time=cum_time)   # mid-run ⇒ not converged
+    result_tau = (N=N, tau=tau, arrU=arrUmin, gradmin=gradmin,
+                  gradnorm=final_gnorm, numfg=numfg, normgradhistory=cum_nghist,
+                  cost=fmin, overlap_cost=overlap_cost, err=err,
+                  converged=converged, finished=finished, time=cum_time)
     save_object(pathname*"N$(N)_T$(tau).jld2", result_tau)
 
     new_instr = copy(instr)
@@ -915,7 +936,7 @@ if true
         end
 
         for psi in psis
-            #prepare_start(psi, pathname; maxiter=20000, maxrank=20)
+            prepare_start(psi, pathname; maxiter=10000000, maxrank=20)
 
             while true
                 status = continue_inversion(psi, 30, pathname, invert_maxrank)
