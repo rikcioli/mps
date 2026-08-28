@@ -156,8 +156,9 @@ function svd_trunc_pullback!(
         Mc = (rX .- rY) .* Gp
         ΔA = mul!(ΔA, Udis, ((Pc .+ Mc) ./ 2) * Vᴴ, 1, 1)
         ΔA = mul!(ΔA, U, ((Pc .- Mc) ./ 2)' * Vdisᴴ, 1, 1)
-        S[p] - σ[1] > degeneracy_atol ||
-            @warn "truncation cut inside a degenerate cluster: gap = $(S[p] - σ[1])"
+        if σ[1] > degeneracy_atol && S[p] - σ[1] ≤ degeneracy_atol
+            @warn "truncation cut inside a degenerate cluster: gap = $(S[p] - σ[1]), σ₁ = $(σ[1])"
+        end
     end
 
     # directions outside the compact SVD (σ̃ = 0), only when M is rectangular
