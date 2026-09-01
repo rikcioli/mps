@@ -1016,7 +1016,7 @@ function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post
     to_right = b>cog  # left-to-right mode
 
     # Preparing the maxranks for svd trunc
-    #trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
     
     sites = siteinds(ψ)
     links = linkinds(ψ)
@@ -1040,7 +1040,7 @@ function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post
             ((W1, W2), Snorm, err), _ = SVDcontract(tensors, linds; 
                                     move_ogc=:right,
                                     normalize=normalize,
-                                    trunc=trunc)
+                                    trunc=(trunc..., maxrank=maxranks[j]))
             push!(Ulinkinds, commonind(W1, W2))
             push!(errs, err)
 
@@ -1062,7 +1062,7 @@ function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post
             ((W1, W2), Snorm, err), _ = SVDcontract(tensors, linds; 
                                     move_ogc=:left,
                                     normalize=normalize,
-                                    trunc=trunc)
+                                    trunc=(trunc..., maxrank=maxranks[j]))
             push!(errs, err)
 
             Rten_new = W1
@@ -1092,7 +1092,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
     to_right = b>cog  # left-to-right mode
 
     # Preparing the maxranks for svd trunc
-    #trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
 
     sites = siteinds(ψ)
     links = linkinds(ψ)
@@ -1117,7 +1117,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
             ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
                                         move_ogc=:right,
                                         normalize=normalize,
-                                        trunc=trunc)
+                                        trunc=(trunc..., maxrank=maxranks[j]))
             push!(tapes, tape_j)
             push!(Ulinkinds, commonind(W1, W2))
             push!(errs, err)
@@ -1141,7 +1141,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
             ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
                                         move_ogc=:left,
                                         normalize=normalize,
-                                        trunc=trunc)
+                                        trunc=(trunc..., maxrank=maxranks[j]))
             push!(tapes, tape_j)
             push!(errs, err)
 
