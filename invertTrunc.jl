@@ -885,6 +885,90 @@ function continue_inversion(psi::MPS, maxtau::Int, pathname::String, invertFunct
     return :continue
 end
 
+
+"""
+    restart_from_depth(psi, depth_start, depth_max, pathname, invertFunction; kwargs...)
+
+Discard every saved depth ≥ `depth_start`, build a fresh instruction set for
+`depth_start` from the one used at `depth_start - 1` with `kwargs` overridden,
+and run up to `depth_max`.
+
+    restart_from_depth(psi, 7, 12, pathname, invert_maxrank; n_checkpoint=500)
+"""
+function restart_from_depth(psi::MPS, depth_start::Int, depth_max::Int,
+                            pathname::String, invertFunction::Function; kwargs...)
+    N = length(psi)
+    depth_start >= 2 || error("depth_start must be ≥ 2; use prepare_start for depth 1")
+
+    prev = load_object(pathname*"N$(N)_T$(depth_start-1).jld2")
+    get(prev, :finished, true) ||
+        error("depth $(depth_start-1) is not marked finished; finish or resume it first")
+
+    # 1. delete results, instructions, checkpoints and gradbreaks for tau ≥ depth_start
+    pattern = Regex("^N$(N)_T(\\d+)(_instructions|_checkpoint_instructions|_gradbreak)?\\.jld2\$")
+    for f in readdir(pathname)
+        m = match(pattern, f)
+        isnothing(m) && continue
+        parse(Int, m.captures[1]) >= depth_start && rm(pathname*f)
+    end
+
+    # 2. seed depth_start from the *plain* instructions of depth_start-1
+    #    (the plain file always holds the full maxiter, never a resume remainder)
+    instr = copy(load_object(pathname*"N$(N)_T$(depth_start-1)_instructions.jld2"))
+    for (k, v) in kwargs
+        hasfield(InversionInstructions, k) || error("InversionInstructions has no field :$k")
+        setproperty!(instr, k, v)   # setproperty!, not setfield!, so values get converted
+    end
+    save_object(pathname*"N$(N)_T$(depth_start)_instructions.jld2", instr)
+    @info "restarting at depth $depth_start with $((; kwargs...))"
+
+    # 3. run
+    while continue_inversion(psi, depth_max, pathname, invertFunction) != :done
+    end
+    return
+end
+
+"""
+    edit_ongoing_simulation!(pathname, N; kwargs...)
+
+Change parameters of a depth that was interrupted mid-solve. Kill the
+run first, then call this, then resume with `continue_inversion`.
+
+Picks whichever instructions file the resume will actually read: the
+checkpoint one if a checkpoint was written before the kill, the plain
+one if the run died before reaching its first checkpoint.
+
+    edit_ongoing_simulation!(pathname, 20; n_checkpoint=500)
+"""
+function edit_ongoing_simulation!(pathname::String, N::Int; kwargs...)
+    isempty(kwargs) && error("nothing to change")
+
+    pattern = Regex("^N$(N)_T(\\d+)\\.jld2\$")
+    taus = [parse(Int, m.captures[1]) for f in readdir(pathname)
+            for m in [match(pattern, f)] if !isnothing(m)]
+    isempty(taus) && error("no saved results in $pathname for N=$N")
+    tau = maximum(taus)
+
+    result = load_object(pathname*"N$(N)_T$(tau).jld2")
+    get(result, :finished, true) &&
+        error("depth $tau is finished, nothing is mid-solve — " *
+              "use restart_from_depth to redo it with different parameters")
+
+    # exactly the choice continue_inversion / invert_maxrank make on resume
+    resuming = !isinf(result.gradnorm)
+    path = resuming ? pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2" :
+                      pathname*"N$(N)_T$(tau)_instructions.jld2"
+
+    instr = load_object(path)
+    for (k, v) in kwargs
+        hasfield(InversionInstructions, k) || error("InversionInstructions has no field :$k")
+        setproperty!(instr, k, v)   # setproperty!, not setfield!, so values get converted
+    end
+    save_object(path, instr)
+    @info "updated $((; kwargs...)) in $path (tau=$tau, resuming=$resuming)"
+    return instr
+end
+
 function things_to_put_somewhere()
     bonddims = zeros(Int64, maxtau)
     entsL = [zeros(tau) for tau in 1:maxtau]
@@ -919,7 +1003,7 @@ end
 
 
 
-if true
+if false
     let
         pathname = "testdata\\ising\\g1.5\\"
         Nlist = [20]
@@ -969,25 +1053,26 @@ end
 
 
 
-if false
+if true
     let
         pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/xxz/Jz2.5/"
         Nlist = [60,100,140,180,220,260,300]
         psis = MPS[]
         for N in Nlist
-            E, psi = XXZ(N)
-            f = h5open(pathname*"$(N)_mps.h5","w")
-            write(f, "psi", psi)
-            close(f)
-            # f = h5open(pathname*"$(N)_mps.h5","r")
-            # psi = read(f,"psi",MPS)
+            # E, psi = XXZ(N)
+            # f = h5open(pathname*"$(N)_mps.h5","w")
+            # write(f, "psi", psi)
             # close(f)
+            f = h5open(pathname*"$(N)_mps.h5","r")
+            psi = read(f,"psi",MPS)
+            close(f)
             push!(psis, psi)
         end
 
         Threads.@threads for psi in psis
-            prepare_start(psi, pathname*"trunc/"; maxiter=20000)
-
+            #prepare_start(psi, pathname*"trunc/"; maxiter=10000000)
+            N = length(psi)
+            edit_ongoing_simulation!(pathname*"trunc/", N; n_checkpoint=500)
             while true
                 status = continue_inversion(psi, 30, pathname*"trunc/", invert_maxrank)
                 status == :done && break
