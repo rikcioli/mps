@@ -278,12 +278,12 @@ function SVDcontract_pullback(ΔMf, ΔSnorm, tape::SVDcontractTape)
     S  = Diagonal(sf[1:p])                    # unnormalized, as computed by svd_compact
     Sn = normalize ? S / Snorm : S            # what the forward pass actually returned
 
-    ΔML_ten *= cL
-    ΔMR_ten *= cR
     cLind = combinedind(cL); cRind = combinedind(cR);
 
-    ΔML = Matrix{ComplexF64}(ΔML_ten, cLind, bondind)
-    ΔMR = Matrix{ComplexF64}(ΔMR_ten, bondind, cRind)
+    ΔML = iszero(ΔML_ten) ? zeros(ComplexF64, msize[1], p) :
+          Matrix{ComplexF64}(ΔML_ten * cL, cLind, bondind)
+    ΔMR = iszero(ΔMR_ten) ? zeros(ComplexF64, p, msize[2]) :
+          Matrix{ComplexF64}(ΔMR_ten * cR, bondind, cRind)
 
     local ΔU, ΔS, ΔVdg
     if move_ogc==:right
@@ -297,7 +297,7 @@ function SVDcontract_pullback(ΔMf, ΔSnorm, tape::SVDcontractTape)
     end
 
     if normalize
-        ΔS = ΔS/Snorm - Sn*dot(Sn, ΔS)/Snorm
+        ΔS = ΔS/Snorm - Sn*real(dot(Sn, ΔS))/Snorm
     end
 
     # contribution from returning Snorm = norm(S₀).
@@ -802,12 +802,13 @@ end
 
 function direct(W::MPO, ψ::MPS)
     N = length(ψ)
+    @assert length(W) == N
 
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
     sites = siteinds(ψ)
     
-    Wψ_vec = (W[:]) .* (ψ[:])
+    Wψ_vec = [W[j] * ψ[j] for j in 1:N]
     
     combs = combiner.(Wlinks, ψlinks)
     combinds = combinedind.(combs)
@@ -830,12 +831,13 @@ end
 
 function ChainRulesCore.rrule(::typeof(direct), W::MPO, ψ::MPS)
     N = length(ψ)
+    @assert length(W) == N
 
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
     sites = siteinds(ψ)
     
-    Wψ_vec = (W[:]) .* (ψ[:])
+    Wψ_vec = [W[j] * ψ[j] for j in 1:N]
     
     combs = combiner.(Wlinks, ψlinks)
     combinds = combinedind.(combs)
@@ -871,46 +873,55 @@ end
 
 ### MULTIPLY MPO WITH MPS WITH ZIP-UP ALGORITHM
 
-function zipup(W::MPO, ψ::MPS; trunc=NamedTuple(), post_factorize_callback = identity)
+function zipup(W::MPO, ψ::MPS; normalize=false, trunc=NamedTuple(), post_factorize_callback = identity)
     N = length(ψ)
     ψ = move_center(ψ, N)
     W = move_center(W, N)
 
-    #trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
 
     errs = Float64[]    # store truncation errors
+    Snorms = Float64[]
     Wψ_vec = Array{ITensor, 1}(undef, N)    # store tensors that make the final mps
     local Lten::ITensor
     for j in N:-1:2    
         linds = [Wlinks[j-1]; ψlinks[j-1]]
         tensors = j<N ? [Lten, ψ[j], W[j]] : [ψ[j], W[j]]
 
-        ((Lten, V), err), _ = SVDcontract(tensors, linds; move_ogc=:left, trunc=trunc)
+        ((Lten, V), Snorm, err), _ = SVDcontract(tensors, linds;
+                                                normalize=normalize,
+                                                move_ogc=:left, 
+                                                trunc=(trunc..., maxrank=maxranks[j-1]))
         push!(errs, err)
+        push!(Snorms, Snorm)
         Wψ_vec[j] = V
     end
-    Wψ_vec[1] = Lten*ψ[1]*W[1]
+    Wψ_vec1 = Lten*ψ[1]*W[1]
+    Wψ_vec1_norm = norm(Wψ_vec1)
+    push!(Snorms, Wψ_vec1_norm)
+    Wψ_vec[1] = normalize ? Wψ_vec1/Wψ_vec1_norm : Wψ_vec1
 
     reverse!(errs)
     post_factorize_callback(errs)
     Wψ = MPS(Wψ_vec)
     set_ortho_lims!(Wψ, 1:1)
-    return Wψ
+    return Wψ, Snorms
 end
 
-function ChainRulesCore.rrule(::typeof(zipup), W::MPO, ψ::MPS; trunc=NamedTuple(), post_factorize_callback = identity)
+function ChainRulesCore.rrule(::typeof(zipup), W::MPO, ψ::MPS; normalize=false, trunc=NamedTuple(), post_factorize_callback = identity)
     N = length(ψ)
     ψ, move_center_back_ψ = Zygote.pullback(move_center, ψ, N)
     W, move_center_back_W = Zygote.pullback(move_center, W, N)
 
-    #trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
 
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
 
     errs = Float64[]    # store truncation errors
+    Snorms = Float64[]
     Wψ_vec = Array{ITensor, 1}(undef, N)    # store tensors that make the final mps
     tapes = SVDcontractTape[]
     local Lten::ITensor
@@ -918,34 +929,54 @@ function ChainRulesCore.rrule(::typeof(zipup), W::MPO, ψ::MPS; trunc=NamedTuple
         linds = [Wlinks[j-1]; ψlinks[j-1]]
         tensors = j<N ? [Lten, ψ[j], W[j]] : [ψ[j], W[j]]
 
-        ((Lten, V), err), tape_j = SVDcontract(tensors, linds;
+        ((Lten, V), Snorm, err), tape_j = SVDcontract(tensors, linds;
+                                            normalize=normalize,
                                             move_ogc=:left, 
-                                            trunc=trunc)
+                                            trunc=(trunc..., maxrank=maxranks[j-1]))
         push!(errs, err)
+        push!(Snorms, Snorm)
         push!(tapes, tape_j)
         Wψ_vec[j] = V
     end
-    Wψ_vec[1] = Lten*ψ[1]*W[1]
+    Wψ_vec1 = Lten*ψ[1]*W[1]
+    Wψ_vec1_norm = norm(Wψ_vec1)
+    push!(Snorms, Wψ_vec1_norm)
+    Wψ_vec[1] = normalize ? Wψ_vec1/Wψ_vec1_norm : Wψ_vec1
 
+    reverse!(errs)
     post_factorize_callback(errs)
     Wψ = MPS(Wψ_vec)
     set_ortho_lims!(Wψ, 1:1)
 
-    function zipup_pullback(ΔWψ)
+    function zipup_pullback(Δout)
+        ΔWψ, ΔSnorms = Δout
         Δψ_vec = Array{ITensor, 1}(undef, N)
         ΔW_vec = Array{ITensor, 1}(undef, N)
 
-        ΔLten = ΔWψ[1]*dag(ψ[1])*dag(W[1])
-        Δψ_vec[1] = dag(Lten)*ΔWψ[1]*dag(W[1])
-        ΔW_vec[1] = dag(Lten)*dag(ψ[1])*ΔWψ[1]
+        # --- site 1: undo  T = Lten*ψ[1]*W[1];  n = norm(T);  Y = normalize ? T/n : T
+        ΔY1 = ΔWψ[1]
+        Δn1 = ΔSnorms[N]                      # Snorms[N] === Wψ_vec1_norm
+
+        ΔT1 = if normalize
+            Y1 = Wψ_vec[1]                    # == Wψ_vec1 / Wψ_vec1_norm
+            (ΔY1 - real(dot(Y1, ΔY1))*Y1)/Wψ_vec1_norm + Δn1*Y1
+        else
+            ΔY1 + (Δn1/Wψ_vec1_norm)*Wψ_vec1
+        end
+
+        ΔLten = ΔT1*dag(ψ[1])*dag(W[1])
+        Δψ_vec[1] = dag(Lten)*ΔT1*dag(W[1])
+        ΔW_vec[1] = dag(Lten)*dag(ψ[1])*ΔT1
 
         for j in 2:N    
             ΔV = ΔWψ[j]
             ΔMf = (ΔLten, ΔV)
+            ΔSnorm = ΔSnorms[N-j+1]
+            tape_j = tapes[N-j+1]
             if j<N
-                (ΔLten, Δψj, ΔWj) = SVDcontract_pullback(ΔMf, tapes[N-j+1])
+                (ΔLten, Δψj, ΔWj) = SVDcontract_pullback(ΔMf, ΔSnorm, tape_j)
             else
-                (Δψj, ΔWj) = SVDcontract_pullback(ΔMf, tapes[N-j+1])
+                (Δψj, ΔWj) = SVDcontract_pullback(ΔMf, ΔSnorm, tape_j)
             end
             Δψ_vec[j] = Δψj
             ΔW_vec[j] = ΔWj
@@ -956,13 +987,13 @@ function ChainRulesCore.rrule(::typeof(zipup), W::MPO, ψ::MPS; trunc=NamedTuple
         return (NoTangent(), ΔW_vec, Δψ_vec)
     end
 
-    return Wψ, zipup_pullback
+    return (Wψ, Snorms), zipup_pullback
 end
 
 
 function product(W::MPO, ψ::MPS, alg::Symbol; kwargs...)
     if alg == :direct
-        return direct(W, ψ)
+        return (direct(W, ψ),)
     elseif alg == :zipup
         return zipup(W, ψ; kwargs...)
     else
@@ -1005,7 +1036,8 @@ function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post
                 cog==1 ? [sites[j];] : [sites[j]; links[cog-1]]
             end
             tensors = [WLten, WRten]
-            ((W1, W2), err), _ = SVDcontract(tensors, linds; 
+            
+            ((W1, W2), Snorm, err), _ = SVDcontract(tensors, linds; 
                                     move_ogc=:right,
                                     normalize=normalize,
                                     trunc=trunc)
@@ -1027,7 +1059,7 @@ function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post
 
             linds = j > 1 ? [sites[j]; links[j-1]] : [sites[j];]
             tensors = [WLten, WRten]
-            ((W1, W2), err), _ = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), _ = SVDcontract(tensors, linds; 
                                     move_ogc=:left,
                                     normalize=normalize,
                                     trunc=trunc)
@@ -1082,7 +1114,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
             end
             tensors = [WLten, WRten]
 
-            ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
                                         move_ogc=:right,
                                         normalize=normalize,
                                         trunc=trunc)
@@ -1106,7 +1138,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
             linds = j > 1 ? [sites[j]; links[j-1]] : [sites[j];]
             tensors = [WLten, WRten]
 
-            ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
                                         move_ogc=:left,
                                         normalize=normalize,
                                         trunc=trunc)
@@ -1136,7 +1168,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
                 ΔW2 = ΔR_new
                 ΔMf = (ΔW1, ΔW2)
 
-                (ΔWL, ΔWR) = SVDcontract_pullback(ΔMf, tapes[j-cog+1])  # start from the last
+                (ΔWL, ΔWR) = SVDcontract_pullback(ΔMf, ZeroTangent(), tapes[j-cog+1])  # start from the last
 
                 Δψcache[j-cog+2] = ΔWR
                 ΔR_new = ΔWL
@@ -1151,7 +1183,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
                 ΔW2 = Δψf[j+1]
                 ΔMf = (ΔW1, ΔW2)
                 
-                (ΔWL, ΔWR) = SVDcontract_pullback(ΔMf, tapes[cog-j])
+                (ΔWL, ΔWR) = SVDcontract_pullback(ΔMf, ZeroTangent(), tapes[cog-j])
                 # start from the last again, since pullbacks are appended
 
                 Δψcache[j-b+1] = ΔWL
@@ -1607,6 +1639,10 @@ function get_pauli_mps(ψ::MPS; trunc=NamedTuple(), sites=nothing, post_factoriz
     ψ = move_center(ψ, 1)
     ψbra, unbra = bra(ψ)
 
+    if !haskey(trunc, :maxrank)
+        trunc = (trunc..., maxrank=maxlinkdim(ψ)^2)     # NEEDED otherwise bond dim goes to 4χ²
+    end
+
     strat = to_strategy(trunc)
     if !(strat isa MatrixAlgebraKit.NoTruncation)
         strat = truncdegen(strat; atol=2*eps())
@@ -1631,7 +1667,8 @@ function get_pauli_mps(ψ::MPS; trunc=NamedTuple(), sites=nothing, post_factoriz
         linds = j>1 ? [sites_pauli_mps[j]; commonind(Pψ_vec[j-1], Bp)] : [sites_pauli_mps[j];] 
         tensors = [Bp, ψ[j+1], ψbra[j+1], Pten]
 
-        ((Up, Rp), err), _ = SVDcontract(tensors, linds; 
+        ((Up, Rp), Snorm, err), _ = SVDcontract(tensors, linds;
+                                        normalize=false,
                                         move_ogc=:right, 
                                         trunc=strat)
         push!(errs, err)
@@ -1654,6 +1691,10 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
     N = length(ψ)
     ψ, move_center_back = Zygote.pullback(move_center, ψ, 1)
     ψbra, unbra = bra(ψ)
+
+    if !haskey(trunc, :maxrank)
+        trunc = (trunc..., maxrank=maxlinkdim(ψ)^2)     # NEEDED otherwise bond dim goes to 4χ²
+    end
 
     strat = to_strategy(trunc)
     if !(strat isa MatrixAlgebraKit.NoTruncation)
@@ -1681,7 +1722,8 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
         linds = j>1 ? [sites_pauli_mps[j]; commonind(Pψ_vec[j-1], Bp)] : [sites_pauli_mps[j];] 
         tensors = [Bp, ψ[j+1], ψbra[j+1], Pten]
         
-        ((Up, Rp), err), tape_j = SVDcontract(tensors, linds; 
+        ((Up, Rp), Snorm, err), tape_j = SVDcontract(tensors, linds;
+                                        normalize=false,
                                         move_ogc=:right, 
                                         trunc=strat)
         push!(errs, err)
@@ -1706,7 +1748,7 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
             ΔUp = ΔPψ[j]
             ΔMf = (ΔUp, ΔRp)
 
-            (ΔBp, Δψ_jp1, Δψbra_jp1, _) = SVDcontract_pullback(ΔMf, tapes[j])
+            (ΔBp, Δψ_jp1, Δψbra_jp1, _) = SVDcontract_pullback(ΔMf, ZeroTangent(), tapes[j])
             
             Δψ_vec[j+1] = Δψ_jp1 + unbra(Δψbra_jp1)
             ΔRp = ΔBp
@@ -1729,7 +1771,7 @@ function sre2(arrV::Vector{<:AbstractArray}, ogc::Int, alg::Symbol; trunc_pauli 
     ψ = MPS(arrV, ogc)
     Pψ = get_pauli_mps(ψ; trunc = trunc_pauli)
     W = MPO(Pψ)
-    WP = product(W, Pψ, alg; trunc = trunc_product)
+    WP, = product(W, Pψ, alg; trunc = trunc_product)
     m2 = -log2(real(sproduct(WP, WP))) - N
     return m2
 end
@@ -1741,7 +1783,7 @@ function ChainRulesCore.rrule(::typeof(sre2), arrV::Vector{<:AbstractArray}, ogc
     ψ, MPS_back = pullback(MPS, arrV, ogc)
     Pψ, get_pauli_mps_pullback = pullback(psi -> get_pauli_mps(psi; trunc=trunc_pauli), ψ)
     W, MPO_back = pullback(MPO, Pψ)    # at this point Pψ and W have same ortho lims
-    WP, product_back = pullback((mpo, mps) -> product(mpo, mps, alg; trunc=trunc_product), W, Pψ)
+    (WP,), product_back = pullback((mpo, mps) -> product(mpo, mps, alg; trunc=trunc_product), W, Pψ)
     res, sproduct_back = pullback(sproduct, WP, WP)
     
     m2, m2_back = -log2(real(res))-N, Δm2 -> (NoTangent(), -Δm2/(log(2)*real(res)))
@@ -1752,7 +1794,7 @@ function ChainRulesCore.rrule(::typeof(sre2), arrV::Vector{<:AbstractArray}, ogc
         ΔWP_1, ΔWP_2 = sproduct_back(Δres)
         ΔWP = ΔWP_1 .+ ΔWP_2
 
-        ΔW, ΔPψ_1 = product_back(ΔWP)
+        ΔW, ΔPψ_1 = product_back((ΔWP, ZeroTangent()))
         ΔPψ_2 = MPO_back(ΔW)[1]
         ΔPψ = ΔPψ_1 .+ ΔPψ_2
         Δψ = get_pauli_mps_pullback(ΔPψ)[1]
@@ -1766,57 +1808,43 @@ end
 ### SRE2 OF AN MPS ψ
 function sre2(ψ::MPS, alg::Symbol; trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
     N = length(ψ)
-    # ψf = apply_brickwork(arrU, ψ; trunc=trunc_bw)
     Pψ = get_pauli_mps(ψ; trunc=trunc_pauli)
     W = MPO(Pψ)
-    P2 = product(W, Pψ, alg; trunc=trunc_product)
-    m2 = -log2(real(sproduct(P2, P2))) - N
-    return m2
-end
-
-### SRE2 OF A DENSITY MATRIX ψ
-function sre2(ψ::MPO, alg::Symbol; trunc_product = NamedTuple())
-    N = length(ψ)
-    Pψ = get_pauli_mps(ψ)
-    W = MPO(Pψ)
-    P2 = product(W, Pψ, alg; trunc=trunc_product)
+    P2, = product(W, Pψ, alg; trunc=trunc_product)
     m2 = -log2(real(sproduct(P2, P2))) - N
     return m2
 end
 
 ### SRE2 OF A BRICKWORK CIRCUIT APPLIED ON AN MPS ψ
-function sre2(arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
+function sre2(arrU::Vector{<:AbstractMatrix}, ψ::MPS; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_zipup = NamedTuple())
     N = length(ψ)
-    ψf = apply_brickwork(arrU, ψ; trunc=trunc_bw)
+    ψf, = apply_brickwork(arrU, ψ; normalize=false, trunc=trunc_bw)
     Pψ = get_pauli_mps(ψf; trunc=trunc_pauli)
     W = MPO(Pψ)
-    P2 = product(W, Pψ, alg; trunc=trunc_product)
-    m2 = -log2(real(sproduct(P2, P2))) - N
+    P2, Snorms = zipup(W, Pψ; normalize=true, trunc=trunc_zipup)
+    m2 = -2*sum(log2.(Snorms)) - N
     return m2
 end
 
-function ChainRulesCore.rrule(::typeof(sre2), arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
+function ChainRulesCore.rrule(::typeof(sre2), arrU::Vector{<:AbstractMatrix}, ψ::MPS; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_zipup = NamedTuple())
     N = length(ψ)
-    ψf, apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, ψ; trunc=trunc_bw), arrU, ψ)
+    (ψf,), apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, psi; normalize=false, trunc=trunc_bw), arrU, ψ)
     Pψ, get_pauli_mps_pullback = pullback(psi -> get_pauli_mps(psi; trunc=trunc_pauli), ψf)
     W, MPO_back = pullback(MPO, Pψ)
-    P2, product_back = pullback((mpo, psi) -> product(mpo, psi, alg; trunc=trunc_product), W, Pψ)
-    res, sproduct_back = pullback(sproduct, P2, P2)
-    m2, m2_back = -log2(real(res))-N, Δm2 -> (NoTangent(), -Δm2/(log(2)*real(res)))
+    (P2, Snorms), zipup_back = pullback((mpo, psi) -> zipup(mpo, psi; normalize=true, trunc=trunc_zipup), W, Pψ)
+    m2, m2_back = pullback(Snorms_vec -> -2*sum(log2.(Snorms_vec))-N, Snorms)
 
     function sre2_pullback(Δm2)
-        _, Δres = m2_back(Δm2)
-
-        ΔP2_1, ΔP2_2 = sproduct_back(Δres)
-        ΔP2 = ΔP2_1 .+ ΔP2_2
-        ΔW, ΔPψ_1 = product_back(ΔP2)
+        (ΔSnorms,) = m2_back(Δm2)
+        ΔP2 = [ITensor(inds(P2[j])) for j in 1:N]   # ZeroTangent
+        ΔW, ΔPψ_1 = zipup_back((ΔP2, ΔSnorms))
         (ΔPψ_2,) = MPO_back(ΔW)
         ΔPψ = ΔPψ_1 .+ ΔPψ_2
         (Δψ2,) = get_pauli_mps_pullback(ΔPψ)
 
-        ΔarrU, Δψ = apply_brickwork_back(Δψ2)
+        ΔarrU, Δψ = apply_brickwork_back((Δψ2, ZeroTangent()))
 
-        return (NoTangent(), ΔarrU, NoTangent(), NoTangent())
+        return (NoTangent(), ΔarrU, Δψ)
     end
     return m2, sre2_pullback
 end
@@ -1828,10 +1856,9 @@ end
 
 function m_lin(ψ::MPS, alg::Symbol; trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
     N = length(ψ)
-    # ψf = apply_brickwork(arrU, ψ; trunc=trunc_bw)
     Pψ = get_pauli_mps(ψ; trunc=trunc_pauli)
     W = MPO(Pψ)
-    P2 = product(W, Pψ, alg; trunc=trunc_product)
+    P2, = product(W, Pψ, alg; trunc=trunc_product)
     m = 1-real(sproduct(P2, P2))*2^N
     return m
 end
@@ -1840,10 +1867,10 @@ function m_lin(arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = 
     truncerr = Ref(0.0)
     post_factorize_callback(errs) = (truncerr[] += sum(errs))
     N = length(ψ)
-    ψf = apply_brickwork(arrU, ψ; trunc=trunc_bw,post_factorize_callback)
-    Pψ = get_pauli_mps(ψf; trunc=trunc_pauli,post_factorize_callback)
+    ψf, = apply_brickwork(arrU, ψ; trunc=trunc_bw, post_factorize_callback)
+    Pψ = get_pauli_mps(ψf; trunc=trunc_pauli, post_factorize_callback)
     W = MPO(Pψ)
-    P2 = product(W, Pψ, alg; trunc=trunc_product,post_factorize_callback)
+    P2, = product(W, Pψ, alg; trunc=trunc_product, post_factorize_callback)
     m = 1-real(sproduct(P2, P2))*2^N
     err = truncerr[]*(2^N)
     println("truncerr: $err")
@@ -1853,10 +1880,10 @@ end
 
 # function ChainRulesCore.rrule(::typeof(m_lin), arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
 #     N = length(ψ)
-#     ψf, apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, ψ; trunc=trunc_bw), arrU, ψ)
+#     (ψf,), apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, ψ; trunc=trunc_bw), arrU, ψ)
 #     Pψ, get_pauli_mps_pullback = pullback(psi -> get_pauli_mps(psi; trunc=trunc_pauli), ψf)
 #     W, MPO_back = pullback(MPO, Pψ)
-#     P2, product_back = pullback((mpo, psi) -> product(mpo, psi, alg; trunc=trunc_product), W, Pψ)
+#     (P2,), product_back = pullback((mpo, psi) -> product(mpo, psi, alg; trunc=trunc_product), W, Pψ)
 #     res, sproduct_back = pullback(sproduct, P2, P2)
 #     m, m_back = 1-real(res)*2^N, Δm -> (NoTangent(), -Δm*2^N)
 
@@ -1865,12 +1892,12 @@ end
 
 #         ΔP2_1, ΔP2_2 = sproduct_back(Δres)
 #         ΔP2 = ΔP2_1 .+ ΔP2_2
-#         ΔW, ΔPψ_1 = product_back(ΔP2)
+#         ΔW, ΔPψ_1 = product_back((ΔP2, ZeroTangent()))
 #         (ΔPψ_2,) = MPO_back(ΔW)
 #         ΔPψ = ΔPψ_1 .+ ΔPψ_2
 #         (Δψ2,) = get_pauli_mps_pullback(ΔPψ)
 
-#         ΔarrU, Δψ = apply_brickwork_back(Δψ2)
+#         ΔarrU, Δψ = apply_brickwork_back((Δψ2, ZeroTangent()))
 
 #         return (NoTangent(), ΔarrU, NoTangent(), NoTangent())
 #     end
@@ -2401,7 +2428,7 @@ function apply_brickwork_variational(Uarray::Vector{<:AbstractMatrix}, ψ::MPS, 
     Uarrs = group(Uarray, N, 2)
     lognorm_factors = Float64[]
     for (batch_no, arr) in enumerate(Uarrs)
-        ψt = apply_brickwork(arr, ψ; normalize=false, 
+        ψt, = apply_brickwork(arr, ψ; normalize=false, 
                                     shift=Int(isodd(compression_depth)),
                                     to_right=iseven(compression_depth) || (isodd(compression_depth) && iseven(batch_no)), 
                                     kwargs...)
@@ -2434,7 +2461,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_variational), Uarray::Vec
                                                 shift=Int(isodd(compression_depth)),
                                                 to_right=iseven(compression_depth) || (isodd(compression_depth) && iseven(batch_no)), 
                                                 kwargs...)
-        ψt, back_brick = pullback(apply_brickwork_local, arr, ψ)
+        (ψt,), back_brick = pullback(apply_brickwork_local, arr, ψ)
         push!(pullback_apply_brickworks, back_brick)
 
         if batch_no < length(Uarrs)
@@ -2638,7 +2665,6 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
             end
         end
     end
-    #logs,pull_sumlogs  = pullback(sum,lognorm_factors)
 
     post_factorize_callback(errs)
     final_ogc = to_right ? lastj+1 : lastj
@@ -2688,6 +2714,10 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
 end
 
 
+
+"""
+Extracts pauli MPS from a density matrix ψ expressed as an MPO
+"""
 function get_pauli_mps(ψ::MPO; sites=nothing)
     N = length(ψ)
 
@@ -2737,7 +2767,7 @@ function sre2(arrU::Vector{<:AbstractMatrix}, ψ::MPO, alg::Symbol; trunc_bw = N
     (ψf,) = apply_brickwork(arrU, ψ; normalize=false, trunc=trunc_bw)
     Pψ = get_pauli_mps(ψf)
     W = MPO(Pψ)
-    P2 = product(W, Pψ, alg; trunc=trunc_product)
+    P2, = product(W, Pψ, alg; trunc=trunc_product)
     m2 = -log2(real(sproduct(P2, P2))) - N
     return m2
 end
@@ -2747,7 +2777,7 @@ function ChainRulesCore.rrule(::typeof(sre2), arrU::Vector{<:AbstractMatrix}, ψ
     (ψf,), apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, ψ; normalize=false, trunc=trunc_bw), arrU, ψ)
     Pψ, get_pauli_mps_pullback = pullback(get_pauli_mps, ψf)
     W, MPO_back = pullback(MPO, Pψ)
-    P2, product_back = pullback((mpo, psi) -> product(mpo, psi, alg; trunc=trunc_product), W, Pψ)
+    (P2,), product_back = pullback((mpo, psi) -> product(mpo, psi, alg; trunc=trunc_product), W, Pψ)
     res, sproduct_back = pullback(sproduct, P2, P2)
     m2, m2_back = pullback(P2P2 -> -log2(real(P2P2))-N, res)
 
@@ -2756,7 +2786,7 @@ function ChainRulesCore.rrule(::typeof(sre2), arrU::Vector{<:AbstractMatrix}, ψ
 
         ΔP2_1, ΔP2_2 = sproduct_back(Δres)
         ΔP2 = ΔP2_1 .+ ΔP2_2
-        ΔW, ΔPψ_1 = product_back(ΔP2)
+        ΔW, ΔPψ_1 = product_back((ΔP2, ZeroTangent()))
         (ΔPψ_2,) = MPO_back(ΔW)
         ΔPψ = ΔPψ_1 .+ ΔPψ_2
         (Δψ2,) = get_pauli_mps_pullback(ΔPψ)
