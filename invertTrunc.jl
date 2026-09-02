@@ -10,6 +10,9 @@ using HDF5
 #using LaTeXStrings
 #using Plots
 
+const IOLOCK = ReentrantLock()
+save_locked(path, obj)  = lock(IOLOCK) do; save_object(path, obj); end
+load_locked(path)       = lock(IOLOCK) do; load_object(path); end
 
 #using Logging
 #Logging.disable_logging(Logging.Warn)
@@ -143,7 +146,7 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
 
     N = length(ψ)
     instrpath = resuming ? pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2" : pathname*"N$(N)_T$(tau)_instructions.jld2"
-    instr = load_object(instrpath)
+    instr = load_locked(instrpath)
 
     sites = siteinds(ψ)
     maxerror = instr.maxerror
@@ -154,7 +157,7 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
     nU = n_unitaries(N, tau)
     n_checkpoint = instr.n_checkpoint
 
-    savefile = load_object(pathname*"N$(N)_T$(tau).jld2")
+    savefile = load_locked(pathname*"N$(N)_T$(tau).jld2")
     arrU0 = savefile.arrU
     if isnothing(arrU0)
         arrU0 = random_circuit(N, tau)
@@ -215,11 +218,11 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
             ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,  # current arrU and gradient at arrU
                     cost=f, overlap_cost=overlap_cost, err=err, time=cum_time,       # current function values, err and time
                     converged=false, finished=false)                                 # mid-run ⇒ not converged
-            save_object(pathname*"N$(N)_T$(tau).jld2", ckpt)
+            save_locked(pathname*"N$(N)_T$(tau).jld2", ckpt)
 
             ckpt_instr = copy(instr)
             ckpt_instr.maxiter = max(instr.maxiter - numiter, 1)
-            save_object(pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2", ckpt_instr)
+            save_locked(pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2", ckpt_instr)
             @info "checkpoint: tau=$tau iter=$numiter gradnorm=$gnorm err=$err"
         end
         return x, f, g
@@ -251,10 +254,10 @@ function invert_maxerr(ψ::MPS, tau::Int, pathname::String; resuming = false)
                   gradnorm=final_gnorm, numfg=numfg, normgradhistory=cum_nghist,      # OptimKit's other returns
                   cost=fmin, overlap_cost=overlap_cost, err=err,            # current function values
                   converged=converged, finished=finished, time=cum_time)   # mid-run ⇒ not converged
-    save_object(pathname*"N$(N)_T$(tau).jld2", result_tau)
+    save_locked(pathname*"N$(N)_T$(tau).jld2", result_tau)
 
     new_instr = copy(instr)
-    save_object(pathname*"N$(N)_T$(tau+1)_instructions.jld2", new_instr)
+    save_locked(pathname*"N$(N)_T$(tau+1)_instructions.jld2", new_instr)
 
     return
 end
@@ -265,7 +268,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
 
     N = length(ψ)
     instrpath = resuming ? pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2" : pathname*"N$(N)_T$(tau)_instructions.jld2"
-    instr = load_object(instrpath)
+    instr = load_locked(instrpath)
 
     sites = siteinds(ψ)
     chimax = maxlinkdim(ψ)
@@ -281,7 +284,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
     nU = n_unitaries(N, tau)
     n_checkpoint = instr.n_checkpoint
 
-    savefile = load_object(pathname*"N$(N)_T$(tau).jld2")
+    savefile = load_locked(pathname*"N$(N)_T$(tau).jld2")
     arrU0 = savefile.arrU
     if isnothing(arrU0)
         arrU0 = random_circuit(N, tau)
@@ -359,7 +362,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
                 if spread <= stall_atol && !converged_ok
                     errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f,
                                 spread=spread, n_stall=n_stall, stall_atol=stall_atol)
-                    save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
+                    save_locked(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                     error("Gradient norm frozen (spread=$spread) over last $n_stall iterations at " *
                         "tau=$tau, iter=$numiter, gnorm=$gnorm, but NOT converged. Likely an exact " *
                         "spectral degeneracy at the truncation cut made the SVD-adjoint gradient singular.")
@@ -382,11 +385,11 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
             ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,
                     cost=f, overlap_cost=overlap_cost, err=err, time=cum_time,
                     converged=false, finished=false)
-            save_object(pathname*"N$(N)_T$(tau).jld2", ckpt)
+            save_locked(pathname*"N$(N)_T$(tau).jld2", ckpt)
 
             ckpt_instr = copy(instr)
             ckpt_instr.maxiter = max(instr.maxiter - numiter, 1)
-            save_object(pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2", ckpt_instr)
+            save_locked(pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2", ckpt_instr)
             @info "checkpoint: tau=$tau iter=$numiter gradnorm=$gnorm err=$err"
         end
         return x, f, g
@@ -421,10 +424,10 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false)
                   gradnorm=final_gnorm, numfg=numfg, normgradhistory=cum_nghist,
                   cost=fmin, overlap_cost=overlap_cost, err=err,
                   converged=converged, finished=finished, time=cum_time)
-    save_object(pathname*"N$(N)_T$(tau).jld2", result_tau)
+    save_locked(pathname*"N$(N)_T$(tau).jld2", result_tau)
 
     new_instr = copy(instr)
-    save_object(pathname*"N$(N)_T$(tau+1)_instructions.jld2", new_instr)
+    save_locked(pathname*"N$(N)_T$(tau+1)_instructions.jld2", new_instr)
 
     return
 end
@@ -434,7 +437,7 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
 
     N = length(ψ)
     instrpath = resuming ? pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2" : pathname*"N$(N)_T$(tau)_instructions.jld2"
-    instr = load_object(instrpath)
+    instr = load_locked(instrpath)
 
     sites = siteinds(ψ)
     chimax = maxlinkdim(ψ)
@@ -449,7 +452,7 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
     nU = n_unitaries(N, tau)
     n_checkpoint = instr.n_checkpoint
 
-    savefile = load_object(pathname*"N$(N)_T$(tau).jld2")
+    savefile = load_locked(pathname*"N$(N)_T$(tau).jld2")
     arrU0 = savefile.arrU
     if isnothing(arrU0)
         arrU0 = random_circuit(N, tau)
@@ -507,7 +510,7 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
                 if spread <= stall_atol && !converged_ok
                     errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
                                 spread=spread, n_stall=n_stall, stall_atol=stall_atol)
-                    save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
+                    save_locked(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                     error("Gradient norm frozen (spread=$spread) over last $n_stall iterations at " *
                         "tau=$tau, iter=$numiter, gnorm=$gnorm, but NOT converged " *
                         "(gradtol=$(gradtol)). Likely an exact spectral degeneracy at the " *
@@ -532,11 +535,11 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
             ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,  # current arrU and gradient at arrU
                     cost=f, overlap_cost=overlap_cost, err=err, time=cum_time, # current function values
                     converged=false, finished=false)                                 # mid-run ⇒ not converged
-            save_object(pathname*"N$(N)_T$(tau).jld2", ckpt)
+            save_locked(pathname*"N$(N)_T$(tau).jld2", ckpt)
 
             ckpt_instr = copy(instr)
             ckpt_instr.maxiter = max(instr.maxiter - numiter, 1)
-            save_object(pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2", ckpt_instr)
+            save_locked(pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2", ckpt_instr)
             @info "checkpoint: tau=$tau iter=$numiter gradnorm=$gnorm err=$err"
         end
         return x, f, g
@@ -568,10 +571,10 @@ function invert_maxrank_variational(ψ::MPS, tau::Int, pathname::String; resumin
                   gradnorm=final_gnorm, numfg=numfg, normgradhistory=cum_nghist,      # OptimKit's other returns
                   cost=fmin, overlap_cost=overlap_cost, err=err,            # current function values
                   converged=converged, finished=finished, time=cum_time)   # mid-run ⇒ not converged
-    save_object(pathname*"N$(N)_T$(tau).jld2", result_tau)
+    save_locked(pathname*"N$(N)_T$(tau).jld2", result_tau)
 
     new_instr = copy(instr)
-    save_object(pathname*"N$(N)_T$(tau+1)_instructions.jld2", new_instr)
+    save_locked(pathname*"N$(N)_T$(tau+1)_instructions.jld2", new_instr)
 
     return
 end
@@ -582,7 +585,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
 
     N = length(ψ)
     instrpath = resuming ? pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2" : pathname*"N$(N)_T$(tau)_instructions.jld2"
-    instr = load_object(instrpath)
+    instr = load_locked(instrpath)
 
     sites = siteinds(ψ)
     chimax = maxlinkdim(ψ)
@@ -607,7 +610,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
     nU = n_unitaries(N, tau)
     n_checkpoint = instr.n_checkpoint
 
-    savefile = load_object(pathname*"N$(N)_T$(tau).jld2")
+    savefile = load_locked(pathname*"N$(N)_T$(tau).jld2")
     arrU0 = savefile.arrU
     if isnothing(arrU0)
         arrU0 = random_circuit(N, tau)
@@ -711,7 +714,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
             end
         end
         outer_info = (time=time_outer, iter_no=iter_no, discarded=Σε, λ=λ, ρ=ρ, c=c, Σε_max=Σε_max)
-        save_object(pathname*"N$(N)_T$(tau)_outer_info.jld2", outer_info)
+        save_locked(pathname*"N$(N)_T$(tau)_outer_info.jld2", outer_info)
     end
 
     # after outer loop ends we run the full optimization with the found λ and ρ
@@ -748,7 +751,7 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
                 if spread <= stall_atol && !converged_ok
                     errorfile = (N=N, tau=tau, niter=numiter, gradnorm=gnorm, arrU=x, cost=f, 
                                 spread=spread, n_stall=n_stall, stall_atol=stall_atol)
-                    save_object(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
+                    save_locked(pathname*"N$(N)_T$(tau)_gradbreak.jld2", errorfile)
                     error("Gradient norm frozen (spread=$spread) over last $n_stall iterations at " *
                         "tau=$tau, iter=$numiter, gnorm=$gnorm, but NOT converged " *
                         "(gradtol=$(gradtol)). Likely an exact spectral degeneracy at the " *
@@ -774,14 +777,14 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
             ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,  # current arrU and gradient at arrU
                     aug_cost=f, overlap_cost=overlap_cost, penalty_cost=Σε, err=err, time=cum_time, # current function values
                     converged=false, finished=false)                                 # mid-run ⇒ not converged
-            save_object(pathname*"N$(N)_T$(tau).jld2", ckpt)
+            save_locked(pathname*"N$(N)_T$(tau).jld2", ckpt)
 
             ckpt_instr = copy(instr)
             ckpt_instr.maxiter = max(instr.maxiter - numiter, 1)
             ckpt_instr.skip_outer = true
             ckpt_instr.λ = λ
             ckpt_instr.ρ = ρ
-            save_object(pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2", ckpt_instr)
+            save_locked(pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2", ckpt_instr)
             @info "checkpoint: tau=$tau iter=$numiter gradnorm=$gnorm err=$err"
         end
         return x, f, g
@@ -813,14 +816,14 @@ function invert3(ψ::MPS, tau::Int, pathname::String; resuming = false)
                   aug_cost=fmin, overlap_cost=overlap_cost, penalty_cost=Σε_final, err=err,            # current function values
                   λ=λ, ρ=ρ, Σε_max=Σε_max,       # outer loop parameters
                   converged=converged, finished=finished, time=cum_time)   # mid-run ⇒ not converged
-    save_object(pathname*"N$(N)_T$(tau).jld2", result_tau)
+    save_locked(pathname*"N$(N)_T$(tau).jld2", result_tau)
 
     new_instr = copy(instr)
     new_instr.skip_outer = false
     new_instr.λ = λ
     new_instr.ρ = 1.0
     new_instr.Σε_max = err           # discarded-weight tolerance
-    save_object(pathname*"N$(N)_T$(tau+1)_instructions.jld2", new_instr)
+    save_locked(pathname*"N$(N)_T$(tau+1)_instructions.jld2", new_instr)
 
     return
 end
@@ -839,13 +842,13 @@ function prepare_start(psi::MPS, pathname::String; kwargs...)
     U_start = newU .* U_start
 
     instructions = InversionInstructions(; kwargs...)
-    save_object(pathname*"N$(N)_T1_instructions.jld2", instructions)
+    save_locked(pathname*"N$(N)_T1_instructions.jld2", instructions)
     
 
     savefile = (N=N, tau=1, arrU=U_start, gradnorm=Inf, numfg=0, 
                 normgradhistory=Matrix{Float64}(undef, 0, 2), time=0.0,
                 converged=false, finished=false)
-    save_object(pathname*"N$(N)_T1.jld2", savefile)
+    save_locked(pathname*"N$(N)_T1.jld2", savefile)
 end
 
 
@@ -857,7 +860,7 @@ function continue_inversion(psi::MPS, maxtau::Int, pathname::String, invertFunct
     isempty(taus) && error("No saved checkpoint files found in $pathname for N=$N")
     last_tau = maximum(taus)
 
-    result = load_object(pathname*"N$(N)_T$(last_tau).jld2")
+    result = load_locked(pathname*"N$(N)_T$(last_tau).jld2")
 
     if get(result, :finished, true)  # default true for old files w/o the field
         if last_tau < maxtau
@@ -868,7 +871,7 @@ function continue_inversion(psi::MPS, maxtau::Int, pathname::String, invertFunct
             savefile = (N=N, tau=newtau, arrU=warmU, gradnorm=Inf, numfg=0,
                         normgradhistory=Matrix{Float64}(undef, 0, 2), time=0.0,
                         converged=false, finished=false)
-            save_object(pathname*"N$(N)_T$(newtau).jld2", savefile)
+            save_locked(pathname*"N$(N)_T$(newtau).jld2", savefile)
             invertFunction(psi, newtau, pathname; resuming = false)
         else
             @info "Required maxtau already reached for this state"
@@ -900,7 +903,7 @@ function restart_from_depth(psi::MPS, depth_start::Int, depth_max::Int,
     N = length(psi)
     depth_start >= 2 || error("depth_start must be ≥ 2; use prepare_start for depth 1")
 
-    prev = load_object(pathname*"N$(N)_T$(depth_start-1).jld2")
+    prev = load_locked(pathname*"N$(N)_T$(depth_start-1).jld2")
     get(prev, :finished, true) ||
         error("depth $(depth_start-1) is not marked finished; finish or resume it first")
 
@@ -914,12 +917,12 @@ function restart_from_depth(psi::MPS, depth_start::Int, depth_max::Int,
 
     # 2. seed depth_start from the *plain* instructions of depth_start-1
     #    (the plain file always holds the full maxiter, never a resume remainder)
-    instr = copy(load_object(pathname*"N$(N)_T$(depth_start-1)_instructions.jld2"))
+    instr = copy(load_locked(pathname*"N$(N)_T$(depth_start-1)_instructions.jld2"))
     for (k, v) in kwargs
         hasfield(InversionInstructions, k) || error("InversionInstructions has no field :$k")
         setproperty!(instr, k, v)   # setproperty!, not setfield!, so values get converted
     end
-    save_object(pathname*"N$(N)_T$(depth_start)_instructions.jld2", instr)
+    save_locked(pathname*"N$(N)_T$(depth_start)_instructions.jld2", instr)
     @info "restarting at depth $depth_start with $((; kwargs...))"
 
     # 3. run
@@ -949,7 +952,7 @@ function edit_ongoing_simulation!(pathname::String, N::Int; kwargs...)
     isempty(taus) && error("no saved results in $pathname for N=$N")
     tau = maximum(taus)
 
-    result = load_object(pathname*"N$(N)_T$(tau).jld2")
+    result = load_locked(pathname*"N$(N)_T$(tau).jld2")
     get(result, :finished, true) &&
         error("depth $tau is finished, nothing is mid-solve — " *
               "use restart_from_depth to redo it with different parameters")
@@ -959,12 +962,12 @@ function edit_ongoing_simulation!(pathname::String, N::Int; kwargs...)
     path = resuming ? pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2" :
                       pathname*"N$(N)_T$(tau)_instructions.jld2"
 
-    instr = load_object(path)
+    instr = load_locked(path)
     for (k, v) in kwargs
         hasfield(InversionInstructions, k) || error("InversionInstructions has no field :$k")
         setproperty!(instr, k, v)   # setproperty!, not setfield!, so values get converted
     end
-    save_object(path, instr)
+    save_locked(path, instr)
     @info "updated $((; kwargs...)) in $path (tau=$tau, resuming=$resuming)"
     return instr
 end
@@ -1038,7 +1041,7 @@ if false
         glist = [1.0, 1.5]
         psis = MPS[]
         for g in glist
-            psi = load_object(pathname*"ising_L128_g$(g).jld2")
+            psi = load_locked(pathname*"ising_L128_g$(g).jld2")
             psi = dense(psi)
             push!(psis, psi)
         end
@@ -1066,13 +1069,14 @@ if true
             f = h5open(pathname*"$(N)_mps.h5","r")
             psi = read(f,"psi",MPS)
             close(f)
+            psi = dense(psi)
             push!(psis, psi)
         end
 
         Threads.@threads for psi in psis
             #prepare_start(psi, pathname*"trunc/"; maxiter=10000000)
             N = length(psi)
-            edit_ongoing_simulation!(pathname*"trunc/", N; n_checkpoint=500)
+            #edit_ongoing_simulation!(pathname*"trunc/", N; n_checkpoint=500)
             while true
                 status = continue_inversion(psi, 30, pathname*"trunc/", invert_maxrank)
                 status == :done && break
