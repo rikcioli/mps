@@ -750,7 +750,7 @@ function ChainRulesCore.rrule(::typeof(snorm_sq), ψ::MPS)
             Δψ[ogc] = ΔC
             return (NoTangent(), Δψ)
         end
-        return n, snorm_pullback_og
+        return n2, snorm_sq_pullback_og
     else
         n2, back_sproduct = pullback(sproduct, ψ, ψ)
         function snorm_sq_pullback_all(Δn2)
@@ -1447,7 +1447,9 @@ end
 ### end
 
 
-
+### TODO: when no gate is applied, a single QR decomposition is enough,
+### or, if truncation is needed, one could do an SVD on the center tensor alone
+### without having to multiply the two together.
 """
 - APPLY VECTOR OF UNITARIES IN A BRICKWORK PATTERN, SWEEPING LEFT TO RIGHT AND BACK
 - Normalize after every SVD.
@@ -2738,6 +2740,7 @@ function get_pauli_mps(ψ::MPO; sites=nothing)
 end
 
 function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPO; sites=nothing)
+    N = length(ψ)
     d = 2
     sites_pauli_mps = isnothing(sites) ? siteinds(d^2, N) : sites 
     usites = [sind[1] for sind in siteinds(ψ,plev=1)]
@@ -2774,7 +2777,7 @@ end
 
 function ChainRulesCore.rrule(::typeof(sre2), arrU::Vector{<:AbstractMatrix}, ψ::MPO, alg::Symbol; trunc_bw = NamedTuple(), trunc_product = NamedTuple())
     N = length(ψ)
-    (ψf,), apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, ψ; normalize=false, trunc=trunc_bw), arrU, ψ)
+    (ψf,), apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, psi; normalize=false, trunc=trunc_bw), arrU, ψ)
     Pψ, get_pauli_mps_pullback = pullback(get_pauli_mps, ψf)
     W, MPO_back = pullback(MPO, Pψ)
     (P2,), product_back = pullback((mpo, psi) -> product(mpo, psi, alg; trunc=trunc_product), W, Pψ)
