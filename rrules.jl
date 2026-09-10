@@ -95,41 +95,41 @@ anti-hermitian part of `U' * ΔU + Vᴴ * ΔVᴴ'`, restricted to rows `i` and c
 which `abs(S[i] - S[j]) < degeneracy_atol`, is not small compared to `gauge_atol`.
 """
 function svd_trunc_pullback!(
-        ΔA::AbstractMatrix, A, USVᴴ, ΔUSVᴴ;
-        rank_atol::Real = 0,
-        degeneracy_atol::Real = default_pullback_rank_atol(USVᴴ[2]),
+        ΔA::AbstractMatrix, UsVᴴfull, p::Integer, ΔUSVᴴ;
+        degeneracy_atol::Real = default_pullback_rank_atol(Diagonal(view(UsVᴴfull[2], 1:p))),
         gauge_atol::Real = default_pullback_gauge_atol(ΔUSVᴴ[1], ΔUSVᴴ[3])
     )
-
-    # Extract the SVD components
-    U, Smat, Vᴴ = USVᴴ
-    m, n = size(U, 1), size(Vᴴ, 2)
+    Uf, sf, Vfdg = UsVᴴfull
+    m, n = size(Uf, 1), size(Vfdg, 2)
     (m, n) == size(ΔA) || throw(DimensionMismatch())
-    p = size(U, 2)
-    p == size(Vᴴ, 1) || throw(DimensionMismatch())
-    S = diagview(Smat)
-    p == length(S) || throw(DimensionMismatch())
+    r = length(sf); q = r - p
+
+    U     = view(Uf, :, 1:p)
+    S     = view(sf, 1:p)
+    Vᴴ    = view(Vfdg, 1:p, :)
+    Udis  = view(Uf, :, (p+1):r)
+    σ     = view(sf, (p+1):r)
+    Vdisᴴ = view(Vfdg, (p+1):r, :)
 
     # Extract and check the cotangents
     ΔU, ΔSmat, ΔVᴴ = ΔUSVᴴ
-    UΔU = fill!(similar(U, (p, p)), 0)
-    VΔV = fill!(similar(Vᴴ, (p, p)), 0)
+    UΔU = fill!(similar(Uf, (p, p)), 0)
+    VΔV = fill!(similar(Vfdg, (p, p)), 0)
     if !iszerotangent(ΔU)
         (m, p) == size(ΔU) || throw(DimensionMismatch())
         mul!(UΔU, U', ΔU)
     end
+    UΔU_keep = copy(UΔU)   # needed when m > r; must be taken BEFORE the projection below
     if !iszerotangent(ΔVᴴ)
         (p, n) == size(ΔVᴴ) || throw(DimensionMismatch())
         mul!(VΔV, Vᴴ, ΔVᴴ')
-        # ΔVᴴ -= VΔVp' * Vᴴr but one less allocation without overwriting ΔVᴴ
         ΔVᴴ = mul!(copy(ΔVᴴ), VΔV', Vᴴ, -1, 1)
     end
 
-    # Project onto antihermitian part; hermitian part outside of Grassmann tangent space
     aUΔU = project_antihermitian!(UΔU)
     aVΔV = project_antihermitian!(VΔV)
 
-    # check whether cotangents arise from gauge-invariance objective function
+    # gauge check within the kept block
     mask = abs.(S' .- S) .< degeneracy_atol
     Δgauge = norm(view(aUΔU, mask) + view(aVΔV, mask), Inf)
     Δgauge ≤ gauge_atol ||
@@ -142,51 +142,62 @@ function svd_trunc_pullback!(
         p == length(ΔS) || throw(DimensionMismatch())
         diagview(UdΔAV) .+= real.(ΔS)
     end
-    ΔA = mul!(ΔA, U, UdΔAV * Vᴴ, 1, 1) # add the contribution to ΔA
+    ΔA = mul!(ΔA, U, UdΔAV * Vᴴ, 1, 1)
 
-    # add contribution from orthogonal complement
-    Ũ = qr_null(U)
-    Ṽᴴ = lq_null(Vᴴ)
-    m̃ = m - p
-    ñ = n - p
-    Ã = Ũ' * A * Ṽᴴ'
-    ÃÃ = similar(A, (m̃ + ñ, m̃ + ñ))
-    fill!(ÃÃ, 0)
-    view(ÃÃ, (1:m̃), m̃ .+ (1:ñ)) .= Ã
-    view(ÃÃ, m̃ .+ (1:ñ), 1:m̃) .= Ã'
-
-    rhs = similar(Ũ, (m̃ + ñ, p))
-    if !iszerotangent(ΔU)
-        mul!(view(rhs, 1:m̃, :), Ũ', ΔU)
-    else
-        fill!(view(rhs, 1:m̃, :), 0)
+    # kept–discarded block (analytic; replaces qr_null/lq_null/Ã/linsolve)
+    rX = fill!(similar(Uf, (q, p)), 0)
+    rY = fill!(similar(Uf, (q, p)), 0)
+    if q > 0
+        iszerotangent(ΔU)  || mul!(rX, Udis', ΔU)
+        iszerotangent(ΔVᴴ) || mul!(rY, Vdisᴴ, ΔVᴴ')
+        Gm = inv_safe.(S' .- σ, degeneracy_atol)   # guarded: the singular factor
+        Gp = inv_safe.(S' .+ σ, degeneracy_atol)
+        Pc = (rX .+ rY) .* Gm
+        Mc = (rX .- rY) .* Gp
+        ΔA = mul!(ΔA, Udis, ((Pc .+ Mc) ./ 2) * Vᴴ, 1, 1)
+        ΔA = mul!(ΔA, U, ((Pc .- Mc) ./ 2)' * Vdisᴴ, 1, 1)
+        if σ[1] > degeneracy_atol && S[p] - σ[1] ≤ degeneracy_atol
+            @warn "truncation cut inside a degenerate cluster: gap = $(S[p] - σ[1]), σ₁ = $(σ[1])"
+        end
     end
-    if !iszerotangent(ΔVᴴ)
-        mul!(view(rhs, m̃ .+ (1:ñ), :), Ṽᴴ, ΔVᴴ')
-    else
-        fill!(view(rhs, m̃ .+ (1:ñ), :), 0)
-    end
-    #XY = sylvester(ÃÃ, -Smat, rhs)     # INSTEAD WE USE KrilovKit LINSOLVE
-    # replace XY = sylvester(ÃÃ, -Smat, rhs) with linsolve
-    Smat⁻¹ = diagm(inv_safe.(S, degeneracy_atol))
-    f(xy) = ÃÃ * xy * Smat⁻¹ - xy
-    XY₀ = zeros(KrylovKit.scalartype(ÃÃ), size(ÃÃ, 2), size(Smat⁻¹, 1))
-    XY, info = linsolve(f, -rhs * Smat⁻¹, XY₀; maxiter=100)
 
-    X = view(XY, 1:m̃, :)
-    Y = view(XY, m̃ .+ (1:ñ), :)
-    ΔA = mul!(ΔA, Ũ, X * Vᴴ, 1, 1)
-    ΔA = mul!(ΔA, U, Y' * Ṽᴴ, 1, 1)
+    # directions outside the compact SVD (σ̃ = 0), only when M is rectangular
+    s⁻¹ = inv_safe.(S, degeneracy_atol)
+    if m > r && !iszerotangent(ΔU)
+        ΔU⊥ = ΔU - U * UΔU_keep
+        q > 0 && (ΔU⊥ .-= Udis * rX)
+        ΔA = mul!(ΔA, ΔU⊥ .* s⁻¹', Vᴴ, 1, 1)
+    end
+    if n > r && !iszerotangent(ΔVᴴ)
+        ΔVᴴ⊥ = q > 0 ? ΔVᴴ - rY' * Vdisᴴ : copy(ΔVᴴ)
+        ΔA = mul!(ΔA, U, s⁻¹ .* ΔVᴴ⊥, 1, 1)
+    end
     return ΔA
 end
 
+
+using MatrixAlgebraKit: TruncationStrategy, NoTruncation, notrunc, findtruncated
+
+_as_strategy(t::TruncationStrategy) = t
+_as_strategy(::Nothing) = notrunc()
+_as_strategy(t::NamedTuple) = isempty(t) ? notrunc() : TruncationStrategy(; t...)
+
+"Number of leading values kept by `strategy`, normalizing whatever `findtruncated` returns."
+function _keptrank(sf::AbstractVector, strategy)
+    ind = findtruncated(sf, strategy)
+    ind isa Colon && return length(sf)          # NoTruncation keeps everything
+    idx = ind isa AbstractVector{Bool} ? findall(ind) : sort!(collect(Int, ind))
+    isempty(idx) && return 0
+    idx == 1:length(idx) ||
+        error("this pullback requires the kept values to be the leading 1:p, got $idx")
+    return length(idx)
+end
 
 
 
 ### HELPER TAPE STRUCT FOR SVDCONTRACT, THE SUBROUTINE WHICH IS PRESENT
 ### IN ALL THE FUNCTIONS THAT REQUIRE TRUNCATION
 struct SVDcontractTape
-    # ITensor data
     move_ogc::Symbol
     normalize::Bool
     tensors::Vector{ITensor}
@@ -194,11 +205,12 @@ struct SVDcontractTape
     cL::ITensor
     cR::ITensor
     bondind::Index
-    # SVD data
-    M::Matrix{ComplexF64}
-    U::Matrix{ComplexF64}
-    S::Diagonal{Float64, Vector{Float64}}
-    Vdg::Matrix{ComplexF64}
+    # SVD data — full compact factors, kept rank p
+    msize::Tuple{Int,Int}
+    Uf::Matrix{ComplexF64}      # m × r,  r = min(m,n)
+    sf::Vector{Float64}         # length r
+    Vfdg::Matrix{ComplexF64}    # r × n
+    p::Int                      # kept rank
     Snorm::Float64
 end
    
@@ -206,7 +218,7 @@ end
 "Contracts all the tensors in a Vector{ITensor} in order
 and computes a truncated SVD of the result with the left indices specified by linds.
 Also returns truncation error."
-function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_ogc=:right, normalize=false, kwargs...)
+function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_ogc=:right, normalize=false, trunc=NamedTuple())
     n = length(tensors)
     tensors = copy(tensors)
     prods = Array{ITensor, 1}(undef, n)
@@ -229,7 +241,14 @@ function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_og
     #        @show diag(S)
     #    end 
     #end
-    U, S, Vdg, err = svd_trunc(M; kwargs...)
+
+    # Actual SVD
+    Uf, Sf, Vfdg = svd_compact(M)
+    sf = diagview(Sf)
+    p = _keptrank(sf, _as_strategy(trunc))
+    U = Uf[:, 1:p];   S = Diagonal(sf[1:p]);   Vdg = Vfdg[1:p, :]
+    err = norm(view(sf, (p+1):length(sf)))
+
     Snorm = norm(S)
     if normalize
         S /= Snorm
@@ -245,42 +264,49 @@ function SVDcontract(tensors::Vector{<:ITensor}, linds::Vector{<:Index}; move_og
     MR_ten = ITensor(MR, bondind, cRind)
     MR_ten *= dag(cR)
 
-    out = ((ML_ten, MR_ten), err)
-    tape = SVDcontractTape(move_ogc, normalize, tensors, prods, cL, cR, bondind, M, U, S, Vdg, Snorm)
+    out = ((ML_ten, MR_ten), Snorm, err)
+    tape = SVDcontractTape(move_ogc, normalize, tensors, prods, cL, cR, bondind, size(M), Uf, sf, Vfdg, p, Snorm)
 
     return out, tape
 end
 
 
-function SVDcontract_pullback(ΔMf, tape::SVDcontractTape)
+function SVDcontract_pullback(ΔMf, ΔSnorm, tape::SVDcontractTape)
     ΔML_ten, ΔMR_ten = ΔMf
-    (; move_ogc, normalize, tensors, prods, cL, cR, bondind, M, U, S, Vdg, Snorm) = tape
+    (; move_ogc, normalize, tensors, prods, cL, cR, bondind, msize, Uf, sf, Vfdg, p, Snorm) = tape
+    U = view(Uf, :, 1:p); Vdg = view(Vfdg, 1:p, :)
+    S  = Diagonal(sf[1:p])                    # unnormalized, as computed by svd_compact
+    Sn = normalize ? S / Snorm : S            # what the forward pass actually returned
 
-    ΔML_ten *= cL
-    ΔMR_ten *= cR
     cLind = combinedind(cL); cRind = combinedind(cR);
 
-    ΔML = Matrix{ComplexF64}(ΔML_ten, cLind, bondind)
-    ΔMR = Matrix{ComplexF64}(ΔMR_ten, bondind, cRind)
+    ΔML = iszero(ΔML_ten) ? zeros(ComplexF64, msize[1], p) :
+          Matrix{ComplexF64}(ΔML_ten * cL, cLind, bondind)
+    ΔMR = iszero(ΔMR_ten) ? zeros(ComplexF64, p, msize[2]) :
+          Matrix{ComplexF64}(ΔMR_ten * cR, bondind, cRind)
 
     local ΔU, ΔS, ΔVdg
     if move_ogc==:right
-        ΔU = ΔML 
+        ΔU = ΔML
         ΔS = Diagonal(diag(ΔMR*Vdg'))
-        ΔVdg = S'*ΔMR
+        ΔVdg = Sn'*ΔMR
     else
-        ΔU = ΔML*S'
+        ΔU = ΔML*Sn'
         ΔS = Diagonal(diag(U'*ΔML))
         ΔVdg = ΔMR
     end
 
     if normalize
-        ΔS = ΔS/Snorm - S*dot(S, ΔS)/Snorm
-        S *= Snorm
+        ΔS = ΔS/Snorm - Sn*real(dot(Sn, ΔS))/Snorm
     end
 
-    ΔM = zero(M)
-    svd_trunc_pullback!(ΔM, M, (U, S, Vdg), (ΔU, ΔS, ΔVdg), gauge_atol = 1e-8)
+    # contribution from returning Snorm = norm(S₀).
+    if !isnothing(ΔSnorm) && !iszero(ΔSnorm)
+        ΔS += ΔSnorm * Diagonal(diag(S)) / Snorm
+    end
+
+    ΔM = fill!(similar(Uf, msize), 0)
+    svd_trunc_pullback!(ΔM, (Uf, sf, Vfdg), p, (ΔU, ΔS, ΔVdg); gauge_atol = 1e-12)
 
     ΔM_ten = ITensor(ΔM, cLind, cRind)
     ΔM_ten *= dag(cR)
@@ -307,8 +333,8 @@ function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{<:ITensor},
 
     function SVDcontract_pullback_Zygote(Δall)
         Δout, Δtape = Δall
-        ΔMf, Δerr = Δout
-        Δtensors = SVDcontract_pullback(ΔMf, tape)
+        ΔMf, ΔSnorm, Δerr = Δout
+        Δtensors = SVDcontract_pullback(ΔMf, ΔSnorm, tape)
         return (NoTangent(), Δtensors, NoTangent())
     end
     
@@ -585,7 +611,7 @@ end
 ### OVERLAP BETWEEN TWO MPS, TREATING THEM AS VECTORS OF ITENSORS
 
 "Compute the scalar product of two MPS. Same as ITensorMPS.inner, but different pullback."
-function sproduct(ψ::MPS, ϕ::MPS)
+function sproduct(ψ::T, ϕ::T) where {T<:Union{MPS, MPO}}
     N = length(ψ)
     @assert length(ϕ)==N
     @assert siteinds(ψ)==siteinds(ϕ)
@@ -599,7 +625,7 @@ function sproduct(ψ::MPS, ϕ::MPS)
 end
 
 "Compute the scalar product of two MPS. Same as ITensorMPS.inner, but different pullback."
-function ChainRulesCore.rrule(::typeof(sproduct), ψ::MPS, ϕ::MPS)
+function ChainRulesCore.rrule(::typeof(sproduct), ψ::T, ϕ::T) where {T<:Union{MPS, MPO}}
     N = length(ψ)
     @assert length(ϕ)==N
     @assert siteinds(ψ)==siteinds(ϕ)
@@ -724,7 +750,7 @@ function ChainRulesCore.rrule(::typeof(snorm_sq), ψ::MPS)
             Δψ[ogc] = ΔC
             return (NoTangent(), Δψ)
         end
-        return n, snorm_pullback_og
+        return n2, snorm_sq_pullback_og
     else
         n2, back_sproduct = pullback(sproduct, ψ, ψ)
         function snorm_sq_pullback_all(Δn2)
@@ -776,12 +802,13 @@ end
 
 function direct(W::MPO, ψ::MPS)
     N = length(ψ)
+    @assert length(W) == N
 
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
     sites = siteinds(ψ)
     
-    Wψ_vec = (W[:]) .* (ψ[:])
+    Wψ_vec = [W[j] * ψ[j] for j in 1:N]
     
     combs = combiner.(Wlinks, ψlinks)
     combinds = combinedind.(combs)
@@ -804,12 +831,13 @@ end
 
 function ChainRulesCore.rrule(::typeof(direct), W::MPO, ψ::MPS)
     N = length(ψ)
+    @assert length(W) == N
 
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
     sites = siteinds(ψ)
     
-    Wψ_vec = (W[:]) .* (ψ[:])
+    Wψ_vec = [W[j] * ψ[j] for j in 1:N]
     
     combs = combiner.(Wlinks, ψlinks)
     combinds = combinedind.(combs)
@@ -845,46 +873,55 @@ end
 
 ### MULTIPLY MPO WITH MPS WITH ZIP-UP ALGORITHM
 
-function zipup(W::MPO, ψ::MPS; trunc=NamedTuple(), post_factorize_callback = identity)
+function zipup(W::MPO, ψ::MPS; normalize=false, trunc=NamedTuple(), post_factorize_callback = identity)
     N = length(ψ)
     ψ = move_center(ψ, N)
     W = move_center(W, N)
 
-    #trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
 
     errs = Float64[]    # store truncation errors
+    Snorms = Float64[]
     Wψ_vec = Array{ITensor, 1}(undef, N)    # store tensors that make the final mps
     local Lten::ITensor
     for j in N:-1:2    
         linds = [Wlinks[j-1]; ψlinks[j-1]]
         tensors = j<N ? [Lten, ψ[j], W[j]] : [ψ[j], W[j]]
 
-        ((Lten, V), err), _ = SVDcontract(tensors, linds; move_ogc=:left, trunc=trunc)
+        ((Lten, V), Snorm, err), _ = SVDcontract(tensors, linds;
+                                                normalize=normalize,
+                                                move_ogc=:left, 
+                                                trunc=(trunc..., maxrank=maxranks[j-1]))
         push!(errs, err)
+        push!(Snorms, Snorm)
         Wψ_vec[j] = V
     end
-    Wψ_vec[1] = Lten*ψ[1]*W[1]
+    Wψ_vec1 = Lten*ψ[1]*W[1]
+    Wψ_vec1_norm = norm(Wψ_vec1)
+    push!(Snorms, Wψ_vec1_norm)
+    Wψ_vec[1] = normalize ? Wψ_vec1/Wψ_vec1_norm : Wψ_vec1
 
     reverse!(errs)
     post_factorize_callback(errs)
     Wψ = MPS(Wψ_vec)
     set_ortho_lims!(Wψ, 1:1)
-    return Wψ
+    return Wψ, Snorms
 end
 
-function ChainRulesCore.rrule(::typeof(zipup), W::MPO, ψ::MPS; trunc=NamedTuple(), post_factorize_callback = identity)
+function ChainRulesCore.rrule(::typeof(zipup), W::MPO, ψ::MPS; normalize=false, trunc=NamedTuple(), post_factorize_callback = identity)
     N = length(ψ)
     ψ, move_center_back_ψ = Zygote.pullback(move_center, ψ, N)
     W, move_center_back_W = Zygote.pullback(move_center, W, N)
 
-    #trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(W).*linkdims(ψ))
 
     Wlinks = linkinds(W)
     ψlinks = linkinds(ψ)
 
     errs = Float64[]    # store truncation errors
+    Snorms = Float64[]
     Wψ_vec = Array{ITensor, 1}(undef, N)    # store tensors that make the final mps
     tapes = SVDcontractTape[]
     local Lten::ITensor
@@ -892,34 +929,54 @@ function ChainRulesCore.rrule(::typeof(zipup), W::MPO, ψ::MPS; trunc=NamedTuple
         linds = [Wlinks[j-1]; ψlinks[j-1]]
         tensors = j<N ? [Lten, ψ[j], W[j]] : [ψ[j], W[j]]
 
-        ((Lten, V), err), tape_j = SVDcontract(tensors, linds;
+        ((Lten, V), Snorm, err), tape_j = SVDcontract(tensors, linds;
+                                            normalize=normalize,
                                             move_ogc=:left, 
-                                            trunc=trunc)
+                                            trunc=(trunc..., maxrank=maxranks[j-1]))
         push!(errs, err)
+        push!(Snorms, Snorm)
         push!(tapes, tape_j)
         Wψ_vec[j] = V
     end
-    Wψ_vec[1] = Lten*ψ[1]*W[1]
+    Wψ_vec1 = Lten*ψ[1]*W[1]
+    Wψ_vec1_norm = norm(Wψ_vec1)
+    push!(Snorms, Wψ_vec1_norm)
+    Wψ_vec[1] = normalize ? Wψ_vec1/Wψ_vec1_norm : Wψ_vec1
 
+    reverse!(errs)
     post_factorize_callback(errs)
     Wψ = MPS(Wψ_vec)
     set_ortho_lims!(Wψ, 1:1)
 
-    function zipup_pullback(ΔWψ)
+    function zipup_pullback(Δout)
+        ΔWψ, ΔSnorms = Δout
         Δψ_vec = Array{ITensor, 1}(undef, N)
         ΔW_vec = Array{ITensor, 1}(undef, N)
 
-        ΔLten = ΔWψ[1]*dag(ψ[1])*dag(W[1])
-        Δψ_vec[1] = dag(Lten)*ΔWψ[1]*dag(W[1])
-        ΔW_vec[1] = dag(Lten)*dag(ψ[1])*ΔWψ[1]
+        # --- site 1: undo  T = Lten*ψ[1]*W[1];  n = norm(T);  Y = normalize ? T/n : T
+        ΔY1 = ΔWψ[1]
+        Δn1 = ΔSnorms[N]                      # Snorms[N] === Wψ_vec1_norm
+
+        ΔT1 = if normalize
+            Y1 = Wψ_vec[1]                    # == Wψ_vec1 / Wψ_vec1_norm
+            (ΔY1 - real(dot(Y1, ΔY1))*Y1)/Wψ_vec1_norm + Δn1*Y1
+        else
+            ΔY1 + (Δn1/Wψ_vec1_norm)*Wψ_vec1
+        end
+
+        ΔLten = ΔT1*dag(ψ[1])*dag(W[1])
+        Δψ_vec[1] = dag(Lten)*ΔT1*dag(W[1])
+        ΔW_vec[1] = dag(Lten)*dag(ψ[1])*ΔT1
 
         for j in 2:N    
             ΔV = ΔWψ[j]
             ΔMf = (ΔLten, ΔV)
+            ΔSnorm = ΔSnorms[N-j+1]
+            tape_j = tapes[N-j+1]
             if j<N
-                (ΔLten, Δψj, ΔWj) = SVDcontract_pullback(ΔMf, tapes[N-j+1])
+                (ΔLten, Δψj, ΔWj) = SVDcontract_pullback(ΔMf, ΔSnorm, tape_j)
             else
-                (Δψj, ΔWj) = SVDcontract_pullback(ΔMf, tapes[N-j+1])
+                (Δψj, ΔWj) = SVDcontract_pullback(ΔMf, ΔSnorm, tape_j)
             end
             Δψ_vec[j] = Δψj
             ΔW_vec[j] = ΔWj
@@ -930,13 +987,13 @@ function ChainRulesCore.rrule(::typeof(zipup), W::MPO, ψ::MPS; trunc=NamedTuple
         return (NoTangent(), ΔW_vec, Δψ_vec)
     end
 
-    return Wψ, zipup_pullback
+    return (Wψ, Snorms), zipup_pullback
 end
 
 
 function product(W::MPO, ψ::MPS, alg::Symbol; kwargs...)
     if alg == :direct
-        return direct(W, ψ)
+        return (direct(W, ψ),)
     elseif alg == :zipup
         return zipup(W, ψ; kwargs...)
     else
@@ -947,7 +1004,7 @@ end
 
 ### ORTHOGONALIZE WITH TRUNCATION
 
-function move_center(ψ::T, b::Int; trunc=NamedTuple(), normalize=false, post_factorize_callback=identity) where {T<:Union{MPS, MPO}}
+function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post_factorize_callback=identity) where {T<:Union{MPS, MPO}}
     N = length(ψ)
     cog = only(ortho_lims(ψ)) #current orthogonality center
     @assert 1 <= cog <= N
@@ -959,7 +1016,7 @@ function move_center(ψ::T, b::Int; trunc=NamedTuple(), normalize=false, post_fa
     to_right = b>cog  # left-to-right mode
 
     # Preparing the maxranks for svd trunc
-    #trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
     
     sites = siteinds(ψ)
     links = linkinds(ψ)
@@ -979,10 +1036,11 @@ function move_center(ψ::T, b::Int; trunc=NamedTuple(), normalize=false, post_fa
                 cog==1 ? [sites[j];] : [sites[j]; links[cog-1]]
             end
             tensors = [WLten, WRten]
-            ((W1, W2), err), _ = SVDcontract(tensors, linds; 
+            
+            ((W1, W2), Snorm, err), _ = SVDcontract(tensors, linds; 
                                     move_ogc=:right,
                                     normalize=normalize,
-                                    trunc=trunc)
+                                    trunc=(trunc..., maxrank=maxranks[j]))
             push!(Ulinkinds, commonind(W1, W2))
             push!(errs, err)
 
@@ -1001,10 +1059,10 @@ function move_center(ψ::T, b::Int; trunc=NamedTuple(), normalize=false, post_fa
 
             linds = j > 1 ? [sites[j]; links[j-1]] : [sites[j];]
             tensors = [WLten, WRten]
-            ((W1, W2), err), _ = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), _ = SVDcontract(tensors, linds; 
                                     move_ogc=:left,
                                     normalize=normalize,
-                                    trunc=trunc)
+                                    trunc=(trunc..., maxrank=maxranks[j]))
             push!(errs, err)
 
             Rten_new = W1
@@ -1022,7 +1080,7 @@ function move_center(ψ::T, b::Int; trunc=NamedTuple(), normalize=false, post_fa
     return ψf
 end
 
-function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedTuple(), normalize=false, post_factorize_callback=identity) where {T<:Union{MPS, MPO}}
+function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post_factorize_callback=identity) where {T<:Union{MPS, MPO}}
     N = length(ψ)
     cog = only(ortho_lims(ψ)) #current orthogonality center
     @assert 1 <= cog <= N
@@ -1034,7 +1092,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedT
     to_right = b>cog  # left-to-right mode
 
     # Preparing the maxranks for svd trunc
-    #trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
+    trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
 
     sites = siteinds(ψ)
     links = linkinds(ψ)
@@ -1056,10 +1114,10 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedT
             end
             tensors = [WLten, WRten]
 
-            ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
                                         move_ogc=:right,
                                         normalize=normalize,
-                                        trunc=trunc)
+                                        trunc=(trunc..., maxrank=maxranks[j]))
             push!(tapes, tape_j)
             push!(Ulinkinds, commonind(W1, W2))
             push!(errs, err)
@@ -1080,10 +1138,10 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedT
             linds = j > 1 ? [sites[j]; links[j-1]] : [sites[j];]
             tensors = [WLten, WRten]
 
-            ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
                                         move_ogc=:left,
                                         normalize=normalize,
-                                        trunc=trunc)
+                                        trunc=(trunc..., maxrank=maxranks[j]))
             push!(tapes, tape_j)
             push!(errs, err)
 
@@ -1110,7 +1168,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedT
                 ΔW2 = ΔR_new
                 ΔMf = (ΔW1, ΔW2)
 
-                (ΔWL, ΔWR) = SVDcontract_pullback(ΔMf, tapes[j-cog+1])  # start from the last
+                (ΔWL, ΔWR) = SVDcontract_pullback(ΔMf, ZeroTangent(), tapes[j-cog+1])  # start from the last
 
                 Δψcache[j-cog+2] = ΔWR
                 ΔR_new = ΔWL
@@ -1125,7 +1183,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedT
                 ΔW2 = Δψf[j+1]
                 ΔMf = (ΔW1, ΔW2)
                 
-                (ΔWL, ΔWR) = SVDcontract_pullback(ΔMf, tapes[cog-j])
+                (ΔWL, ΔWR) = SVDcontract_pullback(ΔMf, ZeroTangent(), tapes[cog-j])
                 # start from the last again, since pullbacks are appended
 
                 Δψcache[j-b+1] = ΔWL
@@ -1141,178 +1199,6 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=NamedT
     end
 
     return ψf, move_center_pullback
-end
-
-
-### APPLY VECTOR OF UNITARIES IN A BRICKWORK PATTERN, SWEEPING LEFT TO RIGHT AND BACK
-
-function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), normalize=true, post_factorize_callback=identity)
-    N = length(ψ)
-    @assert shift==0 || shift==1
-    @assert length(Uarray)>0
-
-    # Preparing the maxranks for svd trunc
-    #trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
-    strat = to_strategy(trunc)
-    if !(strat isa MatrixAlgebraKit.NoTruncation)
-        strat = truncdegen(strat; atol=1e-12)
-    end
-    
-    # by default to_right == true, meaning we sweep from left to right
-    ψ = move_center(ψ, to_right ? 1 : N)
-
-    sites = siteinds(ψ)
-    ψfinal = copy(ψ)
-    errs = Float64[]
-    i = 1; nU = length(Uarray)
-    current_layer_odd = true
-    local lastj
-    while i<=nU
-        jvals = to_right ? (1:N-1) : (N-1:-1:1)
-        
-        for j in jvals
-            end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
-            lastj = j
-            WLten, WRten = ψfinal[j:j+1]
-
-            if iseven(j+shift+current_layer_odd)
-                Uten = ITensor(Uarray[i], sites[j]', sites[j+1]', sites[j], sites[j+1])
-                linds = j > 1 ? [sites[j]'; commonind(ψfinal[j-1], WLten)] : [sites[j]';]
-                tensors = [WLten, WRten, Uten]
-                i += 1
-            else
-                linds = j > 1 ? [sites[j]; commonind(ψfinal[j-1], WLten)] : [sites[j];]
-                tensors = [WLten, WRten]
-            end
-
-            ((W1, W2), err), _ = SVDcontract(tensors, linds; 
-                                    move_ogc = (to_right ? :right : :left), 
-                                    normalize = normalize,
-                                    trunc = strat)
-            push!(errs, err)
-            W1 = noprime(W1, tags="Site")
-            W2 = noprime(W2, tags="Site")
-
-            ψfinal[j] = W1
-            ψfinal[j+1] = W2
-            i>nU && break # before to_right changes
-            if end_of_sweep
-                # this has to be here, because we want to_right to remain as it is
-                # if the endpoint of the sweep is reached exactly at i==nU
-                to_right = !to_right    
-                current_layer_odd = !current_layer_odd
-            end
-        end
-    end
-    post_factorize_callback(errs)
-    final_ogc = to_right ? lastj+1 : lastj
-    set_ortho_lims!(ψfinal, final_ogc:final_ogc)
-    return ψfinal
-end
-
-function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), normalize=true, post_factorize_callback=identity)
-    N = length(ψ)
-    @assert shift==0 || shift==1
-    @assert length(Uarray)>0
-
-    ψ, move_center_back = Zygote.pullback(move_center, ψ, to_right ? 1 : N)
-
-    # Preparing the maxranks for svd trunc
-    #trunc, maxranks = adapt_truncarg(trunc, [min(2^j, 2^(N-j)) for j in 1:N])
-    strat = to_strategy(trunc)
-    if !(strat isa MatrixAlgebraKit.NoTruncation)
-        strat = truncdegen(strat; atol=1e-12)
-    end
-    
-    sites = siteinds(ψ)
-    ψfinal = copy(ψ)
-    errs = Float64[]
-    i = 1; nU = length(Uarray)
-    current_layer_odd = true
-    tapes = SVDcontractTape[]  # store intermediate data for the pullback
-    local lastj      # store last j reached
-    while i<=nU
-        jvals = to_right ? (1:N-1) : (N-1:-1:1)
-
-        for j in jvals
-            end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
-            lastj = j
-            WLten, WRten = ψfinal[j:j+1]
-
-            if iseven(j+shift+current_layer_odd)
-                Uten = ITensor(Uarray[i], sites[j]', sites[j+1]', sites[j], sites[j+1])
-                linds = j > 1 ? [sites[j]'; commonind(ψfinal[j-1], WLten)] : [sites[j]';]
-                tensors = [WLten, WRten, Uten]
-                i += 1
-            else
-                linds = j > 1 ? [sites[j]; commonind(ψfinal[j-1], WLten)] : [sites[j];]
-                tensors = [WLten, WRten]
-            end
-
-            ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
-                                                move_ogc = (to_right ? :right : :left),
-                                                normalize = normalize,
-                                                trunc = strat)
-            push!(tapes, tape_j)
-            push!(errs, err)
-            W1 = noprime(W1, tags="Site")
-            W2 = noprime(W2, tags="Site")
-
-            ψfinal[j] = W1
-            ψfinal[j+1] = W2
-            i>nU && break # before to_right changes
-            if end_of_sweep
-                # this has to be here, because we want to_right to remain as it is
-                # if the endpoint of the sweep is reached exactly at i==nU
-                to_right = !to_right
-                current_layer_odd = !current_layer_odd
-            end
-        end
-    end
-    post_factorize_callback(errs)
-    final_ogc = to_right ? lastj+1 : lastj
-    set_ortho_lims!(ψfinal, final_ogc:final_ogc)
-
-    function apply_brickwork_pullback(Δψfinal)
-
-        Δψ = copy(Δψfinal)
-        ΔUarray = [zeros(ComplexF64, size(U)) for U in Uarray]
-        i = nU; pb_n = length(tapes);
-        while i>=1
-            jvals = to_right ? (lastj:-1:1) : (lastj:N-1) 
-            for j in jvals
-                ΔW1 = Δψ[j]
-                ΔW2 = Δψ[j+1]
-
-                if iseven(j+shift+current_layer_odd)
-                    ΔW1 = prime(ΔW1, tags="Site")
-                    ΔW2 = prime(ΔW2, tags="Site")
-                    ΔMf = (ΔW1, ΔW2)
-
-                    (ΔWLten, ΔWRten, ΔUten) = SVDcontract_pullback(ΔMf, tapes[pb_n])  # start from the last
-
-                    ΔU = Array{ComplexF64}(ΔUten, sites[j]', sites[j+1]', sites[j], sites[j+1])
-                    ΔUarray[i] = reshape(ΔU, (4,4))
-                    i -= 1
-                else
-                    ΔMf = (ΔW1, ΔW2)
-                    (ΔWLten, ΔWRten) = SVDcontract_pullback(ΔMf, tapes[pb_n])
-                end
-
-                pb_n -= 1
-                Δψ[j] = ΔWLten
-                Δψ[j+1] = ΔWRten
-            end
-            lastj = to_right ? 1 : N-1
-            to_right = !to_right
-            current_layer_odd = !current_layer_odd
-        end
-
-        (Δψ,) = move_center_back(Δψ)
-        # note it's a VECTOR, not an MPS, since it will NOT be orthogonalized in general
-        return (NoTangent(), ΔUarray, Δψ)
-    end
-    return ψfinal, apply_brickwork_pullback
 end
 
 
@@ -1341,13 +1227,13 @@ TODO: custom rrule, safeinv
 #    return An, logn
 #end
 
-function normalize_logn!(A::ITensor)
+function normalize_logn(A::ITensor)
     n = norm(A)
     An = A/n
     return An, log(n)
 end
 
-function ChainRulesCore.rrule(::typeof(normalize_logn!), A::ITensor)
+function ChainRulesCore.rrule(::typeof(normalize_logn), A::ITensor)
     n = norm(A)
     An = A/n
     logn = log(n)
@@ -1367,12 +1253,214 @@ function ChainRulesCore.rrule(::typeof(normalize_logn!), A::ITensor)
     return (An, logn), pullback
 end
 
+### """
+### - APPLY VECTOR OF UNITARIES IN A BRICKWORK PATTERN, SWEEPING LEFT TO RIGHT AND BACK
+### - Normalize after every SVD.
+### - return normalized state, and logs = log(s) where s is the norm
+### - TO BE DEPRECATED SOON, ALL APPLY_BRICKWORK WILL BE UNIFIED INTO A SINGLE ONE
+### """
+### function apply_brickwork_normalize(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), post_factorize_callback=identity)
+###     N = length(ψ)
+###     @assert shift==0 || shift==1
+###     @assert length(Uarray)>0
+###   
+###     ψ = move_center(ψ, to_right ? 1 + shift : N)
+### 
+###     sites = siteinds(ψ)
+###     ψfinal = copy(ψ)
+###     errs = Float64[]
+###     i = 1; nU = length(Uarray)
+###     lognorm_factors = Float64[]
+###     current_layer_odd = true
+###     local lastj
+###     while i<=nU
+###         jvals = to_right ? (1:N-1) : (N-1:-1:1)
+###         
+###         for j in jvals
+###             end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
+###             lastj = j
+###             WLten, WRten = ψfinal[j:j+1]
+### 
+###             if iseven(j+shift+current_layer_odd)
+###                 Uten = ITensor(Uarray[i], sites[j]', sites[j+1]', sites[j], sites[j+1])
+###                 linds = j > 1 ? [sites[j]'; commonind(ψfinal[j-1], WLten)] : [sites[j]';]
+###                 tensors = [WLten, WRten, Uten]
+###                 i += 1
+###             else
+###                 linds = j > 1 ? [sites[j]; commonind(ψfinal[j-1], WLten)] : [sites[j];]
+###                 tensors = [WLten, WRten]
+###             end
+###             move_ogc = (to_right ? :right : :left)
+###             ((W1, W2), err), tape = SVDcontract(tensors, linds; 
+###                                     move_ogc = move_ogc, 
+###                                     normalize = false,
+###                                     trunc = trunc)
+### 
+###             W1 = noprime(W1, tags="Site")
+###             W2 = noprime(W2, tags="Site")
+###             if move_ogc == :right
+###                 W2, logn = normalize_logn(W2)
+###             else
+###                 W1, logn = normalize_logn(W1)
+###             end
+### 
+###             push!(lognorm_factors,logn)
+###             push!(errs, err)
+### 
+###             ψfinal[j] = W1
+###             ψfinal[j+1] = W2
+###             i>nU && break # before to_right changes
+###             if end_of_sweep
+###                 # this has to be here, because we want to_right to remain as it is
+###                 # if the endpoint of the sweep is reached exactly at i==nU
+###                 to_right = !to_right
+###                 current_layer_odd = !current_layer_odd
+###             end
+###         end
+###     end
+###     post_factorize_callback(errs)
+###     final_ogc = to_right ? lastj+1 : lastj
+###     set_ortho_lims!(ψfinal, final_ogc:final_ogc)
+###     return ψfinal, lognorm_factors
+### end
+### 
+### function ChainRulesCore.rrule(::typeof(apply_brickwork_normalize), Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), post_factorize_callback=identity)
+###     N = length(ψ)
+###     @assert shift==0 || shift==1
+###     @assert length(Uarray)>0
+### 
+###     ψ, move_center_back = Zygote.pullback(move_center, ψ, to_right ? 1 +shift : N)
+### 
+###     # Preparing the maxranks for svd trunc
+###     d_loc = space(siteind(ψ,1))
+### 
+###     sites = siteinds(ψ)
+###     ψfinal = copy(ψ)
+###     errs = Float64[]
+###     i = 1; nU = length(Uarray)
+###     current_layer_odd = true
+###     tapes = SVDcontractTape[]  # store intermediate data for the pullback
+###     local lastj      # store last j reached
+###     lognorm_factors = Float64[]
+###     pull_lognorms = []
+### 
+###     while i<=nU
+###         jvals = to_right ? (1:N-1) : (N-1:-1:1)
+### 
+###         for j in jvals
+###             end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
+###             lastj = j
+###             WLten, WRten = ψfinal[j:j+1]
+### 
+###             if iseven(j+shift+current_layer_odd)
+###                 Uten = ITensor(Uarray[i], sites[j]', sites[j+1]', sites[j], sites[j+1])
+###                 linds = j > 1 ? [sites[j]'; commonind(ψfinal[j-1], WLten)] : [sites[j]';]
+###                 tensors = [WLten, WRten, Uten]
+###                 i += 1
+###             else
+###                 linds = j > 1 ? [sites[j]; commonind(ψfinal[j-1], WLten)] : [sites[j];]
+###                 tensors = [WLten, WRten]
+###             end
+###             move_ogc = (to_right ? :right : :left)
+### 
+###             ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
+###                                                 move_ogc = move_ogc,
+###                                                 normalize = false, 
+###                                                 trunc = trunc)
+### 
+###                                                 
+###             W1 = noprime(W1, tags="Site")
+###             W2 = noprime(W2, tags="Site")
+###             if move_ogc == :right
+###                 (W2, logn), pull_logn = pullback(normalize_logn,W2)
+###             else
+###                 (W1, logn), pull_logn = pullback(normalize_logn,W1)
+###             end
+### 
+###             push!(lognorm_factors,logn)
+###             push!(pull_lognorms,pull_logn)
+### 
+###             push!(tapes, tape_j)
+###             push!(errs, err)
+### 
+###             ψfinal[j] = W1
+###             ψfinal[j+1] = W2
+###             i>nU && break # before to_right changes
+###             if end_of_sweep
+###                 # this has to be here, because we want to_right to remain as it is
+###                 # if the endpoint of the sweep is reached exactly at i==nU
+###                 to_right = !to_right
+###                 current_layer_odd = !current_layer_odd
+###             end
+###         end
+###     end
+###     #logs,pull_sumlogs  = pullback(sum,lognorm_factors)
+### 
+###     post_factorize_callback(errs)
+###     final_ogc = to_right ? lastj+1 : lastj
+###     set_ortho_lims!(ψfinal, final_ogc:final_ogc)
+###  
+###     function apply_brickwork_normalize_pullback(Δout)
+###         Δψfinal, Δlognorm_factors = Δout
+###         Δψ = copy(Δψfinal)
+###         ΔUarray = [zeros(ComplexF64, size(U)) for U in Uarray]
+###         i = nU; pb_n = length(tapes);
+###         while i>=1
+###             jvals = to_right ? (lastj:-1:1) : (lastj:N-1) 
+###             for j in jvals
+###                 ΔW1 = Δψ[j]
+###                 ΔW2 = Δψ[j+1]
+###                 if to_right
+###                     ΔW2, = pull_lognorms[pb_n]((ΔW2, Δlognorm_factors[pb_n]))
+###                 else
+###                     ΔW1, = pull_lognorms[pb_n]((ΔW1, Δlognorm_factors[pb_n]))
+###                 end
+### 
+###                 if iseven(j+shift+current_layer_odd)
+###                     ΔW1 = prime(ΔW1, tags="Site")
+###                     ΔW2 = prime(ΔW2, tags="Site")
+###                     ΔMf = (ΔW1, ΔW2)
+### 
+###                     (ΔWLten, ΔWRten, ΔUten) = SVDcontract_pullback(ΔMf, tapes[pb_n])  # start from the last
+### 
+###                     ΔU = Array{ComplexF64}(ΔUten, sites[j]', sites[j+1]', sites[j], sites[j+1])
+###                     ΔUarray[i] = reshape(ΔU, size(Uarray[1]))
+###                     i -= 1
+###                 else
+###                     ΔMf = (ΔW1, ΔW2)
+###                     (ΔWLten, ΔWRten) = SVDcontract_pullback(ΔMf, tapes[pb_n])
+###                 end
+### 
+###                 pb_n -= 1
+###                 Δψ[j] = ΔWLten
+###                 Δψ[j+1] = ΔWRten
+###             end
+###             lastj = to_right ? 1 : N-1
+###             to_right = !to_right
+###             current_layer_odd = !current_layer_odd
+###         end
+###         (Δψ,) = move_center_back(Δψ)
+###         # note it's a VECTOR, not an MPS, since it will NOT be orthogonalized in general
+###         return (NoTangent(), ΔUarray, Δψ)
+###     end
+###     return (ψfinal, lognorm_factors), apply_brickwork_normalize_pullback
+### end
+
+
+### TODO: when no gate is applied, a single QR decomposition is enough,
+### or, if truncation is needed, one could do an SVD on the center tensor alone
+### without having to multiply the two together.
 """
 - APPLY VECTOR OF UNITARIES IN A BRICKWORK PATTERN, SWEEPING LEFT TO RIGHT AND BACK
 - Normalize after every SVD.
-- return normalizes state, and logs = log(s) where s is the norm
+- returns both the state and the norms after each SVD
 """
-function apply_brickwork_normalize(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), post_factorize_callback=identity)
+function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS;
+                                                shift=0, 
+                                                to_right=true, 
+                                                normalize=true, 
+                                                trunc=NamedTuple(), 
+                                                post_factorize_callback=identity)
     N = length(ψ)
     @assert shift==0 || shift==1
     @assert length(Uarray)>0
@@ -1382,8 +1470,8 @@ function apply_brickwork_normalize(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; sh
     sites = siteinds(ψ)
     ψfinal = copy(ψ)
     errs = Float64[]
+    Snorms = Float64[]
     i = 1; nU = length(Uarray)
-    lognorm_factors = Float64[]
     current_layer_odd = true
     local lastj
     while i<=nU
@@ -1404,21 +1492,15 @@ function apply_brickwork_normalize(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; sh
                 tensors = [WLten, WRten]
             end
             move_ogc = (to_right ? :right : :left)
-            ((W1, W2), err), tape = SVDcontract(tensors, linds; 
-                                    move_ogc = move_ogc, 
-                                    normalize = false,
-                                    trunc = trunc)
+            ((W1, W2), Snorm, err), tape = SVDcontract(tensors, linds; 
+                                        move_ogc = move_ogc, 
+                                        normalize = normalize,
+                                        trunc = trunc)
+            push!(Snorms, Snorm)
+            push!(errs, err)
 
             W1 = noprime(W1, tags="Site")
             W2 = noprime(W2, tags="Site")
-            if move_ogc == :right
-                W2, logn = normalize_logn!(W2)
-            else
-                W1, logn = normalize_logn!(W1)
-            end
-
-            push!(lognorm_factors,logn)
-            push!(errs, err)
 
             ψfinal[j] = W1
             ψfinal[j+1] = W2
@@ -1434,28 +1516,29 @@ function apply_brickwork_normalize(Uarray::Vector{<:AbstractMatrix}, ψ::MPS; sh
     post_factorize_callback(errs)
     final_ogc = to_right ? lastj+1 : lastj
     set_ortho_lims!(ψfinal, final_ogc:final_ogc)
-    return ψfinal, lognorm_factors
+    return ψfinal, Snorms
 end
 
-function ChainRulesCore.rrule(::typeof(apply_brickwork_normalize), Uarray::Vector{<:AbstractMatrix}, ψ::MPS; shift=0, to_right=true, trunc=NamedTuple(), post_factorize_callback=identity)
+function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:AbstractMatrix}, ψ::MPS; 
+                                            shift=0, 
+                                            to_right=true, 
+                                            normalize=true, 
+                                            trunc=NamedTuple(), 
+                                            post_factorize_callback=identity)
     N = length(ψ)
     @assert shift==0 || shift==1
     @assert length(Uarray)>0
 
     ψ, move_center_back = Zygote.pullback(move_center, ψ, to_right ? 1 +shift : N)
 
-    # Preparing the maxranks for svd trunc
-    d_loc = space(siteind(ψ,1))
-
     sites = siteinds(ψ)
     ψfinal = copy(ψ)
     errs = Float64[]
+    Snorms = Float64[]
     i = 1; nU = length(Uarray)
     current_layer_odd = true
     tapes = SVDcontractTape[]  # store intermediate data for the pullback
     local lastj      # store last j reached
-    lognorm_factors = Float64[]
-    pull_lognorms = []
 
     while i<=nU
         jvals = to_right ? (1:N-1) : (N-1:-1:1)
@@ -1476,25 +1559,16 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_normalize), Uarray::Vecto
             end
             move_ogc = (to_right ? :right : :left)
 
-            ((W1, W2), err), tape_j = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
                                                 move_ogc = move_ogc,
-                                                normalize = false, 
+                                                normalize = normalize, 
                                                 trunc = trunc)
-
+            push!(Snorms, Snorm)
+            push!(errs, err)
+            push!(tapes, tape_j)
                                                 
             W1 = noprime(W1, tags="Site")
             W2 = noprime(W2, tags="Site")
-            if move_ogc == :right
-                (W2, logn), pull_logn = pullback(normalize_logn!,W2)
-            else
-                (W1, logn), pull_logn = pullback(normalize_logn!,W1)
-            end
-
-            push!(lognorm_factors,logn)
-            push!(pull_lognorms,pull_logn)
-
-            push!(tapes, tape_j)
-            push!(errs, err)
 
             ψfinal[j] = W1
             ψfinal[j+1] = W2
@@ -1513,8 +1587,8 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_normalize), Uarray::Vecto
     final_ogc = to_right ? lastj+1 : lastj
     set_ortho_lims!(ψfinal, final_ogc:final_ogc)
  
-    function apply_brickwork_normalize_pullback(Δout)
-        Δψfinal, Δlognorm_factors = Δout
+    function apply_brickwork_pullback(Δout)
+        Δψfinal, ΔSnorms = Δout
         Δψ = copy(Δψfinal)
         ΔUarray = [zeros(ComplexF64, size(U)) for U in Uarray]
         i = nU; pb_n = length(tapes);
@@ -1523,25 +1597,21 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_normalize), Uarray::Vecto
             for j in jvals
                 ΔW1 = Δψ[j]
                 ΔW2 = Δψ[j+1]
-                if to_right
-                    ΔW2, = pull_lognorms[pb_n]((ΔW2, Δlognorm_factors[pb_n]))
-                else
-                    ΔW1, = pull_lognorms[pb_n]((ΔW1, Δlognorm_factors[pb_n]))
-                end
+                ΔSnorm = ΔSnorms[pb_n]
 
                 if iseven(j+shift+current_layer_odd)
                     ΔW1 = prime(ΔW1, tags="Site")
                     ΔW2 = prime(ΔW2, tags="Site")
                     ΔMf = (ΔW1, ΔW2)
 
-                    (ΔWLten, ΔWRten, ΔUten) = SVDcontract_pullback(ΔMf, tapes[pb_n])  # start from the last
+                    (ΔWLten, ΔWRten, ΔUten) = SVDcontract_pullback(ΔMf, ΔSnorm, tapes[pb_n])  # start from the last
 
                     ΔU = Array{ComplexF64}(ΔUten, sites[j]', sites[j+1]', sites[j], sites[j+1])
                     ΔUarray[i] = reshape(ΔU, size(Uarray[1]))
                     i -= 1
                 else
                     ΔMf = (ΔW1, ΔW2)
-                    (ΔWLten, ΔWRten) = SVDcontract_pullback(ΔMf, tapes[pb_n])
+                    (ΔWLten, ΔWRten) = SVDcontract_pullback(ΔMf, ΔSnorm, tapes[pb_n])
                 end
 
                 pb_n -= 1
@@ -1556,7 +1626,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_normalize), Uarray::Vecto
         # note it's a VECTOR, not an MPS, since it will NOT be orthogonalized in general
         return (NoTangent(), ΔUarray, Δψ)
     end
-    return (ψfinal, lognorm_factors), apply_brickwork_normalize_pullback
+    return (ψfinal, Snorms), apply_brickwork_pullback
 end
 
 
@@ -1570,6 +1640,10 @@ function get_pauli_mps(ψ::MPS; trunc=NamedTuple(), sites=nothing, post_factoriz
     N = length(ψ)
     ψ = move_center(ψ, 1)
     ψbra, unbra = bra(ψ)
+
+    if !haskey(trunc, :maxrank)
+        trunc = (trunc..., maxrank=maxlinkdim(ψ)^2)     # NEEDED otherwise bond dim goes to 4χ²
+    end
 
     strat = to_strategy(trunc)
     if !(strat isa MatrixAlgebraKit.NoTruncation)
@@ -1595,7 +1669,8 @@ function get_pauli_mps(ψ::MPS; trunc=NamedTuple(), sites=nothing, post_factoriz
         linds = j>1 ? [sites_pauli_mps[j]; commonind(Pψ_vec[j-1], Bp)] : [sites_pauli_mps[j];] 
         tensors = [Bp, ψ[j+1], ψbra[j+1], Pten]
 
-        ((Up, Rp), err), _ = SVDcontract(tensors, linds; 
+        ((Up, Rp), Snorm, err), _ = SVDcontract(tensors, linds;
+                                        normalize=false,
                                         move_ogc=:right, 
                                         trunc=strat)
         push!(errs, err)
@@ -1618,6 +1693,10 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
     N = length(ψ)
     ψ, move_center_back = Zygote.pullback(move_center, ψ, 1)
     ψbra, unbra = bra(ψ)
+
+    if !haskey(trunc, :maxrank)
+        trunc = (trunc..., maxrank=maxlinkdim(ψ)^2)     # NEEDED otherwise bond dim goes to 4χ²
+    end
 
     strat = to_strategy(trunc)
     if !(strat isa MatrixAlgebraKit.NoTruncation)
@@ -1645,7 +1724,8 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
         linds = j>1 ? [sites_pauli_mps[j]; commonind(Pψ_vec[j-1], Bp)] : [sites_pauli_mps[j];] 
         tensors = [Bp, ψ[j+1], ψbra[j+1], Pten]
         
-        ((Up, Rp), err), tape_j = SVDcontract(tensors, linds; 
+        ((Up, Rp), Snorm, err), tape_j = SVDcontract(tensors, linds;
+                                        normalize=false,
                                         move_ogc=:right, 
                                         trunc=strat)
         push!(errs, err)
@@ -1670,7 +1750,7 @@ function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPS; trunc=NamedTuple
             ΔUp = ΔPψ[j]
             ΔMf = (ΔUp, ΔRp)
 
-            (ΔBp, Δψ_jp1, Δψbra_jp1, _) = SVDcontract_pullback(ΔMf, tapes[j])
+            (ΔBp, Δψ_jp1, Δψbra_jp1, _) = SVDcontract_pullback(ΔMf, ZeroTangent(), tapes[j])
             
             Δψ_vec[j+1] = Δψ_jp1 + unbra(Δψbra_jp1)
             ΔRp = ΔBp
@@ -1693,7 +1773,7 @@ function sre2(arrV::Vector{<:AbstractArray}, ogc::Int, alg::Symbol; trunc_pauli 
     ψ = MPS(arrV, ogc)
     Pψ = get_pauli_mps(ψ; trunc = trunc_pauli)
     W = MPO(Pψ)
-    WP = product(W, Pψ, alg; trunc = trunc_product)
+    WP, = product(W, Pψ, alg; trunc = trunc_product)
     m2 = -log2(real(sproduct(WP, WP))) - N
     return m2
 end
@@ -1705,7 +1785,7 @@ function ChainRulesCore.rrule(::typeof(sre2), arrV::Vector{<:AbstractArray}, ogc
     ψ, MPS_back = pullback(MPS, arrV, ogc)
     Pψ, get_pauli_mps_pullback = pullback(psi -> get_pauli_mps(psi; trunc=trunc_pauli), ψ)
     W, MPO_back = pullback(MPO, Pψ)    # at this point Pψ and W have same ortho lims
-    WP, product_back = pullback((mpo, mps) -> product(mpo, mps, alg; trunc=trunc_product), W, Pψ)
+    (WP,), product_back = pullback((mpo, mps) -> product(mpo, mps, alg; trunc=trunc_product), W, Pψ)
     res, sproduct_back = pullback(sproduct, WP, WP)
     
     m2, m2_back = -log2(real(res))-N, Δm2 -> (NoTangent(), -Δm2/(log(2)*real(res)))
@@ -1716,7 +1796,7 @@ function ChainRulesCore.rrule(::typeof(sre2), arrV::Vector{<:AbstractArray}, ogc
         ΔWP_1, ΔWP_2 = sproduct_back(Δres)
         ΔWP = ΔWP_1 .+ ΔWP_2
 
-        ΔW, ΔPψ_1 = product_back(ΔWP)
+        ΔW, ΔPψ_1 = product_back((ΔWP, ZeroTangent()))
         ΔPψ_2 = MPO_back(ΔW)[1]
         ΔPψ = ΔPψ_1 .+ ΔPψ_2
         Δψ = get_pauli_mps_pullback(ΔPψ)[1]
@@ -1728,65 +1808,59 @@ function ChainRulesCore.rrule(::typeof(sre2), arrV::Vector{<:AbstractArray}, ogc
 end
 
 ### SRE2 OF AN MPS ψ
-
-function sre2( ψ::MPS, alg::Symbol; trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
+function sre2(ψ::MPS, alg::Symbol; trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
     N = length(ψ)
-    # ψf = apply_brickwork(arrU, ψ; trunc=trunc_bw)
     Pψ = get_pauli_mps(ψ; trunc=trunc_pauli)
     W = MPO(Pψ)
-    P2 = product(W, Pψ, alg; trunc=trunc_product)
+    P2, = product(W, Pψ, alg; trunc=trunc_product)
     m2 = -log2(real(sproduct(P2, P2))) - N
     return m2
 end
-### SRE2 OF A BRICKWORK CIRCUIT APPLIED ON AN MPS ψ
 
-function sre2(arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
+### SRE2 OF A BRICKWORK CIRCUIT APPLIED ON AN MPS ψ
+function sre2(arrU::Vector{<:AbstractMatrix}, ψ::MPS; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_zipup = NamedTuple())
     N = length(ψ)
-    ψf = apply_brickwork(arrU, ψ; trunc=trunc_bw)
+    ψf, = apply_brickwork(arrU, ψ; normalize=false, trunc=trunc_bw)
     Pψ = get_pauli_mps(ψf; trunc=trunc_pauli)
     W = MPO(Pψ)
-    P2 = product(W, Pψ, alg; trunc=trunc_product)
-    m2 = -log2(real(sproduct(P2, P2))) - N
+    P2, Snorms = zipup(W, Pψ; normalize=true, trunc=trunc_zipup)
+    m2 = -2*sum(log2.(Snorms)) - N
     return m2
 end
 
-
-
-
-function ChainRulesCore.rrule(::typeof(sre2), arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
+function ChainRulesCore.rrule(::typeof(sre2), arrU::Vector{<:AbstractMatrix}, ψ::MPS; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_zipup = NamedTuple())
     N = length(ψ)
-    ψf, apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, ψ; trunc=trunc_bw), arrU, ψ)
+    (ψf,), apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, psi; normalize=false, trunc=trunc_bw), arrU, ψ)
     Pψ, get_pauli_mps_pullback = pullback(psi -> get_pauli_mps(psi; trunc=trunc_pauli), ψf)
     W, MPO_back = pullback(MPO, Pψ)
-    P2, product_back = pullback((mpo, psi) -> product(mpo, psi, alg; trunc=trunc_product), W, Pψ)
-    res, sproduct_back = pullback(sproduct, P2, P2)
-    m2, m2_back = -log2(real(res))-N, Δm2 -> (NoTangent(), -Δm2/(log(2)*real(res)))
+    (P2, Snorms), zipup_back = pullback((mpo, psi) -> zipup(mpo, psi; normalize=true, trunc=trunc_zipup), W, Pψ)
+    m2, m2_back = pullback(Snorms_vec -> -2*sum(log2.(Snorms_vec))-N, Snorms)
 
     function sre2_pullback(Δm2)
-        _, Δres = m2_back(Δm2)
-
-        ΔP2_1, ΔP2_2 = sproduct_back(Δres)
-        ΔP2 = ΔP2_1 .+ ΔP2_2
-        ΔW, ΔPψ_1 = product_back(ΔP2)
+        (ΔSnorms,) = m2_back(Δm2)
+        ΔP2 = [ITensor(inds(P2[j])) for j in 1:N]   # ZeroTangent
+        ΔW, ΔPψ_1 = zipup_back((ΔP2, ΔSnorms))
         (ΔPψ_2,) = MPO_back(ΔW)
         ΔPψ = ΔPψ_1 .+ ΔPψ_2
         (Δψ2,) = get_pauli_mps_pullback(ΔPψ)
 
-        ΔarrU, Δψ = apply_brickwork_back(Δψ2)
+        ΔarrU, Δψ = apply_brickwork_back((Δψ2, ZeroTangent()))
 
-        return (NoTangent(), ΔarrU, NoTangent(), NoTangent())
+        return (NoTangent(), ΔarrU, Δψ)
     end
     return m2, sre2_pullback
 end
+
+
+
 
 ### M_lin
 
 function m_lin(ψ::MPS, alg::Symbol; trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
     N = length(ψ)
-    # ψf = apply_brickwork(arrU, ψ; trunc=trunc_bw)
     Pψ = get_pauli_mps(ψ; trunc=trunc_pauli)
     W = MPO(Pψ)
-    P2 = product(W, Pψ, alg; trunc=trunc_product)
+    P2, = product(W, Pψ, alg; trunc=trunc_product)
     m = 1-real(sproduct(P2, P2))*2^N
     return m
 end
@@ -1795,10 +1869,10 @@ function m_lin(arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = 
     truncerr = Ref(0.0)
     post_factorize_callback(errs) = (truncerr[] += sum(errs))
     N = length(ψ)
-    ψf = apply_brickwork(arrU, ψ; trunc=trunc_bw,post_factorize_callback)
-    Pψ = get_pauli_mps(ψf; trunc=trunc_pauli,post_factorize_callback)
+    ψf, = apply_brickwork(arrU, ψ; trunc=trunc_bw, post_factorize_callback)
+    Pψ = get_pauli_mps(ψf; trunc=trunc_pauli, post_factorize_callback)
     W = MPO(Pψ)
-    P2 = product(W, Pψ, alg; trunc=trunc_product,post_factorize_callback)
+    P2, = product(W, Pψ, alg; trunc=trunc_product, post_factorize_callback)
     m = 1-real(sproduct(P2, P2))*2^N
     err = truncerr[]*(2^N)
     println("truncerr: $err")
@@ -1808,10 +1882,10 @@ end
 
 # function ChainRulesCore.rrule(::typeof(m_lin), arrU::Vector{<:AbstractMatrix}, ψ::MPS, alg::Symbol; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
 #     N = length(ψ)
-#     ψf, apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, ψ; trunc=trunc_bw), arrU, ψ)
+#     (ψf,), apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, ψ; trunc=trunc_bw), arrU, ψ)
 #     Pψ, get_pauli_mps_pullback = pullback(psi -> get_pauli_mps(psi; trunc=trunc_pauli), ψf)
 #     W, MPO_back = pullback(MPO, Pψ)
-#     P2, product_back = pullback((mpo, psi) -> product(mpo, psi, alg; trunc=trunc_product), W, Pψ)
+#     (P2,), product_back = pullback((mpo, psi) -> product(mpo, psi, alg; trunc=trunc_product), W, Pψ)
 #     res, sproduct_back = pullback(sproduct, P2, P2)
 #     m, m_back = 1-real(res)*2^N, Δm -> (NoTangent(), -Δm*2^N)
 
@@ -1820,12 +1894,12 @@ end
 
 #         ΔP2_1, ΔP2_2 = sproduct_back(Δres)
 #         ΔP2 = ΔP2_1 .+ ΔP2_2
-#         ΔW, ΔPψ_1 = product_back(ΔP2)
+#         ΔW, ΔPψ_1 = product_back((ΔP2, ZeroTangent()))
 #         (ΔPψ_2,) = MPO_back(ΔW)
 #         ΔPψ = ΔPψ_1 .+ ΔPψ_2
 #         (Δψ2,) = get_pauli_mps_pullback(ΔPψ)
 
-#         ΔarrU, Δψ = apply_brickwork_back(Δψ2)
+#         ΔarrU, Δψ = apply_brickwork_back((Δψ2, ZeroTangent()))
 
 #         return (NoTangent(), ΔarrU, NoTangent(), NoTangent())
 #     end
@@ -2356,7 +2430,7 @@ function apply_brickwork_variational(Uarray::Vector{<:AbstractMatrix}, ψ::MPS, 
     Uarrs = group(Uarray, N, 2)
     lognorm_factors = Float64[]
     for (batch_no, arr) in enumerate(Uarrs)
-        ψt = apply_brickwork(arr, ψ; normalize=false, 
+        ψt, = apply_brickwork(arr, ψ; normalize=false, 
                                     shift=Int(isodd(compression_depth)),
                                     to_right=iseven(compression_depth) || (isodd(compression_depth) && iseven(batch_no)), 
                                     kwargs...)
@@ -2389,7 +2463,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_variational), Uarray::Vec
                                                 shift=Int(isodd(compression_depth)),
                                                 to_right=iseven(compression_depth) || (isodd(compression_depth) && iseven(batch_no)), 
                                                 kwargs...)
-        ψt, back_brick = pullback(apply_brickwork_local, arr, ψ)
+        (ψt,), back_brick = pullback(apply_brickwork_local, arr, ψ)
         push!(pullback_apply_brickworks, back_brick)
 
         if batch_no < length(Uarrs)
@@ -2433,4 +2507,296 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork_variational), Uarray::Vec
     end
 
     return (ψ, lognorm_factors), apply_brickwork_variational_pullback
+end
+
+
+function density_matrix(ψ::MPS)
+    N = length(ψ)
+    ψ = replace_linkinds(ψ')
+    links = linkinds(ψ)
+
+    ψdag = dag(noprime(replace_linkinds(ψ)))
+    linksdag = linkinds(ψdag)
+
+    combs = [combiner(links[j], linksdag[j]) for j in 1:N-1]
+    combs = [ITensor(1); combs; ITensor(1)]
+
+    rho = MPO([combs[j]*(ψ[j]*ψdag[j])*combs[j+1] for j in 1:N])
+
+    if isortho(ψ)
+        set_ortho_lims!(rho, ortho_lims(ψ))
+    end
+    return rho
+end
+
+
+"""
+- APPLY VECTOR OF UNITARIES IN A BRICKWORK PATTERN TO MPO AS UψU⁺, SWEEPING LEFT TO RIGHT AND BACK
+- Normalize after every SVD.
+- return normalized state and norms of S after each SVD
+"""
+function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPO;
+                                                shift=0, 
+                                                to_right=true, 
+                                                normalize=true, 
+                                                trunc=NamedTuple(), 
+                                                post_factorize_callback=identity)
+    N = length(ψ)
+    @assert shift==0 || shift==1
+    @assert length(Uarray)>0
+  
+    ψ = move_center(ψ, to_right ? 1 + shift : N)
+
+    sites = siteinds(ψ)
+    usites = [sind[1] for sind in siteinds(ψ,plev=1)]
+    dsites = [sind[1] for sind in siteinds(ψ,plev=0)]
+    ψfinal = copy(ψ)
+    errs = Float64[]
+    Snorms = Float64[]
+    i = 1; nU = length(Uarray)
+    current_layer_odd = true
+    local lastj
+    while i<=nU
+        jvals = to_right ? (1:N-1) : (N-1:-1:1)
+        
+        for j in jvals
+            end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
+            lastj = j
+            WLten, WRten = ψfinal[j:j+1]
+
+            if iseven(j+shift+current_layer_odd)
+                Uten = ITensor(Uarray[i], usites[j]'', usites[j+1]'', usites[j], usites[j+1])
+                Udagten = ITensor(Uarray[i]', dsites[j], dsites[j+1], dsites[j]'', dsites[j+1]'')
+                linds = j > 1 ? [sites[j]''; commonind(ψfinal[j-1], WLten)] : [sites[j]'';]
+                tensors = [WLten, WRten, Uten, Udagten]
+                i += 1
+            else
+                linds = j > 1 ? [sites[j]; commonind(ψfinal[j-1], WLten)] : [sites[j];]
+                tensors = [WLten, WRten]
+            end
+            move_ogc = (to_right ? :right : :left)
+            ((W1, W2), Snorm, err), tape = SVDcontract(tensors, linds; 
+                                        move_ogc = move_ogc, 
+                                        normalize = normalize,
+                                        trunc = trunc)
+            push!(Snorms, Snorm)
+            push!(errs, err)
+
+            W1 = replaceprime(W1, 3=>1, 2=>0, tags="Site")
+            W2 = replaceprime(W2, 3=>1, 2=>0, tags="Site")
+
+            ψfinal[j] = W1
+            ψfinal[j+1] = W2
+            i>nU && break # before to_right changes
+            if end_of_sweep
+                # this has to be here, because we want to_right to remain as it is
+                # if the endpoint of the sweep is reached exactly at i==nU
+                to_right = !to_right
+                current_layer_odd = !current_layer_odd
+            end
+        end
+    end
+    post_factorize_callback(errs)
+    final_ogc = to_right ? lastj+1 : lastj
+    set_ortho_lims!(ψfinal, final_ogc:final_ogc)
+    return ψfinal, Snorms
+end
+
+function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:AbstractMatrix}, ψ::MPO; 
+                                            shift=0, 
+                                            to_right=true, 
+                                            normalize=true, 
+                                            trunc=NamedTuple(), 
+                                            post_factorize_callback=identity)
+    N = length(ψ)
+    @assert shift==0 || shift==1
+    @assert length(Uarray)>0
+
+    ψ, move_center_back = Zygote.pullback(move_center, ψ, to_right ? 1 +shift : N)
+
+    sites = siteinds(ψ)
+    usites = [sind[1] for sind in siteinds(ψ,plev=1)]
+    dsites = [sind[1] for sind in siteinds(ψ,plev=0)]
+    ψfinal = copy(ψ)
+    errs = Float64[]
+    Snorms = Float64[]
+    i = 1; nU = length(Uarray)
+    current_layer_odd = true
+    tapes = SVDcontractTape[]  # store intermediate data for the pullback
+    local lastj      # store last j reached
+
+    while i<=nU
+        jvals = to_right ? (1:N-1) : (N-1:-1:1)
+
+        for j in jvals
+            end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
+            lastj = j
+            WLten, WRten = ψfinal[j:j+1]
+
+            if iseven(j+shift+current_layer_odd)
+                Uten = ITensor(Uarray[i], usites[j]'', usites[j+1]'', usites[j], usites[j+1])
+                Udagten = ITensor(Uarray[i]', dsites[j], dsites[j+1], dsites[j]'', dsites[j+1]'')
+                linds = j > 1 ? [sites[j]''; commonind(ψfinal[j-1], WLten)] : [sites[j]'';]
+                tensors = [WLten, WRten, Uten, Udagten]
+                i += 1
+            else
+                linds = j > 1 ? [sites[j]; commonind(ψfinal[j-1], WLten)] : [sites[j];]
+                tensors = [WLten, WRten]
+            end
+            move_ogc = (to_right ? :right : :left)
+
+            ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
+                                                move_ogc = move_ogc,
+                                                normalize = normalize, 
+                                                trunc = trunc)
+            push!(Snorms, Snorm)
+            push!(errs, err)
+            push!(tapes, tape_j)
+                                                
+            W1 = replaceprime(W1, 3=>1, 2=>0, tags="Site")
+            W2 = replaceprime(W2, 3=>1, 2=>0, tags="Site")
+
+            ψfinal[j] = W1
+            ψfinal[j+1] = W2
+            i>nU && break # before to_right changes
+            if end_of_sweep
+                # this has to be here, because we want to_right to remain as it is
+                # if the endpoint of the sweep is reached exactly at i==nU
+                to_right = !to_right
+                current_layer_odd = !current_layer_odd
+            end
+        end
+    end
+
+    post_factorize_callback(errs)
+    final_ogc = to_right ? lastj+1 : lastj
+    set_ortho_lims!(ψfinal, final_ogc:final_ogc)
+ 
+    function apply_brickwork_pullback(Δout)
+        Δψfinal, ΔSnorms = Δout
+        Δψ = copy(Δψfinal)
+        ΔUarray = [zeros(ComplexF64, size(U)) for U in Uarray]
+        i = nU; pb_n = length(tapes);
+        while i>=1
+            jvals = to_right ? (lastj:-1:1) : (lastj:N-1) 
+            for j in jvals
+                ΔW1 = Δψ[j]
+                ΔW2 = Δψ[j+1]
+                ΔSnorm = ΔSnorms[pb_n]
+
+                if iseven(j+shift+current_layer_odd)
+                    ΔW1 = replaceprime(ΔW1, 1=>3, 0=>2, tags="Site")
+                    ΔW2 = replaceprime(ΔW2, 1=>3, 0=>2, tags="Site")
+                    ΔMf = (ΔW1, ΔW2)
+
+                    (ΔWLten, ΔWRten, ΔUten, ΔUdagten) = SVDcontract_pullback(ΔMf, ΔSnorm, tapes[pb_n])  # start from the last
+
+                    ΔU = Array{ComplexF64}(ΔUten, usites[j]'', usites[j+1]'', usites[j], usites[j+1])
+                    ΔUdag = Array{ComplexF64}(ΔUdagten, dsites[j], dsites[j+1], dsites[j]'', dsites[j+1]'')
+                    ΔUarray[i] = reshape(ΔU, size(Uarray[1])) + reshape(ΔUdag, size(Uarray[1]))'
+                    i -= 1
+                else
+                    ΔMf = (ΔW1, ΔW2)
+                    (ΔWLten, ΔWRten) = SVDcontract_pullback(ΔMf, ΔSnorm, tapes[pb_n])
+                end
+
+                pb_n -= 1
+                Δψ[j] = ΔWLten
+                Δψ[j+1] = ΔWRten
+            end
+            lastj = to_right ? 1 : N-1
+            to_right = !to_right
+            current_layer_odd = !current_layer_odd
+        end
+        (Δψ,) = move_center_back(Δψ)
+        # note it's a VECTOR, not an MPS, since it will NOT be orthogonalized in general
+        return (NoTangent(), ΔUarray, Δψ)
+    end
+    return (ψfinal, Snorms), apply_brickwork_pullback
+end
+
+
+
+"""
+Extracts pauli MPS from a density matrix ψ expressed as an MPO
+"""
+function get_pauli_mps(ψ::MPO; sites=nothing)
+    N = length(ψ)
+
+    d = 2
+    sites_pauli_mps = isnothing(sites) ? siteinds(d^2, N) : sites 
+    usites = [sind[1] for sind in siteinds(ψ,plev=1)]
+    dsites = [sind[1] for sind in siteinds(ψ,plev=0)]
+    
+    Ps = get_Ps()
+    Ptens = [ITensor(Ps/sqrt(2), sites_pauli_mps[j], dsites[j], usites[j]) for j in 1:N]
+    Pψ_vec = [Ptens[j] * ψ[j] for j in 1:N]
+
+    Pψ = MPS(Pψ_vec)
+    if isortho(ψ)
+        set_ortho_lims!(Pψ, ortho_lims(ψ))
+    end
+    return Pψ
+end
+
+function ChainRulesCore.rrule(::typeof(get_pauli_mps), ψ::MPO; sites=nothing)
+    N = length(ψ)
+    d = 2
+    sites_pauli_mps = isnothing(sites) ? siteinds(d^2, N) : sites 
+    usites = [sind[1] for sind in siteinds(ψ,plev=1)]
+    dsites = [sind[1] for sind in siteinds(ψ,plev=0)]
+    
+    Ps = get_Ps()
+    Ptens = [ITensor(Ps/sqrt(2), sites_pauli_mps[j], dsites[j], usites[j]) for j in 1:N]
+    Pψ_vec = [Ptens[j] * ψ[j] for j in 1:N]
+
+    Pψ = MPS(Pψ_vec)
+    if isortho(ψ)
+        set_ortho_lims!(Pψ, ortho_lims(ψ))
+    end
+
+    function get_pauli_mps_pullback(ΔPψ)
+        Δψ_vec = [dag(Ptens[j]) * ΔPψ[j] for j in 1:N]
+        return (NoTangent(), Δψ_vec)
+    end
+    
+    return Pψ, get_pauli_mps_pullback
+end
+
+
+### SRE2 OF A BRICKWORK CIRCUIT APPLIED ON A DENSITY MATRIX ψ
+function sre2(arrU::Vector{<:AbstractMatrix}, ψ::MPO, alg::Symbol; trunc_bw = NamedTuple(), trunc_product = NamedTuple())
+    N = length(ψ)
+    (ψf,) = apply_brickwork(arrU, ψ; normalize=false, trunc=trunc_bw)
+    Pψ = get_pauli_mps(ψf)
+    W = MPO(Pψ)
+    P2, = product(W, Pψ, alg; trunc=trunc_product)
+    m2 = -log2(real(sproduct(P2, P2))) - N
+    return m2
+end
+
+function ChainRulesCore.rrule(::typeof(sre2), arrU::Vector{<:AbstractMatrix}, ψ::MPO, alg::Symbol; trunc_bw = NamedTuple(), trunc_product = NamedTuple())
+    N = length(ψ)
+    (ψf,), apply_brickwork_back = pullback((Uarr, psi) -> apply_brickwork(Uarr, psi; normalize=false, trunc=trunc_bw), arrU, ψ)
+    Pψ, get_pauli_mps_pullback = pullback(get_pauli_mps, ψf)
+    W, MPO_back = pullback(MPO, Pψ)
+    (P2,), product_back = pullback((mpo, psi) -> product(mpo, psi, alg; trunc=trunc_product), W, Pψ)
+    res, sproduct_back = pullback(sproduct, P2, P2)
+    m2, m2_back = pullback(P2P2 -> -log2(real(P2P2))-N, res)
+
+    function sre2_pullback(Δm2)
+        _, Δres = m2_back(Δm2)
+
+        ΔP2_1, ΔP2_2 = sproduct_back(Δres)
+        ΔP2 = ΔP2_1 .+ ΔP2_2
+        ΔW, ΔPψ_1 = product_back((ΔP2, ZeroTangent()))
+        (ΔPψ_2,) = MPO_back(ΔW)
+        ΔPψ = ΔPψ_1 .+ ΔPψ_2
+        (Δψ2,) = get_pauli_mps_pullback(ΔPψ)
+
+        ΔarrU, Δψ = apply_brickwork_back((Δψ2, ZeroTangent()))
+
+        return (NoTangent(), ΔarrU, NoTangent(), NoTangent())
+    end
+    return m2, sre2_pullback
 end

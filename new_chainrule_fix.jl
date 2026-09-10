@@ -8,6 +8,7 @@ using Plots
 using ChainRulesCore
 using Test
 using Logging
+using HDF5, JLD2
 
 #Logging.disable_logging(Logging.Warn)
 
@@ -25,6 +26,30 @@ function testGrad(genPoint::Function, genTanVec::Function, computeCostGrad::Func
     Plots.plot!(plot, tvals, tvals .^2, yscale=:log10, xscale=:log10, label=L"O(t^2)")
     Plots.plot!(plot, tvals, tvals, yscale=:log10, xscale=:log10, label=L"O(t)")
     return plot
+end
+
+
+function genUnitary(nU)
+    U0 = [random_unitary(4) for _ in 1:nU]
+    return U0
+end
+
+function genUnitaryProduct(nU)
+    U0 = [kron(random_unitary(2), random_unitary(2)) for _ in 1:nU]
+    return U0
+end
+
+function genTanVec(Uvec)
+    V = [randn(ComplexF64, 4, 4) for _ in eachindex(Uvec)]
+    V = skew.(V)
+    V = Uvec .* V
+    V /= sqrt(inner(V, V))
+end
+
+withgrad_Riemannian = (func, arrU, args...) -> begin
+    fU, gU = withgradient(func, arrU, args...)
+    riemG = project(arrU, gU[1]) 
+    return fU, riemG
 end
 
 
@@ -99,6 +124,24 @@ function test_move2()
             # tensors should be the same up to overall phase set by chosen decomposition
             # for move_center it's svd, for orthogonalize it's probably qr
             sum(norm.([abs.(mat) for mat in psi_tensors] .- [abs.(mat) for mat in psi_mps_tensors])) > 1e-12 && return false
+        end
+    end
+    return true
+end
+
+
+"Check orthogonality"
+function test_move_center_MPO()
+    N = 8; χ = 8
+    for ogc in 1:N
+        sites = siteinds("Qubit", N)
+        psi = random_mps(ComplexF64, sites; linkdims=χ)
+        orthogonalize!(psi, ogc)
+        rho = density_matrix(psi)
+        rho = move_center(rho, N)
+        for ogc_final in 1:N
+            rho_final = move_center(rho, ogc_final)
+            !is_orthogonal(rho_final[:], ogc_final) && return false     #this explicitly checks orthogonalization
         end
     end
     return true
@@ -192,10 +235,10 @@ function test_apply_brickwork()
 
         tau = rand([1,2,3])
         shift = rand([0,1])
-        nU = n_unitaries(N, tau, shift)
+        nU = n_unitaries(N, tau; shift)
         Uarr = [random_unitary(4) for _ in 1:nU]
 
-        ψfinal = apply_brickwork(Uarr, ψ; shift=shift)
+        ψfinal, = apply_brickwork(Uarr, ψ; shift=shift)
         ψfinal_statevec = reshape(Array{ComplexF64}(prod(ψfinal), sites), 2^N)
 
         ψ_statevec = reshape(Array{ComplexF64}(prod(ψ), sites), 2^N)
@@ -218,7 +261,7 @@ function test_apply_brickwork_toleft()
         nU = n_unitaries(N, tau, shift)
         Uarr = [random_unitary(4) for _ in 1:nU]
 
-        ψfinal = apply_brickwork(Uarr, ψ; shift=shift, to_right=false)
+        ψfinal, = apply_brickwork(Uarr, ψ; shift=shift, to_right=false)
         ψfinal_statevec = reshape(Array{ComplexF64}(prod(ψfinal), sites), 2^N)
 
         ψ_statevec = reshape(Array{ComplexF64}(prod(ψ), sites), 2^N)
@@ -229,8 +272,8 @@ function test_apply_brickwork_toleft()
     return true
 end
 
-function sre2direct(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
-    Uψ = apply_brickwork(arrU, ψ)     # assume odd number of layers
+function sre2direct(arrU::Vector{<:AbstractMatrix}, ψ::MPS; truncbw=NamedTuple())
+    Uψ, = apply_brickwork(arrU, ψ; trunc=truncbw)     # assume odd number of layers
     PMPS = get_pauli_mps(Uψ)
     PMPO = MPO(PMPS)
     P2 = direct(PMPO, PMPS)
@@ -238,12 +281,47 @@ function sre2direct(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
 end
 
 function sre2zip(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
-    Uψ = apply_brickwork(arrU, ψ)     # assume odd number of layers
+    Uψ, = apply_brickwork(arrU, ψ)     # assume odd number of layers
     PMPS = get_pauli_mps(Uψ)
     PMPO = MPO(PMPS)
-    P2 = zipup(PMPO, PMPS)
+    P2, = zipup(PMPO, PMPS)
     return -log2(real(sproduct(P2,P2))) - length(Uψ)
 end
+
+function sre2zip2(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    N = length(ψ)
+    Uψ, = apply_brickwork(arrU, ψ)     # assume odd number of layers
+    PMPS = get_pauli_mps(Uψ)
+    PMPO = MPO(PMPS)
+    P2, Snorms = zipup(PMPO, PMPS; normalize=true)
+    return -2*sum(log2.(Snorms)) - N
+end
+
+### SRE2 OF A DENSITY MATRIX ψ
+function sre2dm(arrU::Vector{<:AbstractMatrix}, ψ::MPS; truncbw=NamedTuple())
+    Uψ, _ = apply_brickwork(arrU, ψ; trunc=truncbw)
+    rho = density_matrix(Uψ)
+    Pψ = get_pauli_mps(rho)
+    W = MPO(Pψ)
+    P2, = product(W, Pψ, :direct)
+    m2 = -log2(real(sproduct(P2, P2))) - length(Uψ)
+    return m2
+end
+
+function sre2_normalized(arrU::Vector{<:AbstractMatrix}, ψ::MPS; trunc_bw = NamedTuple(), trunc_pauli = NamedTuple(), trunc_product = NamedTuple())
+    d = space(siteind(ψ,1))
+    b = log2(d)
+    N = length(ψ)*b
+    ψf, = apply_brickwork(arrU, ψ; trunc=trunc_bw)
+    Pψ = get_pauli_mps(ψf; trunc=trunc_pauli)
+    W = MPO(Pψ)
+    P2, logF = zipup_normalize(W, Pψ; trunc=trunc_product)
+    # F = abs(ITensorMPS.inner(P2, P2))
+    # @show "fidelityF: ", F
+    m2 = -2*logF/log(2) - N
+    return m2
+end
+
 
 function test_sre2(sre2_func)
     N = 4; χ = 2
@@ -283,6 +361,10 @@ end
 #@code_warntype test_sre2(sre2)
 @test test_sre2(sre2zip)
 @code_warntype test_sre2(sre2zip)
+
+test_sre2(sre2_normalized)
+test_sre2(sre2zip2)
+test_sre2(sre2dm)
 
 
 
@@ -679,31 +761,8 @@ Plots.plot!(chirange, 1e-5*chirange .^5, yscale=:log10, xscale=:log10, label="O(
 
 ###### COST FUNCTIONS WITH UNITARIES ######
 
-function genUnitary(nU)
-    U0 = [random_unitary(4) for _ in 1:nU]
-    return U0
-end
-
-function genUnitaryProduct(nU)
-    U0 = [kron(random_unitary(2), random_unitary(2)) for _ in 1:nU]
-    return U0
-end
-
-function genTanVec(Uvec)
-    V = [randn(ComplexF64, 4, 4) for _ in eachindex(Uvec)]
-    V = skew.(V)
-    V = Uvec .* V
-    V /= sqrt(inner(V, V))
-end
-
-withgrad_Riemannian = (func, arrU, args...) -> begin
-    fU, gU = withgradient(func, arrU, args...)
-    riemG = project(arrU, gU[1]) 
-    return fU, riemG
-end
-
-N = 8; χ = 4
-nU = 11;
+N = 4; χ = 2
+nU = n_unitaries(N, 2)
 sites = siteinds("Qubit", N)
 psi = random_mps(ComplexF64, sites; linkdims = χ)
 orthogonalize!(psi, 1)
@@ -712,7 +771,7 @@ U_array = [random_unitary(4) for _ in 1:nU]
 
 # WORKS
 function cost_applyU(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
-    ψ2 = apply_brickwork(arrU, ψ; trunc=(maxrank=2,))
+    ψ2, = apply_brickwork(arrU, ψ; trunc=(maxrank=2,))
     return real(sproduct(ψ, ψ2))
 end
 cost_applyU(U_array, psi)
@@ -721,10 +780,58 @@ gradient(cost_applyU_red, U_array)
 fg_cost_applyU = arrU -> withgrad_Riemannian(cost_applyU_red, arrU)
 testGrad(() -> genUnitary(nU), genTanVec, fg_cost_applyU, inner, retract)
 
+function cost_applyU(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    ψ2, Snorms = apply_brickwork(arrU, ψ; trunc=(maxrank=2,))
+    return real(sproduct(ψ, ψ2)) - sum(log.(Snorms))
+end
+cost_applyU(U_array, psi)
+cost_applyU_red = arrU -> cost_applyU(arrU, psi)
+gradient(cost_applyU_red, U_array)
+fg_cost_applyU = arrU -> withgrad_Riemannian(cost_applyU_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_applyU, inner, retract)
+
+
+chirange = 20:20:100
+trials = 50
+results = let chirange=chirange, trials=trials
+    N = 30
+    sites = siteinds("Qubit", N)
+    ftimes = Float64[]
+    gtimes = Float64[]
+    for χ in chirange
+        @show χ
+        ftime_χ = Float64[]
+        gtime_χ = Float64[]
+        for _ in 1:trials
+            ψ = random_mps(ComplexF64, sites; linkdims = χ)
+            Uarr = genUnitary(n_unitaries(N, 2))
+            ftime = @elapsed cost_applyU(Uarr, ψ)
+            gtime = @elapsed gradient(cost_applyU, Uarr, ψ)
+            push!(ftime_χ, ftime)
+            push!(gtime_χ, gtime)
+        end
+        push!(ftimes, sum(ftime_χ)/trials)
+        push!(gtimes, sum(gtime_χ)/trials)
+    end
+    ftimes, gtimes    
+end
+
+
+Plots.plot(xlabel="chi", ylabel="t (s)")
+Plots.plot!(chirange, results[1], label="tf")
+Plots.plot!(chirange, results[2], label="tg")
+
+Plots.plot(xlabel="chi", ylabel="tf/tg")
+Plots.plot!(chirange, results[2] ./ results[1], label="tg/tfù")
+
+Plots.plot!(chirange, 3e-2*chirange, yscale=:log10, xscale=:log10, label="O(chi)")
+Plots.plot!(chirange, 3e-3*chirange .^2, yscale=:log10, xscale=:log10, label="O(chi^2)")
+Plots.plot!(chirange, 1e-7*chirange .^3, yscale=:log10, xscale=:log10, label="O(chi^3)", legend=:bottomright)
+
 
 # WORKS
 function cost_move_center(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
-    ψ2 = apply_brickwork(arrU, ψ)
+    ψ2, = apply_brickwork(arrU, ψ)
     ψ3 = move_center(ψ2, 1)
     return real(sproduct(ψ, ψ3))
 end
@@ -739,7 +846,7 @@ testGrad(() -> genUnitary(nU), genTanVec, fg_cost_move_center, inner, retract)
 # WORKS
 function cost_pauli(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
     N = length(ψ)
-    Uψ = apply_brickwork(arrU, ψ)
+    Uψ, = apply_brickwork(arrU, ψ)
     sites_pauli = siteinds(4, N)
     Pψ = get_pauli_mps(ψ; sites=sites_pauli)
     PUψ = get_pauli_mps(Uψ; sites=sites_pauli, trunc=(atol=1e-12,))
@@ -756,7 +863,7 @@ testGrad(() -> genUnitary(nU), genTanVec, fg_cost_pauli, inner, retract)
 # WORKS, BUT WE ARE FORCED TO USE OUR CUSTOM CHAINRULE BECAUSE MPS NEED TO BE SUMMED
 # AS IF THEY WERE VECTORS OF ITENSORS
 function cost_direct(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
-    ψ2 = apply_brickwork(arrU, ψ)
+    ψ2, = apply_brickwork(arrU, ψ)
     Pψ = get_pauli_mps(ψ2)
     W = MPO(Pψ)
     P2 = direct(W, Pψ)
@@ -764,7 +871,7 @@ function cost_direct(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
 end
 
 function ChainRulesCore.rrule(::typeof(cost_direct), arrU::Vector{<:AbstractMatrix}, ψ::MPS)
-    ψ2, apply_brickwork_back = pullback(apply_brickwork, arrU, ψ)
+    (ψ2,), apply_brickwork_back = pullback(apply_brickwork, arrU, ψ)
     Pψ, get_pauli_mps_pullback = pullback(get_pauli_mps, ψ2)
     W, MPO_back = pullback(MPO, Pψ)
     P2, direct_back = pullback(direct, W, Pψ)
@@ -781,7 +888,7 @@ function ChainRulesCore.rrule(::typeof(cost_direct), arrU::Vector{<:AbstractMatr
 
         ΔPψ = ΔPψ_1 .+ ΔPψ_2
         Δψ2 = get_pauli_mps_pullback(ΔPψ)[1]
-        ΔarrU, Δψ = apply_brickwork_back(Δψ2)
+        ΔarrU, Δψ = apply_brickwork_back((Δψ2, ZeroTangent()))
 
         return (NoTangent(), ΔarrU, NoTangent())
     end
@@ -798,18 +905,18 @@ testGrad(() -> genUnitary(nU), genTanVec, fg_cost_direct, inner, retract)
 # WORKS, BUT WE ARE FORCED TO USE OUR CUSTOM CHAINRULE BECAUSE MPS NEED TO BE SUMMED
 # AS IF THEY WERE VECTORS OF ITENSORS
 function cost_zipup(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
-    ψ2 = apply_brickwork(arrU, ψ)
+    ψ2, = apply_brickwork(arrU, ψ)
     Pψ = get_pauli_mps(ψ2)
     W = MPO(Pψ)
-    P2 = zipup(W, Pψ)
+    P2, = zipup(W, Pψ)
     return real(sproduct(P2, P2))
 end
 
 function ChainRulesCore.rrule(::typeof(cost_zipup), arrU::Vector{<:AbstractMatrix}, ψ::MPS)
-    ψ2, apply_brickwork_back = pullback(apply_brickwork, arrU, ψ)
+    (ψ2,), apply_brickwork_back = pullback(apply_brickwork, arrU, ψ)
     Pψ, get_pauli_mps_pullback = pullback(get_pauli_mps, ψ2)
     W, MPO_back = pullback(MPO, Pψ)
-    P2, zipup_back = pullback(zipup, W, Pψ)
+    (P2,), zipup_back = pullback(zipup, W, Pψ)
     res, sproduct_back = pullback(sproduct, P2, P2)
     resreal, real_back = real(res), Δresreal -> (NoTangent(), Δresreal*(1.0+0.0im))
 
@@ -819,7 +926,7 @@ function ChainRulesCore.rrule(::typeof(cost_zipup), arrU::Vector{<:AbstractMatri
         ΔP2_1, ΔP2_2 = sproduct_back(Δres)
         ΔP2 = ΔP2_1 .+ ΔP2_2
 
-        ΔW, ΔPψ_1 = zipup_back(ΔP2)
+        ΔW, ΔPψ_1 = zipup_back((ΔP2, ZeroTangent()))
 
         ΔPψ_2 = MPO_back(ΔW)[1]
 
@@ -827,7 +934,7 @@ function ChainRulesCore.rrule(::typeof(cost_zipup), arrU::Vector{<:AbstractMatri
 
         Δψ2 = get_pauli_mps_pullback(ΔPψ)[1]
 
-        ΔarrU, Δψ = apply_brickwork_back(Δψ2)
+        ΔarrU, Δψ = apply_brickwork_back((Δψ2,ZeroTangent()))
 
         return (NoTangent(), ΔarrU, NoTangent())
     end
@@ -839,6 +946,86 @@ gradient(cost_zipup_red, U_array)
 fg_cost_zipup = arrU -> withgrad_Riemannian(cost_zipup_red, arrU)
 testGrad(() -> genUnitary(nU), genTanVec, fg_cost_zipup, inner, retract)
 
+
+# WORKS, BUT WE ARE FORCED TO USE OUR CUSTOM CHAINRULE BECAUSE MPS NEED TO BE SUMMED
+# AS IF THEY WERE VECTORS OF ITENSORS
+function cost_zipup2(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    ψ2, = apply_brickwork(arrU, ψ)
+    Pψ = get_pauli_mps(ψ2)
+    W = MPO(Pψ)
+    P2, Snorms = zipup(W, Pψ; normalize=true)
+    return sum(Snorms)
+end
+
+function ChainRulesCore.rrule(::typeof(cost_zipup2), arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    (ψ2,), apply_brickwork_back = pullback(apply_brickwork, arrU, ψ)
+    Pψ, get_pauli_mps_pullback = pullback(get_pauli_mps, ψ2)
+    W, MPO_back = pullback(MPO, Pψ)
+    (P2, Snorms), zipup_back = pullback((a, b) -> zipup(a, b; normalize=true), W, Pψ)
+    res, res_back = pullback(sum, Snorms)
+
+    function cost_zipup_pullback(Δres)
+        ΔSnorms, = res_back(Δres)
+        ΔP2 = [ITensor(ComplexF64, inds(P2[j])) for j in eachindex(P2)]
+        ΔW, ΔPψ_1 = zipup_back((ΔP2, ΔSnorms))
+
+        ΔPψ_2 = MPO_back(ΔW)[1]
+
+        ΔPψ = ΔPψ_1 .+ ΔPψ_2
+
+        Δψ2 = get_pauli_mps_pullback(ΔPψ)[1]
+
+        ΔarrU, Δψ = apply_brickwork_back((Δψ2,ZeroTangent()))
+
+        return (NoTangent(), ΔarrU, Δψ)
+    end
+    return res, cost_zipup_pullback
+end
+cost_zipup2(U_array, psi)
+cost_zipup_red = arrU -> cost_zipup2(arrU, psi)
+gradient(cost_zipup_red, U_array)
+fg_cost_zipup = arrU -> withgrad_Riemannian(cost_zipup_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_zipup, inner, retract)
+
+
+
+function cost_zipup3(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    ψ2, = apply_brickwork(arrU, ψ)
+    Pψ = get_pauli_mps(ψ2)
+    W = MPO(Pψ)
+    P2, Snorms = zipup(W, Pψ; normalize=true)
+    return sum(Snorms)
+end
+
+function ChainRulesCore.rrule(::typeof(cost_zipup3), arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    (ψ2,), apply_brickwork_back = pullback(apply_brickwork, arrU, ψ)
+    Pψ, get_pauli_mps_pullback = pullback(get_pauli_mps, ψ2)
+    W, MPO_back = pullback(MPO, Pψ)
+    (P2, Snorms), zipup_back = pullback((a, b) -> zipup(a, b; normalize=true), W, Pψ)
+    res, res_back = pullback(sum, Snorms)
+
+    function cost_zipup_pullback(Δres)
+        ΔSnorms, = res_back(Δres)
+        ΔP2 = ZeroTangent()
+        ΔW, ΔPψ_1 = zipup_back((ΔP2, ΔSnorms))
+
+        ΔPψ_2 = MPO_back(ΔW)[1]
+
+        ΔPψ = ΔPψ_1 .+ ΔPψ_2
+
+        Δψ2 = get_pauli_mps_pullback(ΔPψ)[1]
+
+        ΔarrU, Δψ = apply_brickwork_back((Δψ2,ZeroTangent()))
+
+        return (NoTangent(), ΔarrU, Δψ)
+    end
+    return res, cost_zipup_pullback
+end
+cost_zipup3(U_array, psi)
+cost_zipup_red = arrU -> cost_zipup3(arrU, psi)
+gradient(cost_zipup_red, U_array)
+fg_cost_zipup = arrU -> withgrad_Riemannian(cost_zipup_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_zipup, inner, retract)
 
 
 # CHECK SCALING WITH Chi
@@ -870,6 +1057,20 @@ Plots.plot!(chirange, results[2], label="tg")
 Plots.plot!(chirange, 3e-5*chirange, yscale=:log10, xscale=:log10, label="O(chi)")
 Plots.plot!(chirange, 1e-5*chirange .^2, yscale=:log10, xscale=:log10, label="O(chi^2)")
 Plots.plot!(chirange, 1e-7*chirange .^3, yscale=:log10, xscale=:log10, label="O(chi^3)", legend=:bottomright)
+
+
+### COST OF SRE2
+function cost_sre2(arrU::Vector{<:AbstractMatrix}, ψ::MPS)
+    return sre2(arrU, ψ)
+end
+cost_sre2(U_array, psi)
+cost_red = arrU -> cost_sre2(arrU, psi)
+gradient(cost_red, U_array)
+fg_cost = arrU -> withgrad_Riemannian(cost_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost, inner, retract)
+
+
+
 
 
 "Extends m x n isometry to M x M unitary, where M is the power of 2 which bounds max(m, n) from above"
@@ -948,7 +1149,7 @@ trunc = (maxerror=1e-2,)
 
 # Captures ψ, zeromps and kwargs
 cost_function = (arrU) -> begin
-    ϕ = apply_brickwork(arrU, zeromps; trunc=trunc, normalize=true)
+    ϕ, = apply_brickwork(arrU, zeromps; trunc=trunc, normalize=true)
     return -real(sproduct(psi, ϕ))
 end
 
@@ -970,6 +1171,185 @@ testGrad(() -> genUnitaryProduct(nU), genTanVec, fg, inner, retract)
 
 
 
+Base.@kwdef mutable struct InversionInstructions
+    maxrank::Union{Nothing, Int} = nothing
+    maxerror::Union{Nothing, Float64} = nothing
+    atol::Float64 = 1e-8
+    maxiter::Int = 1000000
+    gradtol::Float64 = 1e-8
+    n_checkpoint::Int = 5000
+    skip_outer::Bool = false
+    m::Int = 5                                      
+    Σε_max::Float64 = 1e-2
+    c_ref::Float64 = Inf                             
+    ρ0::Float64 = 1.0
+    ρ::Float64 = 1.0
+    λ0::Float64 = 1.0
+    λ::Float64 = 1.0                                
+    outer_iters::Int = 25
+    inner_maxiter::Int = 10000
+    inner_gradtol::Float64 = 1e-5
+    ρ_growth::Float64 = 2.0
+end
+
+# copy for a mutable struct (field-by-field)
+Base.copy(x::InversionInstructions) = InversionInstructions(
+    (getfield(x, f) for f in fieldnames(InversionInstructions))...)
+
+folder = "testdata\\ising\\g1.5\\maxiter\\"
+f = h5open(folder*"60_mps.h5","r")
+psi_og = read(f,"psi",MPS)
+close(f)
+
+psi = dense(psi_og)
+sites = siteinds(psi)
+N = length(psi)
+
+result = load_object(folder*"N60_T7.jld2");
+plot(result.normgradhistory, yscale=:log)
+U_array = result[:arrU]
+
+zeromps = MPS(sites, ["0" for _ in 1:N])
+orthogonalize!(zeromps, 1)
+
+instr = load_object(folder*"N60_T12_instructions.jld2")
+trunc = (maxrank=instr.maxrank,)
+
+# Captures ψ, zeromps
+cost_function = (arrU) -> begin
+    phi, Snorms = apply_brickwork(arrU, zeromps; trunc=trunc)
+    return -log(abs(sproduct(psi, phi))) - sum(log.(Snorms))
+end
+
+# Combines function and projected gradient
+fg = arrU -> begin
+    func, grad = withgradient(cost_function, arrU)
+    grad = project(arrU, grad[1])
+    return func, grad
+end
+
+nU = n_unitaries(N, 12)
+
+plt = testGrad(() -> U_array, genTanVec, fg, inner, retract)
+
+testGrad(() -> genUnitary(nU), genTanVec, fg, inner, retract)
+
+testGrad(() -> genUnitaryProduct(nU), genTanVec, fg, inner, retract)
+
+
+### SCALING WITH TAU
+
+folder = "testdata\\xxz\\Jz2.5\\m50\\"
+f = h5open(folder*"300_mps.h5","r")
+psi_og = read(f,"psi",MPS)
+close(f)
+psi = dense(psi_og)
+sites = siteinds(psi)
+N = length(psi)
+
+zeromps = MPS(sites, ["0" for _ in 1:N])
+orthogonalize!(zeromps, 1)
+instr = load_object(folder*"N$(N)_T1_instructions.jld2")
+maxrank = isnothing(instr.maxrank) ? maxlinkdim(psi) : instr.maxrank
+trunc = (maxrank=maxrank, rtol=1e-14)
+
+
+taurange = 1:7
+results = let N=N, zeromps=zeromps, trunc=trunc, taurange = taurange
+    # Captures ψ, zeromps
+    cost_function = (arrU) -> begin
+        phi, Snorms = apply_brickwork(arrU, zeromps; trunc=trunc)
+        return -log(abs(sproduct(psi, phi))) - sum(log.(Snorms))
+    end
+
+    # Combines function and projected gradient
+    fg = arrU -> begin
+        func, grad = withgradient(cost_function, arrU)
+        grad = project(arrU, grad[1])
+        return func, grad
+    end
+
+    ftimes = Float64[]
+    gtimes = Float64[]
+    gctimes = Float64[]
+    bytes = Float64[]
+    for tau in taurange
+        @show tau
+        ftime_tau = Float64[]
+        gtime_tau = Float64[]
+        gctime_tau = Float64[]
+        bytes_tau = Int64[]
+        for _ in 1:10
+            result = load_object(folder*"N$(N)_T$(tau).jld2")
+            U_array = result[:arrU]
+            ftime = @elapsed cost_function(U_array)
+            res = @timed gradient(cost_function, U_array)
+            gtime = res.time
+            gctime = res.gctime
+            byte = res.bytes
+            @show gtime, gctime, bytes
+            push!(ftime_tau, ftime)
+            push!(gtime_tau, gtime)
+            push!(gctime_tau, gctime)
+            push!(bytes_tau, byte)
+        end
+        push!(ftimes, sum(ftime_tau)/length(ftime_tau))
+        push!(gtimes, sum(gtime_tau)/length(ftime_tau))
+        push!(gctimes, sum(gctime_tau)/length(gctime_tau))
+        push!(bytes, sum(bytes_tau)/length(bytes_tau))
+    end
+    ftimes, gtimes, gctimes, bytes   
+end
+
+Plots.plot(xlabel="tau", ylabel="t (s)")
+Plots.plot!(taurange, results[1], label="tf")
+Plots.plot!(taurange, results[2], label="tg")
+Plots.plot!(taurange , 3e-5*taurange , yscale=:log10, xscale=:log10, label="O(chi)")
+Plots.plot!(taurange , 1e-5*taurange  .^2, yscale=:log10, xscale=:log10, label="O(chi^2)")
+Plots.plot!(taurange , 1e-7*taurange  .^3, yscale=:log10, xscale=:log10, label="O(chi^3)", legend=:bottomright)
+
+
+taurange = 1:10
+results = let N=N, zeromps=zeromps, trunc=trunc, taurange = taurange
+    # Captures ψ, zeromps
+    cost_function = (arrU) -> begin
+        phi, Snorms = apply_brickwork(arrU, zeromps; trunc=trunc)
+        return -log(abs(sproduct(psi, phi))) - sum(log.(Snorms))
+    end
+
+    # Combines function and projected gradient
+    fg = arrU -> begin
+        func, grad = withgradient(cost_function, arrU)
+        grad = project(arrU, grad[1])
+        return func, grad
+    end
+
+    ftimes = Float64[]
+    gtimes = Float64[]
+    for tau in taurange
+        @show tau
+        ftime_tau = Float64[]
+        gtime_tau = Float64[]
+        for _ in 1:10
+            U_array = random_circuit(N, tau)
+            ftime = @elapsed cost_function(U_array)
+            gtime = @elapsed gradient(cost_function, U_array)
+            push!(ftime_tau, ftime)
+            push!(gtime_tau, gtime)
+        end
+        push!(ftimes, sum(ftime_tau)/length(ftime_tau))
+        push!(gtimes, sum(gtime_tau)/length(ftime_tau))
+    end
+    ftimes, gtimes    
+end
+
+Plots.plot(xlabel="tau", ylabel="t (s)")
+Plots.plot!(taurange, results[1], label="tf")
+Plots.plot!(taurange, results[2], label="tg")
+
+Plots.plot!(taurange , 3e-5*taurange , yscale=:log10, xscale=:log10, label="O(chi)")
+Plots.plot!(taurange , 1e-5*taurange  .^2, yscale=:log10, xscale=:log10, label="O(chi^2)")
+Plots.plot!(taurange , 1e-7*taurange  .^3, yscale=:log10, xscale=:log10, label="O(chi^3)", legend=:bottomright)
 
 
 ### TESTING COMPRESSION AND PULLBACK OF COMPRESSION
@@ -1371,7 +1751,7 @@ N = 4; χ = 2
 sites = siteinds("Qubit", N)
 psi = random_mps(ComplexF64, sites; linkdims = χ)
 orthogonalize!(psi, 1)
-nU = n_unitaries(N, 6)
+nU = n_unitaries(N, 1)
 U_array = [random_unitary(4) for _ in 1:nU]
 
 
@@ -1384,3 +1764,50 @@ cost_applyU_red = arrU -> cost_applyU(arrU, psi)
 gradient(cost_applyU_red, U_array)
 fg_cost_applyU = arrU -> withgrad_Riemannian(cost_applyU_red, arrU)
 testGrad(() -> genUnitary(nU), genTanVec, fg_cost_applyU, inner, retract)
+
+
+
+### GRADIENT OF APPLY BRICKWORK NORMALIZE ON A DENSITY MATRIX REPRESENTED AS MPO
+
+N = 4; χ = 2
+sites = siteinds("Qubit", N)
+psi = random_mps(ComplexF64, sites; linkdims = χ)
+orthogonalize!(psi, 1)
+rho = density_matrix(psi)
+
+rho_compr = move_center(rho, N; trunc=(maxrank=3, atol=1e-15))
+
+nU = n_unitaries(N, 3)
+U_array = [random_unitary(4) for _ in 1:nU]
+
+function cost_applyU(arrU::Vector{<:AbstractMatrix}, ψ::MPO)
+    ψ2, Snorms = apply_brickwork(arrU, ψ; trunc=(maxrank=2,))
+    return -log(abs(sproduct(ψ, ψ2))) - sum(log.(Snorms))
+end
+cost_applyU(U_array, rho_compr)
+cost_applyU_red = arrU -> cost_applyU(arrU, rho_compr)
+gradient(cost_applyU_red, U_array)
+fg_cost_applyU = arrU -> withgrad_Riemannian(cost_applyU_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_applyU, inner, retract)
+
+function cost_applyU(arrU::Vector{<:AbstractMatrix}, ψ::MPO)
+    ψ2, _ = apply_brickwork(arrU, ψ; normalize=false, trunc=(maxrank=2,))
+    return -log(abs(sproduct(ψ, ψ2)))
+end
+cost_applyU(U_array, rho_compr)
+cost_applyU_red = arrU -> cost_applyU(arrU, rho_compr)
+gradient(cost_applyU_red, U_array)
+fg_cost_applyU = arrU -> withgrad_Riemannian(cost_applyU_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost_applyU, inner, retract)
+
+
+function cost_sre2(arrU::Vector{<:AbstractMatrix}, ψ::MPO)
+    Uψ, _ = apply_brickwork(arrU, ψ; normalize=false, trunc=(maxrank=2,))
+    return sre2(Uψ, :direct)
+end
+cost_sre2(U_array, rho_compr)
+cost_red = arrU -> cost_sre2(arrU, rho_compr)
+gradient(cost_red, U_array)
+fg_cost = arrU -> withgrad_Riemannian(cost_red, arrU)
+testGrad(() -> genUnitary(nU), genTanVec, fg_cost, inner, retract)
+
