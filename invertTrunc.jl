@@ -23,7 +23,7 @@ Base.@kwdef mutable struct InversionInstructions
     atol::Float64 = 1e-8
     maxiter::Int = 1000000
     gradtol::Float64 = 1e-8
-    n_checkpoint::Int = 5000
+    n_checkpoint::Int = 500
     skip_outer::Bool = false
     m::Int = 5                                      
     Σε_max::Float64 = 1e-2
@@ -139,6 +139,36 @@ function XXZ(N::Int)
                cutoff=1e-12, noise=[1e-6,1e-8,1e-10,0.0])
     return E0, psi
 end
+
+g_from_xi(ξ::Real) = tanh(1 / (2ξ))
+xi_from_g(g::Real) = 1 / abs(log((1 - g) / (1 + g)))
+
+function correlated_mps(sites::Vector{<:Index}, g::Number;
+                        L = Matrix(1.0I, 2, 2), R = Matrix(1.0I, 2, 2),
+                        normalize::Bool = true)
+    N = length(sites)
+    N >= 2 || error("Need N ≥ 2")
+    all(dim.(sites) .== 2) || error("All site indices must have dimension 2")
+    D = 2
+    T = promote_type(typeof(g), eltype(L), eltype(R), Float64)
+
+    A = zeros(T, D, 2, D)                # A[a, i, b] = (A^{i-1})_{ab}
+    A[:, 1, :] = [0 0; 1 1]              # A^0
+    A[:, 2, :] = [1 g; 0 0]              # A^1
+
+    links = [Index(D, "Link,l=$j") for j in 1:(N - 1)]
+    psi = MPS(N)
+    psi[1] = ITensor(T.(L), sites[1], links[1])
+    for j in 2:(N - 1)
+        psi[j] = ITensor(A, links[j - 1], sites[j], links[j])
+    end
+    psi[N] = ITensor(T.(R), links[N - 1], sites[N])
+
+    normalize && normalize!(psi)
+    return psi
+end
+
+correlated_mps_xi(sites, ξ::Real; kwargs...) = correlated_mps(sites, g_from_xi(ξ); kwargs...)
 
 
 
@@ -1008,8 +1038,8 @@ end
 
 if false
     let
-        pathname = "testdata\\ising\\g1.5\\"
-        Nlist = [20]
+        pathname = "testdata\\xxz\\Jz2.5\\"
+        Nlist = [100]
         psis = MPS[]
         for N in Nlist
             #E, psi = ising(N)
@@ -1023,8 +1053,39 @@ if false
         end
 
         for psi in psis
-            prepare_start(psi, pathname; maxiter=10000000, maxrank=20)
+            prepare_start(psi, pathname; maxiter=10000000, m=20)
 
+            GC.gc()
+            @show Base.gc_live_bytes() / 2^20        # MB live at rest
+            s = @timed while true
+                status = continue_inversion(psi, 3, pathname, invert_maxrank)
+                status == :done && break
+            end
+            @show s.gctime / s.time
+        end
+    end
+end
+
+
+if true
+    let
+        #pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/corrMPS/"
+        pathname = "testdata\\corrmps\\xi10\\"
+        N = 300
+        xilist = [10]
+        psis = MPS[]
+        for xi in xilist
+            sites = siteinds("Qubit", N)
+            psi = correlated_mps_xi(sites, xi)
+            push!(psis, psi)
+        end
+
+        nstates = length(xilist)
+        for i in eachindex(xilist)
+            psi = psis[i]
+            xi = xilist[i]
+            prepare_start(psi, pathname; maxrank=2, maxiter=10000000)
+            #edit_ongoing_simulation!(pathname*"trunc/", N; n_checkpoint=500)
             while true
                 status = continue_inversion(psi, 30, pathname, invert_maxrank)
                 status == :done && break
@@ -1032,7 +1093,6 @@ if false
         end
     end
 end
-
 
 
 if false
@@ -1056,7 +1116,7 @@ end
 
 
 
-if true
+if false
     let
         pathname = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/xxz/Jz2.5/"
         Nlist = [60,100,140,180,220,260,300]
