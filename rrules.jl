@@ -69,6 +69,60 @@ function MatrixAlgebraKit.findtruncated(
 end
 
 
+"""
+    truncdegen_keep(strategy; rtol, atol = 0, maxextra = 4, wmax = Inf)
+
+Like `truncdegen`, but a cut that falls inside a near-degenerate cluster is moved
+*down* to include the whole cluster, keeping up to `maxextra` values beyond what
+`strategy` keeps. A cluster is a run of consecutive values whose spacing is at most
+`max(atol, rtol * value)`, so the final cut always has a relative gap > `rtol`
+(the 1/gap factors of the SVD pullback stay bounded). If the cluster runs past
+`maxextra`, the cut moves up instead, above the start of the cluster.
+
+Only clusters of negligible weight are touched: if the largest value involved has
+weight s²/Σs² ≥ `wmax`, the cut stays where `strategy` put it. A crossing between
+significant values means the rank is genuinely too small; that is left to show up
+as a frozen gradient (and to `adapt`), not smoothed over.
+"""
+struct TruncationDegenerateKeep{Strategy <: TruncationStrategy, T <: Real} <: TruncationStrategy
+    strategy::Strategy
+    atol::T
+    rtol::T
+    maxextra::Int
+    wmax::Float64
+end
+
+truncdegen_keep(strategy::TruncationStrategy; rtol::Real, atol::Real = 0, maxextra::Int = 4,
+                wmax::Real = Inf) =
+    TruncationDegenerateKeep(strategy, promote(atol, rtol)..., maxextra, Float64(wmax))
+
+function MatrixAlgebraKit.findtruncated(values::AbstractVector, strategy::TruncationDegenerateKeep)
+    Base.require_one_based_indexing(values)
+    issorted(values; rev = true) || throw(ArgumentError("Values must be reverse sorted."))
+    kept = findtruncated(values, strategy.strategy)
+    kept isa Colon && return Base.OneTo(length(values))
+    idx = kept isa AbstractVector{Bool} ? findall(kept) : sort!(collect(Int, kept))
+    p = isempty(idx) ? 0 : last(idx)
+    idx == 1:p || throw(ArgumentError("Truncation must be a contiguous range."))
+    n = length(values)
+    (p == 0 || p == n) && return Base.OneTo(p)
+    close(i) = values[i] - values[i+1] <= max(strategy.atol, strategy.rtol * abs(values[i]))
+    close(p) || return Base.OneTo(p)       # the cut already sits in a gap
+    negligible(i) = abs2(values[i]) < strategy.wmax * sum(abs2, values)
+    negligible(p) || return Base.OneTo(p)  # significant values: plain cut
+    q = p
+    while q < n && close(q)
+        q += 1
+    end
+    q - p <= strategy.maxextra && return Base.OneTo(q)
+    r = p                                  # cluster too long: cut above it instead
+    while r > 0 && close(r)
+        r -= 1
+    end
+    return negligible(r + 1) ? Base.OneTo(r) : Base.OneTo(p)
+end
+
+
 using MatrixAlgebraKit: default_pullback_rank_atol, default_pullback_gauge_atol,
                             iszerotangent, project_antihermitian!, inv_safe, diagview
 
