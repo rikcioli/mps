@@ -5,6 +5,8 @@ using OptimKit
 using Zygote
 using LinearAlgebra
 using JLD2
+using HDF5
+using Distributed
 #using LaTeXStrings
 #using Plots
 
@@ -18,10 +20,12 @@ load_locked(path)       = lock(IOLOCK) do; upgrade(load_object(path)); end
 Base.@kwdef mutable struct InversionInstructions
     maxrank::Union{Nothing, Int} = nothing
     maxerror::Union{Nothing, Float64} = nothing
-    atol::Float64 = 1e-8
+    atol::Float64 = 1e-10
     maxiter::Int = 1000000
     gradtol::Float64 = 1e-8
-    n_checkpoint::Int = 500
+    # value-based stop: relative decrease of the error over the last n_conv-iteration window
+    err_reltol::Float64 = 1e-3
+    n_checkpoint::Int = 1000
     skip_outer::Bool = false
     m::Int = 5                                      
     Σε_max::Float64 = 1e-2
@@ -214,13 +218,14 @@ Base.showerror(io::IO, e::GradientFreeze) = print(io,
 const DEPTHLOG_HEADER = "timestamp,N,tau,event,maxrank,atol,niter,err,gradnorm,time_s,note"
 
 """
-Append one row to `<pathname>N<N>_depths.csv`: a record of the parameters each
-depth actually ran with, and of every freeze and the maxrank change it caused.
-One file per N, so workers sharing a directory never write the same file.
+Append one row to `<pathname>N<N>_depths.csv` (or to `logfile`): a record of the
+parameters each depth actually ran with, and of every freeze and the maxrank
+change it caused. One file per N, so workers sharing a directory never write the
+same file; parallel runs (one worker per depth) use one file per depth instead.
 """
 function log_depth_event(pathname, N; tau, event, maxrank, atol, niter = "", err = "",
-                         gradnorm = "", time = "", note = "")
-    path = pathname * "N$(N)_depths.csv"
+                         gradnorm = "", time = "", note = "", logfile = nothing)
+    path = something(logfile, pathname * "N$(N)_depths.csv")
     fmt(x) = x isa AbstractFloat ? string(round(x; sigdigits = 6)) : string(x)
     row = join(fmt.([Libc.strftime("%Y-%m-%d %H:%M:%S", Base.time()), N, tau, event,
                      something(maxrank, ""), atol, niter, err, gradnorm, time, note]), ",")
@@ -232,11 +237,21 @@ function log_depth_event(pathname, N; tau, event, maxrank, atol, niter = "", err
 end
 
 
-function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, err_reltol = 1e-3)
+"""
+    invert_maxrank(ψ, tau, pathname; resuming = false, err_reltol = nothing, sequential = true)
+
+Optimise the depth-`tau` circuit saved in `pathname`. Stops on `maxiter`, `gradtol`
+or the windowed value criterion (`err_reltol`, from the instructions unless given
+here). With `sequential = true` (depth-by-depth runs) it writes the instructions of depth
+`tau + 1` when done; parallel runs pass `sequential = false`, as every depth has its own.
+"""
+function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, err_reltol = nothing,
+                        sequential = true)
 
     N = length(ψ)
     instrpath = resuming ? pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2" : pathname*"N$(N)_T$(tau)_instructions.jld2"
     instr = load_locked(instrpath)
+    err_reltol = something(err_reltol, instr.err_reltol)
 
     sites = siteinds(ψ)
     chimax = maxlinkdim(ψ)
@@ -288,10 +303,9 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
     end
 
     # === value-based (windowed) convergence settings =======================
-    n_conv        = 500       # check the infidelity every n_conv iterations
-    # err_reltol (kwarg, default 1e-3): stop when the relative decrease over the window < this
-    err_floor_atol = 1e-13     # also stop if the absolute change is below the arithmetic
-                               # floor — REPLACE with your measured ε_C (Double64 test)
+    n_conv        = 1000       # check the infidelity every n_conv iterations
+    # err_reltol (instructions, or kwarg override): stop when the relative decrease over the window < this
+    err_floor_atol = 1e-13     # also stop if the absolute change is below the arithmetic floor
     converged_by_value = Ref(false)
     last_ckpt_err      = Ref(NaN)
     # =======================================================================
@@ -397,15 +411,22 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
                   converged=converged, finished=finished, time=cum_time)
     save_locked(pathname*"N$(N)_T$(tau).jld2", result_tau)
 
-    new_instr = copy(instr)
-    save_locked(pathname*"N$(N)_T$(tau+1)_instructions.jld2", new_instr)
+    if sequential
+        new_instr = copy(instr)
+        plainpath = pathname*"N$(N)_T$(tau)_instructions.jld2"
+        resuming && isfile(plainpath) && (new_instr.maxiter = load_locked(plainpath).maxiter)
+        save_locked(pathname*"N$(N)_T$(tau+1)_instructions.jld2", new_instr)
+    end
 
     return
 end
 
 
-function prepare_start(psi::MPS, pathname::String; kwargs...)
-    # Prepare warm start
+"""
+The depth-1 warm start: the layer preparing the best product-state approximation
+of `psi`, with a little noise (0.01) to help escape the saddle point there.
+"""
+function warm_start_layer(psi::MPS)
     N = length(psi)
     orthogonalize!(psi, 1)
     psi_cut = move_center(psi, N; trunc=(maxrank=1,), normalize=true)
@@ -415,7 +436,13 @@ function prepare_start(psi::MPS, pathname::String; kwargs...)
     # We add some random noise to help escaping the saddle point
     Vs = skew([randn(ComplexF64, 4, 4) for _ in eachindex(U_start)])
     newU = [retract(Matrix{ComplexF64}(I, (4,4)), V, 0.01)[1] for V in Vs]
-    U_start = newU .* U_start
+    return newU .* U_start
+end
+
+function prepare_start(psi::MPS, pathname::String; kwargs...)
+    # Prepare warm start
+    N = length(psi)
+    U_start = warm_start_layer(psi)
 
     instructions = InversionInstructions(; kwargs...)
     save_locked(pathname*"N$(N)_T1_instructions.jld2", instructions)
@@ -498,7 +525,7 @@ Resuming from the frozen point rather than the last checkpoint keeps all the
 progress: there the degenerate pair is split by the cut, and with the larger
 maxrank both values are kept, so the cost is smooth again.
 """
-function raise_maxrank_after_freeze!(pathname, e::GradientFreeze, adapt)
+function raise_maxrank_after_freeze!(pathname, e::GradientFreeze, adapt; logfile = nothing)
     N, tau, old = e.N, e.tau, e.maxrank
     new = old + adapt.step
     base  = pathname * "N$(N)_T$(tau)"
@@ -510,7 +537,7 @@ function raise_maxrank_after_freeze!(pathname, e::GradientFreeze, adapt)
               gradnorm = e.gradnorm, time = get(prev, :time, 0.0))
 
     if new > adapt.max
-        log_depth_event(pathname, N; info..., event = "freeze",
+        log_depth_event(pathname, N; info..., event = "freeze", logfile,
                         note = "maxrank $old: limit $(adapt.max) reached - giving up")
         return false
     end
@@ -536,7 +563,7 @@ function raise_maxrank_after_freeze!(pathname, e::GradientFreeze, adapt)
                  normgradhistory = prev.normgradhistory, cost = gb.cost, err = err,
                  time = get(prev, :time, 0.0), converged = false, finished = false))
 
-    log_depth_event(pathname, N; info..., event = "freeze", note = "maxrank $old -> $new")
+    log_depth_event(pathname, N; info..., event = "freeze", logfile, note = "maxrank $old -> $new")
     @warn "N=$N tau=$tau: gradient froze at maxrank=$old (iter $(e.niter)); resuming with maxrank=$new"
     return true
 end
@@ -623,4 +650,232 @@ function edit_ongoing_simulation!(pathname::String, N::Int; kwargs...)
     save_locked(path, instr)
     @info "updated $((; kwargs...)) in $path (tau=$tau, resuming=$resuming)"
     return instr
+end
+
+
+# =====================================================================
+#  Parallel inversion: every depth of a state optimised independently, at once
+# =====================================================================
+#
+# Instead of growing one circuit depth by depth, every depth tau = 1…maxdepth
+# starts from the same warm start (the prepare_start layer followed by tau-1 exact
+# identity layers) and is optimised on its own worker. After the job's time is up,
+# parallel_status shows the depth-vs-error curve from the checkpoints, and
+# continue_parallel gives chosen depths more iterations.
+#
+# A task is a NamedTuple as in driver.jl:
+#   label    for the log
+#   N        chain length
+#   outdir   where the files go. NOT a depth-by-depth run directory: the file
+#            names are the same (N<N>_T<tau>.jld2, ...) but mean something else
+#   h5       the state: read if the file exists, otherwise built from `make`
+#   make     nothing or (:corr, ξ)
+#   prepare  kwargs for InversionInstructions (maxrank, maxiter, err_reltol, ...)
+# Per depth: N<N>_T<tau>.jld2 (+ _instructions, _checkpoint_instructions,
+# _gradbreak) and the log N<N>_T<tau>_log.csv. Per state: the warm start
+# N<N>_warmstart.jld2, shared by all its depths (also by ones added later).
+#
+# Call these on the master, after the workers are started and have this file
+# loaded (see driver_parallel.jl). With no workers, pmap runs everything on the master.
+
+"Load (or build and save) the state of a task, as a dense MPS."
+function task_state(t)
+    if isfile(t.h5)
+        psi = h5open(f -> read(f, "psi", MPS), t.h5, "r")
+    elseif t.make === nothing
+        error("$(t.h5) does not exist and task \"$(t.label)\" has no recipe to build it")
+    elseif t.make[1] === :corr
+        psi = correlated_mps_xi(siteinds("Qubit", t.N), t.make[2])
+        h5open(f -> write(f, "psi", psi), t.h5, "w")
+    else
+        error("unknown recipe $(t.make)")
+    end
+    length(psi) == t.N || error("$(t.h5) holds an MPS of length $(length(psi)), expected $(t.N)")
+    return dense(psi)
+end
+
+"""
+    prepare_parallel(psi, depths, pathname; kwargs...) -> depths added
+
+Write the starting point of every depth in `depths` that has no file yet: the
+warm start of the state (drawn once and kept in N<N>_warmstart.jld2) followed by
+tau-1 exact identity layers, with instructions built from `kwargs`. Existing
+depths are never touched, so calling it again only adds depths.
+"""
+function prepare_parallel(psi::MPS, depths, pathname::String; kwargs...)
+    N = length(psi)
+    todo = [tau for tau in depths if !isfile(pathname * "N$(N)_T$(tau).jld2")]
+    isempty(todo) && return todo
+    wpath = pathname * "N$(N)_warmstart.jld2"
+    isfile(wpath) || save_locked(wpath, warm_start_layer(psi))
+    warm = Vector{Matrix{ComplexF64}}(load_locked(wpath))
+    instr = InversionInstructions(; kwargs...)
+    for tau in todo
+        nid  = n_unitaries(N, tau) - length(warm)
+        arrU = vcat(warm, [Matrix{ComplexF64}(I, 4, 4) for _ in 1:nid])
+        save_locked(pathname * "N$(N)_T$(tau)_instructions.jld2", instr)
+        save_locked(pathname * "N$(N)_T$(tau).jld2",
+                    (N = N, tau = tau, arrU = arrU, gradnorm = Inf, numfg = 0,
+                     normgradhistory = Matrix{Float64}(undef, 0, 2), time = 0.0,
+                     converged = false, finished = false))
+    end
+    return todo
+end
+
+"""
+    run_depth(psi, tau, pathname; adapt = nothing) -> Symbol
+
+Run one depth of a parallel inversion until it stops (maxiter, gradtol or
+err_reltol), resuming from its last checkpoint if it was interrupted. A depth
+that is already finished is left alone (`continue_parallel` reopens it). With
+`adapt = (step, max)` a GradientFreeze raises maxrank, as in continue_inversion.
+"""
+function run_depth(psi::MPS, tau::Int, pathname::String; adapt = nothing)
+    N = length(psi)
+    base = pathname * "N$(N)_T$(tau)"
+    logfile = base * "_log.csv"
+    while true
+        result = load_locked(base * ".jld2")
+        get(result, :finished, false) && return :already_finished
+        try
+            invert_maxrank(psi, tau, pathname; resuming = !isinf(result.gradnorm), sequential = false)
+        catch e
+            (e isa GradientFreeze && adapt !== nothing) || rethrow()
+            raise_maxrank_after_freeze!(pathname, e, adapt; logfile) || rethrow()
+            continue
+        end
+        done  = load_locked(base * ".jld2")
+        instr = load_locked(base * "_instructions.jld2")
+        log_depth_event(pathname, N; tau, event = "finished", maxrank = instr.maxrank, atol = instr.atol,
+                        niter = size(done.normgradhistory, 1), err = get(done, :err, ""),
+                        gradnorm = done.gradnorm, time = get(done, :time, ""), logfile,
+                        note = "converged=$(get(done, :converged, "")) err_reltol=$(instr.err_reltol) " *
+                               "degen_rtol=$(instr.degen_rtol) degen_wmax=$(instr.degen_wmax)")
+        return :finished
+    end
+end
+
+"Run (task, tau) pairs on the workers, most expensive first; report and return the outcome of each."
+function run_depth_pairs(pairs; adapt = nothing)
+    pairs = sort(collect(pairs); by = p -> p[1].N * p[2], rev = true)
+    results = pmap(pairs; on_error = identity) do (t, tau)
+        s = @elapsed status = run_depth(task_state(t), tau, t.outdir; adapt)
+        (status, s)
+    end
+    for ((t, tau), r) in zip(pairs, results)
+        r isa Exception ? @error("$(t.label) T=$tau failed", exception = r) :
+                          @info("$(t.label) T=$tau: $(r[1]) in $(round(r[2] / 3600; digits = 2)) h")
+    end
+    return [(label = t.label, tau = tau, result = r) for ((t, tau), r) in zip(pairs, results)]
+end
+
+"""
+    parallel_inversion(tasks, depths; prepare = true, adapt = nothing)
+
+Invert every task's state at every depth in `depths` (e.g. 1:maxdepth) at once,
+one (state, depth) pair per worker, deepest and longest first. Depths without
+files are prepared first (on the master); unfinished ones resume from their last
+checkpoint, finished ones are skipped. So the same call starts a run, resumes it
+after the job ended, and adds depths. `prepare = false` only runs existing depths.
+"""
+function parallel_inversion(tasks, depths; prepare = true, adapt = nothing)
+    pairs = Tuple{Any,Int}[]
+    for t in tasks
+        mkpath(t.outdir)
+        if prepare
+            added = prepare_parallel(task_state(t), depths, t.outdir; t.prepare...)
+            isempty(added) || @info "$(t.label): prepared depths $(added)"
+        end
+        append!(pairs, [(t, tau) for tau in depths if isfile(t.outdir * "N$(t.N)_T$(tau).jld2")])
+    end
+    return run_depth_pairs(pairs; adapt)
+end
+
+"""
+Make a depth ready to run again with instruction fields overridden by `kwargs`:
+a finished depth is reopened from its final circuit (its history and time are
+kept; the value criterion needs two fresh n_conv windows before it can stop it);
+an interrupted one gets the overrides on the checkpoint it resumes from; one never
+started gets them on its plain instructions. `maxiter` counts the iterations of
+this continuation (the plain instructions keep the original budget).
+"""
+function reopen_depth!(t, tau; kwargs...)
+    base = t.outdir * "N$(t.N)_T$(tau)"
+    r = load_locked(base * ".jld2")
+    plain = copy(load_locked(base * "_instructions.jld2"))
+    ckptpath = base * "_checkpoint_instructions.jld2"
+    if get(r, :finished, false)
+        # a finite gradnorm makes run_depth take the resume path from this circuit
+        save_locked(base * ".jld2", (N = t.N, tau = tau, arrU = r.arrU, gradnorm = r.gradnorm,
+                    normgradhistory = r.normgradhistory, cost = get(r, :cost, NaN), err = get(r, :err, NaN),
+                    time = get(r, :time, 0.0), converged = false, finished = false))
+        ckpt, state = copy(plain), "reopened"
+    elseif !isinf(r.gradnorm)
+        ckpt, state = copy(isfile(ckptpath) ? load_locked(ckptpath) : plain), "resumed"
+    else
+        ckpt, state = nothing, "not started"
+    end
+    for (k, v) in kwargs
+        (k !== :maxiter || ckpt === nothing) && setproperty!(plain, k, v)
+        ckpt === nothing || setproperty!(ckpt, k, v)
+    end
+    save_locked(base * "_instructions.jld2", plain)
+    ckpt === nothing || save_locked(ckptpath, ckpt)
+    log_depth_event(t.outdir, t.N; tau, event = "continue", maxrank = plain.maxrank, atol = plain.atol,
+                    err = get(r, :err, ""), logfile = base * "_log.csv",
+                    note = "$state with $((; kwargs...))")
+    return state
+end
+
+"""
+    continue_parallel(tasks, depths; adapt = nothing, kwargs...)
+
+Give the chosen `depths` of every task more iterations, in parallel. `kwargs`
+override instruction fields for this continuation, e.g. `maxiter = 50_000`
+(iterations of this continuation) or `err_reltol = 1e-4`. Finished depths are
+reopened from their final circuit, interrupted ones resume from their last
+checkpoint. Depths without files are skipped (use parallel_inversion to add them).
+"""
+function continue_parallel(tasks, depths; adapt = nothing, kwargs...)
+    for (k, _) in kwargs
+        hasfield(InversionInstructions, k) || error("InversionInstructions has no field :$k")
+    end
+    pairs = Tuple{Any,Int}[]
+    for t in tasks, tau in depths
+        if !isfile(t.outdir * "N$(t.N)_T$(tau).jld2")
+            @warn "$(t.label): depth $tau has no files, skipped"
+            continue
+        end
+        state = reopen_depth!(t, tau; kwargs...)
+        @info "$(t.label) T=$tau: $state"
+        push!(pairs, (t, tau))
+    end
+    return run_depth_pairs(pairs; adapt)
+end
+
+"""
+    parallel_status(pathname, N; io = stdout) -> rows
+
+Depth vs error of a parallel run, from the saved files (final results, or the
+latest checkpoint of depths still running or interrupted), printed as a table.
+"""
+function parallel_status(pathname::String, N::Int; io = stdout)
+    pattern = Regex("^N$(N)_T(\\d+)\\.jld2\$")
+    taus = sort([parse(Int, m[1]) for f in readdir(pathname) for m in [match(pattern, f)] if m !== nothing])
+    rows = map(taus) do tau
+        r = load_locked(pathname * "N$(N)_T$(tau).jld2")
+        ipath = pathname * "N$(N)_T$(tau)_instructions.jld2"
+        maxrank = isfile(ipath) ? load_locked(ipath).maxrank : nothing
+        state = get(r, :finished, false) ? (get(r, :converged, false) ? "converged" : "stopped") :
+                isinf(r.gradnorm) ? "not started" : "running/interrupted"
+        (tau = tau, state = state, niter = size(r.normgradhistory, 1), err = get(r, :err, NaN),
+         gradnorm = r.gradnorm, hours = get(r, :time, 0.0) / 3600, maxrank = maxrank)
+    end
+    println(io, "  tau  state                 niter        err         |grad|     hours   maxrank")
+    for r in rows
+        println(io, rpad("  $(r.tau)", 6), rpad(r.state, 21), lpad(r.niter, 7), "   ",
+                rpad(string(round(r.err; sigdigits = 4)), 11), " ", rpad(string(round(r.gradnorm; sigdigits = 3)), 10),
+                " ", lpad(string(round(r.hours; digits = 2)), 6), "   ", something(r.maxrank, "-"))
+    end
+    return rows
 end
