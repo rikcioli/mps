@@ -38,28 +38,20 @@ Base.@kwdef mutable struct InversionInstructions
     inner_maxiter::Int = 10000
     inner_gradtol::Float64 = 1e-5
     ρ_growth::Float64 = 2.0
-    # never cut inside a near-degenerate cluster of negligible singular values (consecutive
-    # values within degen_rtol of each other, weight s²/Σs² < degen_wmax): the cut moves
-    # down to keep the whole cluster, up to degen_maxextra values beyond maxrank (see
-    # truncdegen_keep). Clusters of larger weight keep the plain cut, so a rank that is
-    # too small still shows up as a GradientFreeze. degen_rtol = 0: always the plain cut.
-    degen_rtol::Float64 = 1e-3
-    degen_maxextra::Int = 4
-    degen_wmax::Float64 = 1e-9
 end
 
 # copy for a mutable struct (field-by-field)
 Base.copy(x::InversionInstructions) = InversionInstructions(
     (getfield(x, f) for f in fieldnames(InversionInstructions))...)
 
-# Instruction files written before a field existed come back from JLD2 as a
-# ReconstructedMutable: rebuild a real InversionInstructions from them. A missing
-# degen_rtol means the run was started with the plain cut, and it stays that way.
+# Instruction files whose fields differ from the current struct (written before a
+# field existed, or with fields since removed) come back from JLD2 as a
+# ReconstructedMutable: rebuild a real InversionInstructions from them, dropping
+# unknown fields and giving missing ones their default.
 upgrade(x) = x
 function upgrade(x::JLD2.ReconstructedMutable{:InversionInstructions})
     kw = Dict{Symbol,Any}(k => getproperty(x, k) for k in propertynames(x)
                           if hasfield(InversionInstructions, k))
-    get!(kw, :degen_rtol, 0.0)
     return InversionInstructions(; kw...)
 end
 
@@ -264,11 +256,6 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
     orthogonalize!(zeromps, 1)
 
     trunc = (maxrank=maxrank, atol=instr.atol)
-    # every cut keeps a relative gap > degen_rtol (see InversionInstructions)
-    instr.degen_rtol > 0 && (trunc = truncdegen_keep(TruncationStrategy(; trunc...);
-                                                     rtol = instr.degen_rtol,
-                                                     maxextra = instr.degen_maxextra,
-                                                     wmax = instr.degen_wmax))
     nU = n_unitaries(N, tau)
     n_checkpoint = instr.n_checkpoint
 
@@ -511,7 +498,7 @@ function continue_inversion(psi::MPS, maxtau::Int, pathname::String, invertFunct
     log_depth_event(pathname, N; tau, event = "finished", maxrank = instr.maxrank, atol = instr.atol,
                     niter = size(done.normgradhistory, 1), err = get(done, :err, ""),
                     gradnorm = done.gradnorm, time = get(done, :time, ""),
-                    note = "converged=$(get(done, :converged, "")) degen_rtol=$(instr.degen_rtol) degen_wmax=$(instr.degen_wmax)")
+                    note = "converged=$(get(done, :converged, "")) err_reltol=$(instr.err_reltol)")
     return :continue
 end
 
@@ -749,8 +736,7 @@ function run_depth(psi::MPS, tau::Int, pathname::String; adapt = nothing)
         log_depth_event(pathname, N; tau, event = "finished", maxrank = instr.maxrank, atol = instr.atol,
                         niter = size(done.normgradhistory, 1), err = get(done, :err, ""),
                         gradnorm = done.gradnorm, time = get(done, :time, ""), logfile,
-                        note = "converged=$(get(done, :converged, "")) err_reltol=$(instr.err_reltol) " *
-                               "degen_rtol=$(instr.degen_rtol) degen_wmax=$(instr.degen_wmax)")
+                        note = "converged=$(get(done, :converged, "")) err_reltol=$(instr.err_reltol)")
         return :finished
     end
 end
