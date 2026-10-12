@@ -24,8 +24,12 @@ Base.@kwdef mutable struct InversionInstructions
     maxiter::Int = 1000000
     gradtol::Float64 = 1e-8
     # value-based stop: relative decrease of the error over the last n_conv-iteration window
+    # (err_reltol = 0 switches the value criterion off entirely, absolute floor included)
     err_reltol::Float64 = 1e-3
     n_checkpoint::Int = 1000
+    # every n_snapshot iterations (counted over the whole history of the depth, resumes
+    # included) keep the circuit as N<N>_T<tau>_snap_it<iter>.jld2; 0 = no snapshots
+    n_snapshot::Int = 0
     skip_outer::Bool = false
     m::Int = 5                                      
     Σε_max::Float64 = 1e-2
@@ -278,6 +282,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
     gradmin = nothing
     total_nghist::Matrix{Float64} = savefile.normgradhistory
     total_time_prior::Float64 = get(savefile, :time, 0.0)
+    n_prior = size(total_nghist, 1)          # iterations done before this call (snapshot numbering)
 
     m = instr.m
     maxiter = instr.maxiter
@@ -310,7 +315,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
         # f == sum(overlap_cost), so the infidelity is err = -expm1(-f);
         # expm1 avoids cancellation when f is exponentially small.
         # MUST run before the stall block so a value-converged run isn't flagged as stuck.
-        if numiter % n_conv == 0
+        if err_reltol > 0 && numiter % n_conv == 0
             err_now = -expm1(-f)
             if !isnan(last_ckpt_err[])
                 Δ = last_ckpt_err[] - err_now                       # > 0 means error decreased
@@ -339,6 +344,14 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
                     throw(GradientFreeze(N, tau, numiter, gnorm, spread, n_stall, maxrank))
                 end
             end
+        end
+
+        # snapshot: the circuit at this iteration, in its own file (f is its cost)
+        itg = n_prior + numiter
+        if instr.n_snapshot > 0 && itg % instr.n_snapshot == 0
+            save_locked(pathname*"N$(N)_T$(tau)_snap_it$(itg).jld2",
+                        (N=N, tau=tau, iter=itg, arrU=x, cost=f, err=-expm1(-f), gradnorm=gnorm,
+                         time=total_time_prior + (Base.time() - t_start)))
         end
 
         if numiter % n_checkpoint == 0
@@ -575,7 +588,7 @@ function restart_from_depth(psi::MPS, depth_start::Int, depth_max::Int,
         error("depth $(depth_start-1) is not marked finished; finish or resume it first")
 
     # 1. delete results, instructions, checkpoints and gradbreaks for tau ≥ depth_start
-    pattern = Regex("^N$(N)_T(\\d+)(_instructions|_checkpoint_instructions|_gradbreak(_chi\\d+)?)?\\.jld2\$")
+    pattern = Regex("^N$(N)_T(\\d+)(_instructions|_checkpoint_instructions|_gradbreak(_chi\\d+)?|_snap_it\\d+)?\\.jld2\$")
     for f in readdir(pathname)
         m = match(pattern, f)
         isnothing(m) && continue
@@ -756,26 +769,62 @@ function run_depth_pairs(pairs; adapt = nothing)
 end
 
 """
+    run_parallel_tasks(tasks; adapt = nothing)
+
+The common runner. Besides the fields above, every task carries its own `depths`,
+`mode` and `settings` (a NamedTuple of InversionInstructions fields):
+  :start     prepare the depths without files (with `settings` as their
+             instructions), then run them all: unfinished depths resume from
+             their last checkpoint, finished ones are skipped
+  :run       run the existing depths only, preparing nothing
+  :continue  reopen the depths with `settings` as overrides (see reopen_depth!),
+             then run them
+Preparing and reopening happen here, on the master; then all (state, depth) pairs
+of all tasks run in one worker pool, the most expensive first.
+"""
+function run_parallel_tasks(tasks; adapt = nothing)
+    for t in tasks, k in keys(t.settings)
+        hasfield(InversionInstructions, k) || error("InversionInstructions has no field :$k")
+    end
+    todo = Tuple{Any,Int}[]
+    for t in tasks
+        mkpath(t.outdir)
+        exists(tau) = isfile(t.outdir * "N$(t.N)_T$(tau).jld2")
+        if t.mode === :start || t.mode === :run
+            if t.mode === :start
+                added = prepare_parallel(task_state(t), t.depths, t.outdir; t.settings...)
+                isempty(added) || @info "$(t.label): prepared depths $(added)"
+            end
+            append!(todo, [(t, tau) for tau in t.depths if exists(tau)])
+        elseif t.mode === :continue
+            for tau in t.depths
+                if !exists(tau)
+                    @warn "$(t.label): depth $tau has no files, skipped"
+                    continue
+                end
+                @info "$(t.label) T=$tau: $(reopen_depth!(t, tau; t.settings...))"
+                push!(todo, (t, tau))
+            end
+        else
+            error("unknown mode $(t.mode) for $(t.label)")
+        end
+    end
+    return run_depth_pairs(todo; adapt)
+end
+
+"""
     parallel_inversion(tasks, depths; prepare = true, adapt = nothing)
 
 Invert every task's state at every depth in `depths` (e.g. 1:maxdepth) at once,
 one (state, depth) pair per worker, deepest and longest first. Depths without
-files are prepared first (on the master); unfinished ones resume from their last
-checkpoint, finished ones are skipped. So the same call starts a run, resumes it
-after the job ended, and adds depths. `prepare = false` only runs existing depths.
+files are prepared first (on the master, with the task's `prepare` settings);
+unfinished ones resume from their last checkpoint, finished ones are skipped. So
+the same call starts a run, resumes it after the job ended, and adds depths.
+`prepare = false` only runs existing depths.
 """
-function parallel_inversion(tasks, depths; prepare = true, adapt = nothing)
-    pairs = Tuple{Any,Int}[]
-    for t in tasks
-        mkpath(t.outdir)
-        if prepare
-            added = prepare_parallel(task_state(t), depths, t.outdir; t.prepare...)
-            isempty(added) || @info "$(t.label): prepared depths $(added)"
-        end
-        append!(pairs, [(t, tau) for tau in depths if isfile(t.outdir * "N$(t.N)_T$(tau).jld2")])
-    end
-    return run_depth_pairs(pairs; adapt)
-end
+parallel_inversion(tasks, depths; prepare = true, adapt = nothing) =
+    run_parallel_tasks([merge(t, (depths = depths, mode = prepare ? :start : :run,
+                                  settings = get(t, :prepare, NamedTuple()))) for t in tasks]; adapt)
 
 """
 Make a depth ready to run again with instruction fields overridden by `kwargs`:
@@ -822,46 +871,58 @@ override instruction fields for this continuation, e.g. `maxiter = 50_000`
 reopened from their final circuit, interrupted ones resume from their last
 checkpoint. Depths without files are skipped (use parallel_inversion to add them).
 """
-function continue_parallel(tasks, depths; adapt = nothing, kwargs...)
-    for (k, _) in kwargs
-        hasfield(InversionInstructions, k) || error("InversionInstructions has no field :$k")
-    end
-    pairs = Tuple{Any,Int}[]
-    for t in tasks, tau in depths
-        if !isfile(t.outdir * "N$(t.N)_T$(tau).jld2")
-            @warn "$(t.label): depth $tau has no files, skipped"
-            continue
-        end
-        state = reopen_depth!(t, tau; kwargs...)
-        @info "$(t.label) T=$tau: $state"
-        push!(pairs, (t, tau))
-    end
-    return run_depth_pairs(pairs; adapt)
-end
+continue_parallel(tasks, depths; adapt = nothing, kwargs...) =
+    run_parallel_tasks([merge(t, (depths = depths, mode = :continue, settings = (; kwargs...))) for t in tasks]; adapt)
 
 """
-    parallel_status(pathname, N; io = stdout) -> rows
+    error_at(history, M) -> err
+
+The error a run had after `M` iterations, read from its per-iteration history
+(`normgradhistory`, column 1 = cost f, err = 1 - exp(-f)): what the same run would
+have returned with maxiter = M. NaN if it has not got that far (yet).
+"""
+error_at(h::AbstractMatrix, M::Integer) = M + 1 <= size(h, 1) ? -expm1(-h[M+1, 1]) : NaN
+
+"""
+    parallel_status(pathname, N; at = nothing, depths = nothing, io = stdout) -> rows
 
 Depth vs error of a parallel run, from the saved files (final results, or the
 latest checkpoint of depths still running or interrupted), printed as a table.
+`at = [10_000, 100_000]` adds the error each depth had after that many iterations
+(from its history, see `error_at`): the depth-vs-error curve at several maxiters
+from one long run. A depth that converged earlier shows its final error there;
+NaN means a depth has not run that many iterations (yet). `snaps` counts the
+circuits kept as snapshots. `depths` restricts the table to some depths.
 """
-function parallel_status(pathname::String, N::Int; io = stdout)
+function parallel_status(pathname::String, N::Int; at = nothing, depths = nothing, io = stdout)
     pattern = Regex("^N$(N)_T(\\d+)\\.jld2\$")
-    taus = sort([parse(Int, m[1]) for f in readdir(pathname) for m in [match(pattern, f)] if m !== nothing])
+    files = readdir(pathname)
+    taus = sort([parse(Int, m[1]) for f in files for m in [match(pattern, f)] if m !== nothing])
+    depths === nothing || filter!(in(depths), taus)
+    its = at === nothing ? Int[] : Int.(collect(at))
     rows = map(taus) do tau
         r = load_locked(pathname * "N$(N)_T$(tau).jld2")
         ipath = pathname * "N$(N)_T$(tau)_instructions.jld2"
         maxrank = isfile(ipath) ? load_locked(ipath).maxrank : nothing
         state = get(r, :finished, false) ? (get(r, :converged, false) ? "converged" : "stopped") :
                 isinf(r.gradnorm) ? "not started" : "running/interrupted"
-        (tau = tau, state = state, niter = size(r.normgradhistory, 1), err = get(r, :err, NaN),
-         gradnorm = r.gradnorm, hours = get(r, :time, 0.0) / 3600, maxrank = maxrank)
+        snaps = count(f -> startswith(f, "N$(N)_T$(tau)_snap_it"), files)
+        # a converged depth would have returned its final error with any larger maxiter;
+        # otherwise NaN = not got that far (yet)
+        h = r.normgradhistory
+        eat(M) = (e = error_at(h, M); isnan(e) && state == "converged" ? -expm1(-h[end, 1]) : e)
+        (tau = tau, state = state, niter = size(h, 1), err = get(r, :err, NaN),
+         gradnorm = r.gradnorm, hours = get(r, :time, 0.0) / 3600, maxrank = maxrank, snaps = snaps,
+         err_at = [eat(M) for M in its])
     end
-    println(io, "  tau  state                 niter        err         |grad|     hours   maxrank")
+    fmt(x) = rpad(string(round(x; sigdigits = 4)), 11)
+    println(io, "  tau  state                 niter        err         |grad|     hours   maxrank  snaps",
+            join(["  err@" * rpad(string(M), 6) for M in its]))
     for r in rows
         println(io, rpad("  $(r.tau)", 6), rpad(r.state, 21), lpad(r.niter, 7), "   ",
-                rpad(string(round(r.err; sigdigits = 4)), 11), " ", rpad(string(round(r.gradnorm; sigdigits = 3)), 10),
-                " ", lpad(string(round(r.hours; digits = 2)), 6), "   ", something(r.maxrank, "-"))
+                fmt(r.err), " ", rpad(string(round(r.gradnorm; sigdigits = 3)), 10),
+                " ", lpad(string(round(r.hours; digits = 2)), 6), "   ", rpad(string(something(r.maxrank, "-")), 7),
+                lpad(r.snaps, 5), join(["  " * fmt(e) for e in r.err_at]))
     end
     return rows
 end

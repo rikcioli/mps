@@ -13,10 +13,10 @@ using ColorSchemes
 Base.@kwdef mutable struct InversionInstructions
     maxrank::Union{Nothing, Int} = nothing
     maxerror::Union{Nothing, Float64} = nothing
-    atol::Float64 = 1e-8
+    atol::Float64 = 1e-10
     maxiter::Int = 1000000
     gradtol::Float64 = 1e-8
-    n_checkpoint::Int = 5000
+    n_checkpoint::Int = 1000
     skip_outer::Bool = false
     m::Int = 5                                      
     Σε_max::Float64 = 1e-2
@@ -179,7 +179,7 @@ function check_xi()
 end
 
 
-function find_max_finished_tau(folder::String, Nvals::Vector{Int})
+function find_max_finished_tau(folder::String, Nvals::Vector{Int}; include_checkpoints = false)
     tauNvals = Tuple{Int,Int}[]
 
     for N in Nvals
@@ -187,12 +187,18 @@ function find_max_finished_tau(folder::String, Nvals::Vector{Int})
         taus = [parse(Int, m.captures[1]) for f in readdir(folder)
                 for m in [match(pattern, f)] if !isnothing(m)]
         isempty(taus) && continue
+        sort!(taus, rev=true)
 
-        for tau in sort(taus, rev=true)
-            result = load_object(folder*"N$(N)_T$(tau).jld2")
-            if get(result, :finished, true)
-                push!(tauNvals, (tau, N))
-                break
+        if include_checkpoints
+            push!(tauNvals, (taus[1], N))
+            continue
+        else
+            for tau in taus
+                result = load_object(folder*"N$(N)_T$(tau).jld2")
+                if get(result, :finished, true)
+                    push!(tauNvals, (tau, N))
+                    break
+                end
             end
         end
     end
@@ -201,9 +207,9 @@ function find_max_finished_tau(folder::String, Nvals::Vector{Int})
 end
 
 
-function extract_data(folder::String, Nvals::Vector{Int})
+function extract_data(folder::String, Nvals::Vector{Int}; include_checkpoints = false)
 
-    tauNvals = find_max_finished_tau(folder, Nvals)
+    tauNvals = find_max_finished_tau(folder, Nvals, include_checkpoints=include_checkpoints)
 
     Nout = Int[]
     tauout = Int[]
@@ -288,6 +294,8 @@ function extract_plots_xi(data::DataFrame, title::String)
     end
     plt_err = plot(xscale=:log, ylabel=L"\tau", xlabel=L"\epsilon",
                 xflip=true, title=title, legend=:topleft, dpi=400)
+    plt_err_resc = plot(xscale=:log, ylabel=L"\tau/\xi", xlabel=L"\epsilon",
+                xflip=true, title=title, legend=:topleft, dpi=400)
     plt_time_err = plot(xscale=:log, ylabel=L"t \ (s)",
                     xlabel=L"\epsilon", xflip=true, title=title,
                     legend=:topleft, dpi=400)
@@ -303,6 +311,7 @@ function extract_plots_xi(data::DataFrame, title::String)
         subdata = sort(data[data.xi .== xi, :], :tau)
 
         plot!(plt_err, subdata.err, subdata.tau, label=L"\xi="*"$(xi)", color=colors_err[pos])
+        plot!(plt_err_resc, subdata.err, subdata.tau ./ xi, label=L"\xi="*"$(xi)", color=colors_err[pos])
         plot!(plt_time_err, subdata.err, subdata.time, label=L"\xi="*"$(xi)", color=colors_time[pos])
         plot!(plt_time_tau, subdata.tau, subdata.time, label=L"\xi="*"$(xi)", color=colors_time[pos])
         plot!(plt_niter_tau, subdata.tau, subdata.niter, label=L"\xi="*"$(xi)", color=colors_time[pos])
@@ -310,7 +319,7 @@ function extract_plots_xi(data::DataFrame, title::String)
         plot!(plt_costratio_tau, subdata.tau, subdata.costratio, label=L"\xi="*"$(xi)", color=colors_err[pos], yscale=:log10)
     end
 
-    return [plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau]
+    return [plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau, plt_err_resc]
 end
 
 
@@ -366,6 +375,34 @@ function extract_tau_vs_xi_fixedN(data::DataFrame; err_refs = [1e-2, 1e-3], N_fi
     end
 
     return plt_xi_err
+end
+
+
+function extract_tau_vs_N_fixederr(data::DataFrame, err_refs, title::String)
+    Nvals = sort(unique(data.N))
+    @show Nvals
+    err_refs = err_refs isa Number ? [err_ref] : collect(err_refs)
+
+    function first_tau(subdata, err_ref)
+        isempty(subdata) && return missing
+        subdata = sort(subdata, :tau)
+        idx = findfirst(subdata.err .< err_ref)
+        return isnothing(idx) ? missing : subdata.tau[idx]
+    end
+
+    colors = [get(ColorSchemes.inferno, 0.5)]
+    if length(err_refs) > 1
+        colors = [get(ColorSchemes.inferno, t) for t in range(0.1, stop=0.9, length=length(err_refs))]
+    end
+
+    plt_tau_N = plot(xlabel = L"N", ylabel = L"\tau", title = title, legend = :topleft, dpi = 400)
+    for (pos, err) in enumerate(err_refs)
+        tau_vals = [first_tau(data[(data.N .== N), :], err) for N in Nvals]
+        @show err, tau_vals
+        plot!(plt_tau_N, Nvals, tau_vals, marker = :circle, label = L"\epsilon="*"$(err)", color = colors[pos])
+    end
+
+    return plt_tau_N
 end
 
 
@@ -1089,12 +1126,13 @@ plt_time1iter_tau
 plt_costratio_tau
 
 
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+df_m5      = extract_data(folder*"ising\\g1.5\\m5_driver\\", Vector(60:40:300))
+df_m5_fix = extract_data(folder*"ising\\g1.5\\m5_fixatol_driver\\", Vector(60:40:300))
+df_m5_long = extract_data(folder*"ising\\g1.5\\m5_long\\", Vector(60:40:300))
 
-df_m5      = extract_data("testdata\\ising\\g1.5\\m5_driver\\", Vector(60:40:300))
-df_m5_fix = extract_data("testdata\\ising\\g1.5\\m5_e-15_driver\\", Vector(60:40:300))
-
-Nvals_compare = [60, 100, 140, 180, 220, 260, 300]
-dfs_labels = [(df_m5, "atol 1e-8"), (df_m5_fix, "atol 1e-15")]
+Nvals_compare = [60, 100, 140]
+dfs_labels = [(df_m5, "atol 1e-8"), (df_m5_fix, "atol 1e-15"), (df_m5_long, "atol 1e-15 long")]
 
 plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau =
     extract_plots_compare(dfs_labels, Nvals_compare, "Ising g=1.5 comparison")
@@ -1104,8 +1142,47 @@ plt_time_err
 plt_time_tau
 plt_niter_tau
 plt_time1iter_tau
+plot!(plt_time1iter_tau, legend=:bottomright)
 plt_costratio_tau
 
+
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+folder2 = folder*"ising\\g1.5\\m5_fixatol_driver\\"
+Nvals = Vector(60:40:300)
+df = extract_data(folder2, Nvals)
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "Ising g=1.5, m=5, chi=10")
+
+plt_err
+plt_time_err
+plt_time_tau
+plt_niter_tau
+plt_time1iter_tau
+plt_costratio_tau
+
+folder3 = folder*"ising\\plots\\m5_fixatol\\"
+savefig(plt_err, folder3*"tau_vs_eps.png")
+savefig(plt_time_err, folder3*"time_vs_eps.png")
+savefig(plt_time_tau, folder3*"time_vs_tau.png")
+savefig(plt_niter_tau, folder3*"niter_vs_tau.png")
+savefig(plt_time1iter_tau, folder3*"time1iter_vs_tau.png")
+savefig(plt_costratio_tau, folder3*"costratio_vs_tau.png")
+
+
+
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+folder2 = folder*"ising\\g1.5\\m5_long\\"
+Nvals = Vector(60:40:300)
+df = extract_data(folder2, Nvals)
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "Ising g=1.5, m=5, chi=10")
+
+plt_err
+plt_time_err
+plt_time_tau
+plt_niter_tau
+plt_time1iter_tau
+plt_costratio_tau
 
 ### XY ###
 
@@ -1548,13 +1625,19 @@ plt_time1iter_tau
 plt_costratio_tau
 
 
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+df_m50      = extract_data(folder*"xxz\\Jz2.5\\m50\\", Vector(60:40:300))
+df_m20_7 = extract_data(folder*"xxz\\Jz2.5\\m20_7\\", Vector(60:40:300))
+df_m20_dr = extract_data(folder*"xxz\\Jz2.5\\m20_driver\\", Vector(60:40:300))
+df_m20_fixdr = extract_data(folder*"xxz\\Jz2.5\\m20_fixatol_driver\\", Vector(60:40:300))
+df_m20_long = extract_data(folder*"xxz\\Jz2.5\\m20_long\\", Vector(60:40:300))
+df_m20_par = extract_data(folder*"xxz\\Jz2.5\\parallel\\chi24\\", Vector(60:40:100))
 
-df_m50      = extract_data("testdata\\xxz\\Jz2.5\\m50\\", Vector(60:40:300))
-df_m20_7 = extract_data("testdata\\xxz\\Jz2.5\\m20_7\\", Vector(60:40:300))
-df_m20_dr = extract_data("testdata\\xxz\\Jz2.5\\m20_driver\\", Vector(60:40:300))
-
-Nvals_compare = [180, 220, 260]
+Nvals_compare = [60, 100]
 dfs_labels = [(df_m50, "m=50, chi=24"), (df_m20_7, "m=20_7, chi=24"), (df_m20_dr, "m=20 driver, chi=24")]
+dfs_labels = [(df_m20_dr, "m=20, atol=1e-8"), (df_m20_fixdr, "m=20, atol=1e-15")]
+dfs_labels = [(df_m20_dr, "m=20, atol=1e-8"), (df_m20_fixdr, "m=20, atol=1e-15"), (df_m20_long, "m=20 long, atol=1e-15")]
+dfs_labels = [(df_m20_dr, "m=20, atol=1e-8"), (df_m20_long, "m=20 long, atol=1e-15"), (df_m20_par, "m=20 parallel, atol=1e-10")]
 
 plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau =
     extract_plots_compare(dfs_labels, Nvals_compare, "XXZ Jz=2.5 comparison")
@@ -1565,8 +1648,81 @@ plt_time_tau
 plt_niter_tau
 plt_time1iter_tau
 plt_costratio_tau
+plot!(plt_costratio_tau, legend=:bottomright)
 
 savefig(plt_time1iter_tau, "testdata\\xxz\\plots\\driver_comparison.png")
+
+
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+folder2 = folder*"xxz\\Jz2.5\\m20_driver\\"
+Nvals = Vector(60:40:300)
+df = extract_data(folder2, Nvals)
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "XXZ Jz=2.5, m=20, chi=24")
+
+plt_err
+plt_time_err
+plt_time_tau
+plt_niter_tau
+plt_time1iter_tau
+plt_costratio_tau
+
+folder3 = folder*"xxz\\plots\\m20_driver\\"
+savefig(plt_err, folder3*"tau_vs_eps.png")
+savefig(plt_time_err, folder3*"time_vs_eps.png")
+savefig(plt_time_tau, folder3*"time_vs_tau.png")
+savefig(plt_niter_tau, folder3*"niter_vs_tau.png")
+savefig(plt_time1iter_tau, folder3*"time1iter_vs_tau.png")
+savefig(plt_costratio_tau, folder3*"costratio_vs_tau.png")
+
+
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+folder2 = folder*"xxz\\Jz2.5\\m20_long\\"
+Nvals = Vector(60:40:300)
+df = extract_data(folder2, Nvals)
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "XXZ Jz=2.5, m=20, chi=24")
+
+plt_err
+plt_time_err
+plt_time_tau
+plt_niter_tau
+plt_time1iter_tau
+plt_costratio_tau
+
+
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+folder2 = folder*"xxz\\Jz2.5\\parallel\\chi24\\"
+Nvals = Vector(60:40:100)
+df = extract_data(folder2, Nvals)
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "XXZ Jz=2.5, m=20, chi=24")
+
+plt_err
+plt_time_err
+plt_time_tau
+plt_niter_tau
+plt_time1iter_tau
+plt_costratio_tau
+
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+df_driver = extract_data(folder*"xxz\\Jz2.5\\m20_fixatol_driver\\", Vector(60:40:100))
+df_chi24 = extract_data(folder*"xxz\\Jz2.5\\parallel\\chi24\\", Vector(60:40:100); include_checkpoints=true)
+df_chi48 = extract_data(folder*"xxz\\Jz2.5\\parallel\\chi48\\", Vector(60:40:100); include_checkpoints=true)
+
+Nvals_compare = [60, 100]
+dfs_labels = [(df_driver, "chi=24 sequential"), (df_chi24, "chi=24 parallel"), (df_chi48, "chi=48 parallel")]
+
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau =
+    extract_plots_compare(dfs_labels, Nvals_compare, "XXZ Jz=2.5 comparison")
+
+plt_err
+plt_time_err
+plt_time_tau
+plt_niter_tau
+plt_time1iter_tau
+plt_costratio_tau
 
 
 ### CORRMPS
@@ -1618,9 +1774,9 @@ plt_time1iter_tau
 plt_costratio_tau
 
 
-
-df_chi10_xi10 = extract_data("testdata\\corrmps\\chi10\\xi10.0\\", Vector(100:100:300))
-df_chi20_xi10 = extract_data("testdata\\corrmps\\chi20\\xi10.0\\", Vector(100:100:300))
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+df_chi10_xi10 = extract_data(folder*"corrmps\\chi10\\xi10.0\\", Vector(100:100:300))
+df_chi20_xi10 = extract_data(folder*"corrmps\\chi20\\xi10.0\\", Vector(100:100:300))
 Nvals_compare = [100, 200, 300]
 dfs_labels = [(df_chi10_xi10, "chi=10"), (df_chi20_xi10, "chi=20")]
 
@@ -1639,10 +1795,12 @@ CSV.write("testdata\\corrmps\\xi10_chi20.csv", df_chi20_xi10)
 
 
 
-df = extract_data("testdata\\corrmps\\chi20\\xi4.0\\", [50, 100, 200])
-df_fix = extract_data("testdata\\corrmps\\chi20_fixatol\\xi4.0\\", [50, 100, 200])
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+df = extract_data(folder*"corrmps\\chi20\\xi4.0\\", [50, 100, 200])
+df_fix = extract_data(folder*"corrmps\\chi20_fixatol\\xi4.0\\", [50, 100, 200])
+df_long = extract_data(folder*"corrmps\\chi20_long\\xi4.0\\", [50, 100, 200])
 Nvals_compare = [50, 100, 200]
-dfs_labels = [(df, "1e-8"), (df_fix, "1e-15")]
+dfs_labels = [(df, "1e-8"), (df_fix, "1e-15"), (df_long, "1e-15 long")]
 
 plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau =
     extract_plots_compare(dfs_labels, Nvals_compare, "driver comparison")
@@ -1655,26 +1813,31 @@ plt_time1iter_tau
 plt_costratio_tau
 
 
-N=100
-xilist = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0]
-dfs = [extract_data("testdata\\corrmps\\chi20\\xi$(xi)\\", Vector(100:100:300)) for xi in xilist]
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+xilist = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
+dfs = [extract_data(folder*"corrmps\\chi20_long\\xi$(xi)\\", Vector(100:100:300)) for xi in xilist]
 combined_df = reduce(vcat, [insertcols!(copy(df), 1, :xi => xi) for (df, xi) in zip(dfs, xilist)])
+N = 100
 df_N = combined_df[combined_df.N .== N, :]
 
-plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau =
-    extract_plots_xi(df_N, "N=100 comparison")
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau, plt_err_resc =
+    extract_plots_xi(df_N, "N=$(N) comparison")
 
 plt_err
+plot!(plt_err, xlim=(1e-12, 1.2), ylim=(0.5,30), legend=:topright)
+plt_err_resc
+plot!(plt_err_resc, xlim=(1e-8, 1.2), ylim=(0., 10.), legend=:bottomright)
 plt_time_err
 plt_time_tau
 plt_niter_tau
 plt_time1iter_tau
 plt_costratio_tau
 
-plot!(plt_err, xlim=(1e-12, 1.2), ylim=(0.5,20), legend=:topright)
 savefig(plt_err, "testdata\\corrmps\\plots\\tau_vs_eps.png")
+savefig(plt_err_resc, folder*"\\corrmps\\plots\\tau_resc_vs_eps.png")
 
-plt_xi_N = extract_tau_vs_xi_fixederr(combined_df; err_ref=1e-1)
+plt_xi_N = extract_tau_vs_xi_fixederr(combined_df; err_ref=2e-1)
 plt_xi_err = extract_tau_vs_xi_fixedN(combined_df; err_refs=[1e-1, 5e-2, 1e-2], N_fixed=100)
 savefig(plt_xi_N, "testdata\\corrmps\\plots\\tau_vs_xi_fixederr.png")
 savefig(plt_xi_err, "testdata\\corrmps\\plots\\tau_vs_xi_fixedN.png")
@@ -1696,9 +1859,24 @@ plt_time1iter_tau
 plt_costratio_tau
 
 
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\corrmps\\chi20_fixatol\\xi4.0\\"
+Nvals = [20, 50, 100, 200, 500, 1000]
+df = extract_data(folder, Nvals)
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "xi=10, chi=24")
 
+plt_err
+plt_time_err
+plt_time_tau
+plt_niter_tau
+plt_time1iter_tau
+plt_costratio_tau
 
-
+xilist = [4.0]
+combined_df = reduce(vcat, [insertcols!(copy(df), 1, :xi => xi) for (df, xi) in zip([df], xilist)])
+fidelity = 0.9
+err_ref = 1 - sqrt(fidelity)
+plt = extract_tau_vs_N_fixederr(df, [err_ref], "test")
+plt_xi_err = extract_tau_vs_xi_fixedN(combined_df; err_refs=[1e-1, 5e-2, 1e-2], N_fixed=100)
 
 ###
 
