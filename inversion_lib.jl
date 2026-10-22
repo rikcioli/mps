@@ -123,7 +123,7 @@ end
 
 function ising(N::Int)
     sites = siteinds("S=1/2", N; conserve_szparity=true)
-    H = H_spin(sites, -1., 0., 0., 0., 0., -1.5)
+    H = H_spin(sites, -1., 0., 0., 0., 0., -0.75)
     psi0 = MPS(sites,"Up")
 
     E0, psi = dmrg(H, psi0; nsweeps=20, maxdim=[20,60,100,200,200],

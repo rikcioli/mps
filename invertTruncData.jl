@@ -1,6 +1,7 @@
 #using MKL
 #include("rrules.jl")
 #include("optFunctions.jl")
+include("RGmethods.jl")
 using ITensors, ITensorMPS
 using LinearAlgebra
 using JLD2, HDF5
@@ -8,6 +9,7 @@ using DataFrames, CSV
 using LaTeXStrings
 using Plots
 using ColorSchemes
+
 
 
 Base.@kwdef mutable struct InversionInstructions
@@ -294,7 +296,7 @@ function extract_plots_xi(data::DataFrame, title::String)
     end
     plt_err = plot(xscale=:log, ylabel=L"\tau", xlabel=L"\epsilon",
                 xflip=true, title=title, legend=:topleft, dpi=400)
-    plt_err_resc = plot(xscale=:log, ylabel=L"\tau/\xi", xlabel=L"\epsilon",
+    plt_err_resc = plot(xscale=:log, ylabel=L"\tau/\xi", xlabel=L"\xi \epsilon",
                 xflip=true, title=title, legend=:topleft, dpi=400)
     plt_time_err = plot(xscale=:log, ylabel=L"t \ (s)",
                     xlabel=L"\epsilon", xflip=true, title=title,
@@ -311,7 +313,7 @@ function extract_plots_xi(data::DataFrame, title::String)
         subdata = sort(data[data.xi .== xi, :], :tau)
 
         plot!(plt_err, subdata.err, subdata.tau, label=L"\xi="*"$(xi)", color=colors_err[pos])
-        plot!(plt_err_resc, subdata.err, subdata.tau ./ xi, label=L"\xi="*"$(xi)", color=colors_err[pos])
+        plot!(plt_err_resc, xi .* subdata.err, subdata.tau ./ xi, label=L"\xi="*"$(xi)", color=colors_err[pos])
         plot!(plt_time_err, subdata.err, subdata.time, label=L"\xi="*"$(xi)", color=colors_time[pos])
         plot!(plt_time_tau, subdata.tau, subdata.time, label=L"\xi="*"$(xi)", color=colors_time[pos])
         plot!(plt_niter_tau, subdata.tau, subdata.niter, label=L"\xi="*"$(xi)", color=colors_time[pos])
@@ -321,6 +323,7 @@ function extract_plots_xi(data::DataFrame, title::String)
 
     return [plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau, plt_err_resc]
 end
+
 
 
 
@@ -378,28 +381,29 @@ function extract_tau_vs_xi_fixedN(data::DataFrame; err_refs = [1e-2, 1e-3], N_fi
 end
 
 
-function extract_tau_vs_N_fixederr(data::DataFrame, err_refs, title::String)
+function extract_tau_vs_N_fixedfid(data::DataFrame, fid_refs, title::String)
     Nvals = sort(unique(data.N))
     @show Nvals
-    err_refs = err_refs isa Number ? [err_ref] : collect(err_refs)
+    fid_refs = fid_refs isa Number ? [fid_refs] : collect(fid_refs)
 
-    function first_tau(subdata, err_ref)
+    function first_tau(subdata, fid_refs)
         isempty(subdata) && return missing
         subdata = sort(subdata, :tau)
-        idx = findfirst(subdata.err .< err_ref)
+        idx = findfirst(subdata.err .< fid_refs)
         return isnothing(idx) ? missing : subdata.tau[idx]
     end
 
     colors = [get(ColorSchemes.inferno, 0.5)]
-    if length(err_refs) > 1
-        colors = [get(ColorSchemes.inferno, t) for t in range(0.1, stop=0.9, length=length(err_refs))]
+    if length(fid_refs) > 1
+        colors = [get(ColorSchemes.inferno, t) for t in range(0.1, stop=0.9, length=length(fid_refs))]
     end
 
     plt_tau_N = plot(xlabel = L"N", ylabel = L"\tau", title = title, legend = :topleft, dpi = 400)
-    for (pos, err) in enumerate(err_refs)
+    for (pos, fid) in enumerate(fid_refs)
+        err = 1-sqrt(fid)
         tau_vals = [first_tau(data[(data.N .== N), :], err) for N in Nvals]
         @show err, tau_vals
-        plot!(plt_tau_N, Nvals, tau_vals, marker = :circle, label = L"\epsilon="*"$(err)", color = colors[pos])
+        plot!(plt_tau_N, Nvals, tau_vals, marker = :circle, label = L"F="*"$(fid)", color = colors[pos])
     end
 
     return plt_tau_N
@@ -452,6 +456,173 @@ function extract_plots_compare(dfs_labels::Vector{<:Tuple{DataFrame,String}}, Nv
     end
 
     return [plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau]
+end
+
+
+# Error and gradient norm of every depth after M iterations, for several M: the
+# depth-vs-error curve each maxiter = M would have given, read from the per-iteration
+# history (normgradhistory row M+1 = (cost f, |grad|) after M iterations, err = 1 - exp(-f)).
+# A depth that converged before M keeps its final values; a depth that has not run
+# M iterations (yet) gets NaN. include_checkpoints = false reads converged depths only;
+# true also reads unfinished ones (checkpoints of runs still going or interrupted).
+# Only meaningful for parallel runs (folder = <folder>/parallel/): in a sequential run
+# depth tau starts from where depth tau-1 ended, so stopping earlier would have changed
+# the start of every later depth.
+function extract_data_iters(folder::String, Nvals::Vector{Int}, iters; include_checkpoints = false)
+    iters = sort(Int.(collect(iters)))
+    Nout = Int[]
+    tauout = Int[]
+    Mout = Int[]
+    err_vs_M = Float64[]
+    gradnorm_vs_M = Float64[]
+    converged_vs_M = Bool[]
+
+    for N in Nvals
+        pattern = Regex("^N$(N)_T(\\d+)\\.jld2\$")
+        taus = sort([parse(Int, m.captures[1]) for f in readdir(folder)
+                     for m in [match(pattern, f)] if !isnothing(m)])
+        for tau in taus
+            results = load_object(folder*"N$(N)_T$(tau).jld2")
+            converged = get(results, :converged, get(results, :finished, true))   # old files have no :converged
+            (converged || include_checkpoints) || continue
+            h = results[:normgradhistory]
+            for M in iters
+                row = M + 1 <= size(h, 1) ? M + 1 :
+                      (converged && size(h, 1) > 0) ? size(h, 1) : 0
+                push!(Nout, N)
+                push!(tauout, tau)
+                push!(Mout, M)
+                push!(err_vs_M, row > 0 ? -expm1(-h[row, 1]) : NaN)
+                push!(gradnorm_vs_M, row > 0 ? h[row, 2] : NaN)
+                push!(converged_vs_M, converged)
+            end
+        end
+    end
+
+    df = DataFrame(N=Nout, tau=tauout, M=Mout, err=err_vs_M, gradnorm=gradnorm_vs_M, converged=converged_vs_M)
+    return df
+end
+
+# Depth vs error and depth vs gradient norm of one N, one curve per iteration count M
+# (data from extract_data_iters).
+function plot_err_vs_iters(data::DataFrame, N::Int, title::String)
+    data = sort(data[data.N .== N, :], [:M, :tau])
+    iters = sort(unique(data.M))
+    colors = length(iters) > 1 ?
+        [get(ColorSchemes.viridis, t) for t in range(0.9, stop=0.1, length=length(iters))] :
+        [get(ColorSchemes.viridis, 0.5)]
+
+    plt_err = plot(xscale=:log, ylabel=L"\tau", xlabel=L"\epsilon",
+                xflip=true, title=title, legend=:topleft, dpi=400)
+    plt_grad = plot(yscale=:log, xlabel=L"\tau", ylabel=L"||\nabla f||",
+                title=title, legend=:topleft, dpi=400)
+    for (pos, M) in enumerate(iters)
+        subdata = data[data.M .== M, :]
+        plot!(plt_err, subdata.err, subdata.tau, label=L"M="*"$(M)", color=colors[pos], marker=:circle, markersize=2)
+        plot!(plt_grad, subdata.tau, subdata.gradnorm, label=L"M="*"$(M)", color=colors[pos], marker=:circle, markersize=2)
+    end
+    plot!(plt_grad, 1:maximum(data.tau), [1e-8 for _ in 1:maximum(data.tau)], label="gradtol", color=:black, linestyle=:dash)
+
+    return [plt_err, plt_grad]
+end
+
+# Where each depth would have stopped with the windowed value criterion of invert_maxrank,
+# replayed on the per-iteration history of a run made without it (err_reltol = 0, gradtol only).
+# As in invert_maxrank: every n_conv iterations the error is compared with the one n_conv
+# iterations earlier, and the run stops if it changed by less than 1e-13 or decreased by less
+# than err_reltol relative to its current value; it also stops as soon as |grad| < gradtol.
+# The replay assumes one uninterrupted run (a resumed run restarts the window, so its checks
+# can sit a few iterations off) and reads row M+1 of normgradhistory as iteration M.
+# One row per (N, tau, err_reltol): stop_iter / err_stop / gradnorm_stop where it would have
+# stopped, stopped_by = "value", "gradtol" or "not yet" (the history ends before any stop:
+# err_stop is then the error at the last iteration available, a lower bound on the iterations).
+function extract_reltol_stops(folder::String, Nvals::Vector{Int}, reltols; n_conv = 1000, gradtol = 1e-8,
+                              err_floor_atol = 1e-13)
+    rows = NamedTuple[]
+    for N in Nvals
+        pattern = Regex("^N$(N)_T(\\d+)\\.jld2\$")
+        taus = sort([parse(Int, m.captures[1]) for f in readdir(folder) for m in [match(pattern, f)] if !isnothing(m)])
+        for tau in taus
+            results = load_object(folder*"N$(N)_T$(tau).jld2")
+            h = results[:normgradhistory]
+            n = size(h, 1) - 1                                   # iterations recorded
+            n < 0 && continue
+            err(M) = -expm1(-h[M+1, 1])
+            g = findfirst(<(gradtol), h[:, 2])                    # first row with |grad| < gradtol
+            M_grad = g === nothing ? typemax(Int) : g - 1
+            for reltol in reltols
+                M_value = typemax(Int)
+                for M in 2n_conv:n_conv:n
+                    Δ = err(M - n_conv) - err(M)                  # > 0: the error decreased
+                    if abs(Δ) < err_floor_atol || (Δ >= 0 && Δ / err(M) < reltol)
+                        M_value = M; break
+                    end
+                end
+                M_stop = min(M_value, M_grad)
+                by = M_stop == typemax(Int) ? "not yet" : (M_value <= M_grad ? "value" : "gradtol")
+                M_use = by == "not yet" ? n : M_stop
+                push!(rows, (N = N, tau = tau, reltol = reltol, stop_iter = M_use, err_stop = err(M_use),
+                             gradnorm_stop = h[M_use+1, 2], stopped_by = by, niter_total = n,
+                             err_final = err(n), converged_final = get(results, :converged, false)))
+            end
+        end
+    end
+    return DataFrame(rows)
+end
+
+# Depth vs error at the stopping point of each err_reltol, for one N (data from extract_reltol_stops),
+# with the error at the end of the actual run. Depths that would not have stopped yet are drawn hollow.
+function plot_reltol_stops(data::DataFrame, N::Int, title::String)
+    data = sort(data[data.N .== N, :], [:reltol, :tau])
+    reltols = sort(unique(data.reltol), rev = true)
+    colors = [get(ColorSchemes.viridis, t) for t in range(0.9, stop=0.1, length=length(reltols))]
+    plt = plot(xscale=:log10, ylabel=L"\tau", xlabel=L"\epsilon", xflip=true, title=title, legend=:topleft, dpi=400)
+    final = unique(data[:, [:tau, :err_final]])
+    plot!(plt, final.err_final, final.tau, label="end of the run", color=:black, linestyle=:dash)
+    for (pos, r) in enumerate(reltols)
+        d = data[data.reltol .== r, :]
+        plot!(plt, d.err_stop, d.tau, label="err_reltol = $(r)", color=colors[pos])
+        stopped = d.stopped_by .!= "not yet"
+        scatter!(plt, d.err_stop[stopped], d.tau[stopped], color=colors[pos], markersize=3, label="")
+        scatter!(plt, d.err_stop[.!stopped], d.tau[.!stopped], color=:white, markerstrokecolor=colors[pos], markersize=3, label="")
+    end
+    return plt
+end
+
+# Iterations at which each depth would have stopped, per err_reltol (data from extract_reltol_stops),
+# with the length of the actual run. Depths that would not have stopped yet are drawn hollow at the
+# end of their history (a lower bound).
+function plot_reltol_iters(data::DataFrame, N::Int, title::String)
+    data = sort(data[data.N .== N, :], [:reltol, :tau])
+    reltols = sort(unique(data.reltol), rev = true)
+    colors = [get(ColorSchemes.viridis, t) for t in range(0.9, stop=0.1, length=length(reltols))]
+    plt = plot(yscale=:log10, xlabel=L"\tau", ylabel="iterations", title=title, legend=:bottomright, dpi=400)
+    final = unique(data[:, [:tau, :niter_total]])
+    plot!(plt, final.tau, max.(final.niter_total, 1), label="end of the run", color=:black, linestyle=:dash)
+    for (pos, r) in enumerate(reltols)
+        d = data[data.reltol .== r, :]
+        plot!(plt, d.tau, max.(d.stop_iter, 1), label="err_reltol = $(r)", color=colors[pos])
+        stopped = d.stopped_by .!= "not yet"
+        scatter!(plt, d.tau[stopped], max.(d.stop_iter[stopped], 1), color=colors[pos], markersize=3, label="")
+        scatter!(plt, d.tau[.!stopped], max.(d.stop_iter[.!stopped], 1), color=:white, markerstrokecolor=colors[pos], markersize=3, label="")
+    end
+    return plt
+end
+
+# Power law fit tau = A * err^alpha (linear fit of log(tau) vs log(err)) at fixed N and M,
+# using only depths tau >= taumin (data from extract_data_iters).
+function fit_tau_vs_err(data::DataFrame, N::Int, M::Int; taumin::Int = 1)
+    d = data[(data.N .== N) .& (data.M .== M) .& .!isnan.(data.err) .& (data.err .> 0) .& (data.tau .>= taumin), :]
+    x = log.(d.err)
+    y = log.(Float64.(d.tau))
+    A = hcat(ones(length(x)), x)
+    c = A \ y
+    r = y - A*c
+    s2 = sum(abs2, r) / (length(x) - 2)
+    se = sqrt.(s2 .* diag(inv(A'A)))
+    R2 = 1 - sum(abs2, r) / sum(abs2, y .- sum(y)/length(y))
+    println("N=$N, M=$M, taumin=$taumin, npts=$(length(x)): tau = $(exp(c[1])) * err^($(c[2]) ± $(se[2])), R2=$R2  =>  err ~ tau^($(1/c[2]))")
+    return (prefactor = exp(c[1]), alpha = c[2], alpha_err = se[2], R2 = R2, npts = length(x))
 end
 
 
@@ -1184,6 +1355,64 @@ plt_niter_tau
 plt_time1iter_tau
 plt_costratio_tau
 
+
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+folder2 = folder*"ising\\g0.75\\m5_long\\"
+Nvals = Vector(60:40:300)
+df = extract_data(folder2, Nvals; include_checkpoints=false)
+CSV.write(folder2*"df.csv", df)          # read by plots.ipynb
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "Ising g=0.75, m=5, chi=10")
+
+plt_err
+plt_time_err
+plt_time_tau
+plt_niter_tau
+plt_time1iter_tau
+plt_costratio_tau
+
+folder3 = folder*"ising\\plots\\g0.75\\"
+savefig(plt_err, folder3*"tau_vs_eps.png")
+savefig(plt_time_err, folder3*"time_vs_eps.png")
+savefig(plt_time_tau, folder3*"time_vs_tau.png")
+savefig(plt_niter_tau, folder3*"niter_vs_tau.png")
+savefig(plt_time1iter_tau, folder3*"time1iter_vs_tau.png")
+savefig(plt_costratio_tau, folder3*"costratio_vs_tau.png")
+
+
+sel   = df[df.tau .>= 3, :]
+X     = [log.(1 ./ sel.err) log.(sel.N) ones(nrow(sel))]
+a, b, c = X \ Float64.(sel.tau)                  # check b ≈ a
+A, c0 = [log.(sel.N ./ sel.err) ones(nrow(sel))] \ Float64.(sel.tau)
+
+plt_collapse = plot(xscale=:log10, xflip=true, xlabel=L"\epsilon/N", ylabel=L"\tau",
+                    title="Ising g=0.75", legend=:topleft, dpi=400)
+Ns = sort(unique(df.N))
+cols = [get(ColorSchemes.inferno, t) for t in range(0.7, 0.1, length=length(Ns))]
+for (k, N) in enumerate(Ns)
+    sub = sort(df[df.N .== N, :], :tau)
+    plot!(plt_collapse, sub.err ./ N, sub.tau, marker=:circle, ms=3, color=cols[k], label="N=$N")
+end
+x = exp10.(range(log10(minimum(df.err ./ df.N)), log10(maximum(sel.err ./ sel.N)), length=100))
+plot!(plt_collapse, x, A .* log.(1 ./ x) .+ c0, color=:black, ls=:dash,
+      label=latexstring("\\tau = $(round(A; digits=2))\\,\\log(N/\\epsilon) $(round(c0; digits=2))"))
+
+
+
+plt = extract_tau_vs_N_fixederr(df, [1e-3, 2e-3, 5e-3, 1e-2, 2e-2, 5e-2], "testing")
+plot!(plt, xscale=:log10)
+
+qs = Float64.(qlist[2:end])
+y = log.(errs_per_block[2:end])
+M = [ones(length(qs)) qs]
+c = M\y                 # c = [log(A), -κ]
+A, κ = exp(c[1]), -c[2]
+
+γ = 2.0                    # fix by convention
+ξ = γ / κ
+println("A = $A, κ = γ/ξ = $κ, ξ = $ξ (with γ = $γ)")
+plot!(qlist, A .* exp.(-κ*qlist), label=L"A e^{-q/ξ}", color=:red, linestyle=:dash)
+
 ### XY ###
 
 
@@ -1633,7 +1862,7 @@ df_m20_fixdr = extract_data(folder*"xxz\\Jz2.5\\m20_fixatol_driver\\", Vector(60
 df_m20_long = extract_data(folder*"xxz\\Jz2.5\\m20_long\\", Vector(60:40:300))
 df_m20_par = extract_data(folder*"xxz\\Jz2.5\\parallel\\chi24\\", Vector(60:40:100))
 
-Nvals_compare = [60, 100]
+Nvals_compare = [60, 100, 140]
 dfs_labels = [(df_m50, "m=50, chi=24"), (df_m20_7, "m=20_7, chi=24"), (df_m20_dr, "m=20 driver, chi=24")]
 dfs_labels = [(df_m20_dr, "m=20, atol=1e-8"), (df_m20_fixdr, "m=20, atol=1e-15")]
 dfs_labels = [(df_m20_dr, "m=20, atol=1e-8"), (df_m20_fixdr, "m=20, atol=1e-15"), (df_m20_long, "m=20 long, atol=1e-15")]
@@ -1658,6 +1887,7 @@ folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
 folder2 = folder*"xxz\\Jz2.5\\m20_driver\\"
 Nvals = Vector(60:40:300)
 df = extract_data(folder2, Nvals)
+CSV.write(folder2*"df.csv", df)          # read by plots.ipynb
 plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "XXZ Jz=2.5, m=20, chi=24")
 
 plt_err
@@ -1675,6 +1905,8 @@ savefig(plt_niter_tau, folder3*"niter_vs_tau.png")
 savefig(plt_time1iter_tau, folder3*"time1iter_vs_tau.png")
 savefig(plt_costratio_tau, folder3*"costratio_vs_tau.png")
 
+plt = extract_tau_vs_N_fixederr(df, [4e-3, 8e-3, 1e-2], "testing")
+plot!(plt, xscale=:log10)
 
 
 folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
@@ -1707,11 +1939,12 @@ plt_costratio_tau
 
 
 folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
-df_driver = extract_data(folder*"xxz\\Jz2.5\\m20_fixatol_driver\\", Vector(60:40:100))
-df_chi24 = extract_data(folder*"xxz\\Jz2.5\\parallel\\chi24\\", Vector(60:40:100); include_checkpoints=true)
-df_chi48 = extract_data(folder*"xxz\\Jz2.5\\parallel\\chi48\\", Vector(60:40:100); include_checkpoints=true)
+df_driver = extract_data(folder*"xxz\\Jz2.5\\m20_fixatol_driver\\", [100, 300])
+df_chi24 = extract_data(folder*"xxz\\Jz2.5\\sweeps\\chi24\\parallel\\", [100, 300]; include_checkpoints=true)
+df_chi48 = extract_data(folder*"xxz\\Jz2.5\\sweeps\\chi48\\parallel\\", [100, 300]; include_checkpoints=true)
 
-Nvals_compare = [60, 100]
+
+Nvals_compare = [100, 300]
 dfs_labels = [(df_driver, "chi=24 sequential"), (df_chi24, "chi=24 parallel"), (df_chi48, "chi=48 parallel")]
 
 plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau =
@@ -1723,6 +1956,117 @@ plt_time_tau
 plt_niter_tau
 plt_time1iter_tau
 plt_costratio_tau
+
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\xxz\\Jz2.5\\sweeps\\chi48\\parallel\\"
+df_iters = extract_data_iters(folder, [100], [1000, 2000, 5000, 10_000, 20_000, 50_000, 100_000]; include_checkpoints=true)
+N = 100
+plt_err_iters, plt_grad_iters = plot_err_vs_iters(df_iters, N, "XXZ, N=$(N)")
+plt_err_iters
+plt_grad_iters
+
+plot!(plt_err_iters, yscale=:log10)
+
+for taumin in [1, 2, 3], N in [100]
+    fit_tau_vs_err(df_iters, N, 100_000; taumin=taumin)
+end
+
+fit = fit_tau_vs_err(df_iters, N, 500_000; taumin=4)
+errs_fit = df_iters[(df_iters.N .== N) .& (df_iters.M .== 100_000) .& .!isnan.(df_iters.err), :err]
+errs_fit = exp10.(range(log10(minimum(errs_fit)), log10(maximum(errs_fit)), length=100))
+plot!(plt_err_iters, errs_fit, fit.prefactor .* errs_fit .^ fit.alpha,
+      label=L"\tau \propto \epsilon^{%$(round(fit.alpha, digits=3))}", color=:red, linestyle=:dash)
+
+
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+folder2 = folder*"xxz\\Jz10\\chi20\\parallel\\"
+Nvals = Vector(100:10:100)
+df = extract_data(folder2, Nvals; include_checkpoints=true)
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "XXZ Jz=10, m=20, chi=20")
+
+plt_err
+plt_time_err
+plt_time_tau
+plt_niter_tau
+plt_time1iter_tau
+plt_costratio_tau
+
+df_iters = extract_data_iters(folder2, [100], [1000, 2000, 5000, 10_000, 20_000, 50_000, 100_000, 200_000]; include_checkpoints=true)
+N = 100
+plt_err_iters, plt_grad_iters = plot_err_vs_iters(df_iters, N, "XXZ, N=$(N)")
+plt_err_iters
+plt_grad_iters
+
+
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+folder2 = folder*"xxz\\Jz20\\chi20\\parallel\\"
+Nvals = Vector(100:10:100)
+df = extract_data(folder2, Nvals; include_checkpoints=true)
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "XXZ Jz=20, m=20, chi=20")
+
+plt_err
+plt_time_err
+plt_time_tau
+plt_niter_tau
+plt_time1iter_tau
+plt_costratio_tau
+
+df_iters = extract_data_iters(folder2, [100], [1000, 2000, 5000, 10_000, 20_000, 50_000, 100_000, 150_000, 350_000]; include_checkpoints=true)
+N = 100
+plt_err_iters, plt_grad_iters = plot_err_vs_iters(df_iters, N, "XXZ, N=$(N)")
+plt_err_iters
+plt_grad_iters
+
+
+
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+folder2 = folder*"xxz\\Jz50\\chi20\\parallel\\"
+Nvals = Vector(100:10:100)
+df = extract_data(folder2, Nvals; include_checkpoints=true)
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "XXZ Jz=50, m=20, chi=20")
+
+plt_err
+plt_time_err
+plt_time_tau
+plt_niter_tau
+plt_time1iter_tau
+plt_costratio_tau
+
+df_iters = extract_data_iters(folder2, [100], [1000, 2000, 5000, 10_000, 20_000, 50_000, 100_000, 200_000]; include_checkpoints=true)
+N = 100
+plt_err_iters, plt_grad_iters = plot_err_vs_iters(df_iters, N, "XXZ, N=$(N)")
+plt_err_iters
+plt_grad_iters
+
+
+N = 100
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\xxz\\Jz2.5\\sweeps\\chi24\\"
+f = h5open(folder*"$(N)_mps.h5","r")
+psi_og = dense(read(f,"psi",MPS))
+close(f)
+
+qlist = Vector(2:2:32)
+nblocks = [mod(N, q) == 0 ? N÷q : N÷q+1 for q in qlist]
+errs = blocking_scaling(psi_og, qlist)
+errs_per_block = errs ./ nblocks
+plot(qlist, errs_per_block, yscale=:log10, xlabel=L"q", ylabel=L"\epsilon/M", title="Blocking scaling")
+
+qs = Float64.(qlist[2:end])
+y = log.(errs_per_block[2:end])
+M = [ones(length(qs)) qs]
+c = M\y                 # c = [log(A), -κ]
+A, κ = exp(c[1]), -c[2]
+
+γ = 2.0                    # fix by convention
+ξ = γ / κ
+println("A = $A, κ = γ/ξ = $κ, ξ = $ξ (with γ = $γ)")
+plot!(qlist, A .* exp.(-κ*qlist), label=L"A e^{-q/ξ}", color=:red, linestyle=:dash)
+
+
+
+
 
 
 ### CORRMPS
@@ -1813,11 +2157,24 @@ plt_time1iter_tau
 plt_costratio_tau
 
 
-
+# Old chi20
 folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
-xilist = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
+xilist = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
+dfs = [extract_data(folder*"corrmps\\chi20\\xi$(xi)\\", Vector(100:100:100)) for xi in xilist]
+combined_df = reduce(vcat, [insertcols!(copy(df), 1, :xi => xi) for (df, xi) in zip(dfs, xilist)])
+N = 100
+df_N = combined_df[combined_df.N .== N, :]
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau, plt_err_resc =
+    extract_plots_xi(df_N, "N=$(N) comparison")
+plt_err
+
+
+# Actual paper results
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\"
+xilist = [0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0]
 dfs = [extract_data(folder*"corrmps\\chi20_long\\xi$(xi)\\", Vector(100:100:300)) for xi in xilist]
 combined_df = reduce(vcat, [insertcols!(copy(df), 1, :xi => xi) for (df, xi) in zip(dfs, xilist)])
+CSV.write(folder*"corrmps\\chi20_long\\combined_df.csv", combined_df)          # read by plots.ipynb
 N = 100
 df_N = combined_df[combined_df.N .== N, :]
 
@@ -1827,7 +2184,7 @@ plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costr
 plt_err
 plot!(plt_err, xlim=(1e-12, 1.2), ylim=(0.5,30), legend=:topright)
 plt_err_resc
-plot!(plt_err_resc, xlim=(1e-8, 1.2), ylim=(0., 10.), legend=:bottomright)
+plot!(plt_err_resc, xlim=(1e-8, 60.2), ylim=(-0.2, 10.), legend=:bottomright)
 plt_time_err
 plt_time_tau
 plt_niter_tau
@@ -1859,10 +2216,11 @@ plt_time1iter_tau
 plt_costratio_tau
 
 
-folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\corrmps\\chi20_fixatol\\xi4.0\\"
+folder = "D:\\Julia\\MyProject\\InversionData\\testdata\\corrmps\\chi20_long\\xi4.0\\"
 Nvals = [20, 50, 100, 200, 500, 1000]
-df = extract_data(folder, Nvals)
-plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "xi=10, chi=24")
+df = extract_data(folder, Nvals; include_checkpoints=true)
+CSV.write(folder*"df.csv", df)          # read by plots.ipynb
+plt_err, plt_time_err, plt_time_tau, plt_niter_tau, plt_time1iter_tau, plt_costratio_tau = extract_plots(df, "xi=4, chi=20")
 
 plt_err
 plt_time_err
@@ -1873,10 +2231,90 @@ plt_costratio_tau
 
 xilist = [4.0]
 combined_df = reduce(vcat, [insertcols!(copy(df), 1, :xi => xi) for (df, xi) in zip([df], xilist)])
-fidelity = 0.9
-err_ref = 1 - sqrt(fidelity)
-plt = extract_tau_vs_N_fixederr(df, [err_ref], "test")
+fidelity = 0.90
+plt = extract_tau_vs_N_fixedfid(df, fidelity, "test")
+plot!(plt, xscale=:log10)
+
 plt_xi_err = extract_tau_vs_xi_fixedN(combined_df; err_refs=[1e-1, 5e-2, 1e-2], N_fixed=100)
+
+
+
+
+g_from_xi(ξ::Real) = tanh(1 / (2ξ))
+xi_from_g(g::Real) = 1 / abs(log((1 - g) / (1 + g)))
+
+function correlated_mps(sites::Vector{<:Index}, g::Number;
+                        L = Matrix(1.0I, 2, 2), R = Matrix(1.0I, 2, 2),
+                        normalize::Bool = true)
+    N = length(sites)
+    N >= 2 || error("Need N ≥ 2")
+    all(dim.(sites) .== 2) || error("All site indices must have dimension 2")
+    D = 2
+    T = promote_type(typeof(g), eltype(L), eltype(R), Float64)
+
+    A = zeros(T, D, 2, D)                # A[a, i, b] = (A^{i-1})_{ab}
+    A[:, 1, :] = [0 0; 1 1]              # A^0
+    A[:, 2, :] = [1 g; 0 0]              # A^1
+
+    links = [Index(D, "Link,l=$j") for j in 1:(N - 1)]
+    psi = MPS(N)
+    psi[1] = ITensor(T.(L), sites[1], links[1])
+    for j in 2:(N - 1)
+        psi[j] = ITensor(A, links[j - 1], sites[j], links[j])
+    end
+    psi[N] = ITensor(T.(R), links[N - 1], sites[N])
+
+    normalize && normalize!(psi)
+    return psi
+end
+
+correlated_mps_xi(sites, ξ::Real; kwargs...) = correlated_mps(sites, g_from_xi(ξ); kwargs...)
+
+N = 200
+psi = correlated_mps_xi(siteinds("S=1/2", N), 4.0)
+qlist = [2, 4, 8, 16, 32]
+nblocks = [mod(N, q) == 0 ? N÷q : N÷q+1 for q in qlist]
+errs = blocking_scaling(psi, qlist)
+errs_per_block = errs ./ nblocks
+plot(qlist, errs_per_block, yscale=:log10, xlabel=L"q", ylabel=L"\epsilon/M", title="Blocking scaling for correlated MPS with ξ=4.0")
+
+qs = Float64.(qlist[2:end])
+y = log.(errs_per_block[2:end])
+M = [ones(length(qs)) qs]
+c = M\y                 # c = [log(A), -κ]
+A, κ = exp(c[1]), -c[2]
+
+γ = 2.0                    # fix by convention
+ξ = γ / κ
+println("A = $A, κ = γ/ξ = $κ, ξ = $ξ (with γ = $γ)")
+plot!(qlist, A .* exp.(-κ*qlist), label=L"A e^{-q/ξ}", color=:red, linestyle=:dash)
+
+
+function CNOT_estimate(q::Int)
+    nswaps = max(0,q-2)
+    cnot_swaps = 3*nswaps
+    niso = max(0,q-2)
+    cnot_iso = 10*niso
+    return cnot_swaps + cnot_iso
+end
+
+function CNOT_estimate(F::Real, ξ::Real, Nvals::Vector{Int})
+    err = 1 - sqrt(F)
+    estimates = Int64[]
+    q = 2
+    for N in Nvals
+        psi = correlated_mps_xi(siteinds("S=1/2", N), ξ)
+        q = blocking_scaling_err(psi, err; qstart=q)
+        push!(estimates, CNOT_estimate(q))
+    end
+    return estimates
+end
+
+Nvals = unique(round.(Int, exp10.(range(1, 3, length = 60))))     # log-spaced 10 ... 1000
+estimates = CNOT_estimate(0.9, 4.0, Nvals)
+plot(Nvals, estimates, xscale=:log10)
+CSV.write("D:\\Julia\\MyProject\\InversionData\\testdata\\corrmps\\chi20_long\\xi4.0\\cnot_malz.csv",
+          DataFrame(N = Nvals, T_cnot = estimates))          # read by plots.ipynb
 
 ###
 

@@ -1,3 +1,4 @@
+include("RGmethods.jl")
 using ITensors, ITensorMPS
 using KrylovKit
 using SparseArrays, LinearAlgebra
@@ -576,7 +577,6 @@ for (q, r, ξ) in zip(res.q[2:end], res.ratios[2:end], res.ξloc)
     println("q = $q   σ₂/σ₁ = $(round(r, sigdigits=3))   ξ(q) = $(round(ξ, digits=4))")
 end
 
-for xi in []
 
 
 
