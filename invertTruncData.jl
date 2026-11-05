@@ -13,7 +13,7 @@ using ColorSchemes
 Base.@kwdef mutable struct InversionInstructions
     maxrank::Union{Nothing, Int} = nothing
     maxerror::Union{Nothing, Float64} = nothing
-    atol::Float64 = 1e-10
+    atol::Float64 = 1e-12
     maxiter::Int = 1000000
     gradtol::Float64 = 1e-8
     n_checkpoint::Int = 1000

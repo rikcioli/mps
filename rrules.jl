@@ -7,7 +7,8 @@ using OptimKit
 using ChainRulesCore
 using MatrixAlgebraKit
 using MatrixAlgebraKit: default_pullback_rank_atol, default_pullback_gauge_atol,
-                        iszerotangent, project_antihermitian!, inv_safe
+                        iszerotangent, project_antihermitian!, inv_safe,
+                        qr_pullback!, lq_pullback!
 using Zygote
 
 
@@ -340,6 +341,133 @@ function ChainRulesCore.rrule(::typeof(SVDcontract), tensors::Vector{<:ITensor},
     
     return (out, tape), SVDcontract_pullback_Zygote
 end
+
+
+### HELPER TAPE STRUCT FOR QRCONTRACT, THE TRUNCATION-FREE WAY OF MOVING THE
+### ORTHOGONALITY CENTER ACROSS A BOND: QR WHEN MOVING RIGHT, LQ WHEN MOVING LEFT
+struct QRTape
+    move_ogc::Symbol
+    normalize::Bool
+    neighbor::ITensor           # the tensor that absorbed the triangular factor
+    Tten::ITensor               # the triangular factor as it was absorbed
+    c::ITensor                  # combiner of the center's non-bond indices
+    bondind::Index              # the new bond
+    A::Matrix{ComplexF64}       # the center as a matrix
+    Q::Matrix{ComplexF64}
+    T::Matrix{ComplexF64}       # R moving right, L moving left, unnormalized
+    Tnorm::Float64
+end
+
+
+"""
+Moves the orthogonality center across the bond between `WLten` and `WRten`: the center
+(`WLten` for `move_ogc=:right`, `WRten` for `:left`) is split with a QR/LQ and the
+triangular factor goes into the other tensor. Same output as `SVDcontract` with no
+truncation, up to the gauge of the new bond, without contracting the two tensors first.
+
+Returns `nothing` if a diagonal element of the triangular factor is below
+`default_pullback_rank_atol`, for then the factor is singular and `qr_pullback!` cannot
+be used. The caller is expected to fall back to `SVDcontract`.
+"""
+function QRcontract(WLten::ITensor, WRten::ITensor; move_ogc=:right, normalize=false)
+    to_right = move_ogc==:right
+    center, neighbor = to_right ? (WLten, WRten) : (WRten, WLten)
+    oldbond = commonind(WLten, WRten)
+    c = combiner(uniqueinds(center, neighbor))
+    cind = combinedind(c)
+
+    local Q, T
+    if to_right
+        A = Matrix{ComplexF64}(c*center, cind, oldbond)
+        Q, T = qr_compact(A; positive=true)
+    else
+        A = Matrix{ComplexF64}(c*center, oldbond, cind)
+        T, Q = lq_compact(A; positive=true)
+    end
+    rank_atol = default_pullback_rank_atol(T)
+    all(t -> abs(t) >= rank_atol, diagview(T)) || return nothing
+
+    Tnorm = norm(T)
+    Tn = normalize ? T/Tnorm : T
+
+    local W1, W2, Tten, bondind
+    if to_right
+        bondind = Index(size(Q, 2), "Link, u")
+        Tten = ITensor(Tn, bondind, oldbond)
+        W1 = ITensor(Q, cind, bondind) * dag(c)
+        W2 = Tten * neighbor
+    else
+        bondind = Index(size(Q, 1), "Link, v")
+        Tten = ITensor(Tn, oldbond, bondind)
+        W1 = neighbor * Tten
+        W2 = ITensor(Q, bondind, cind) * dag(c)
+    end
+
+    out = ((W1, W2), Tnorm, 0.0)
+    tape = QRTape(move_ogc, normalize, neighbor, Tten, c, bondind, A, Q, T, Tnorm)
+
+    return out, tape
+end
+
+
+function QRcontract_pullback(ΔMf, tape::QRTape)
+    (; move_ogc, normalize, neighbor, Tten, c, bondind, A, Q, T, Tnorm) = tape
+    to_right = move_ogc==:right
+    ΔQten, Δabsorbed = to_right ? ΔMf : reverse(ΔMf)
+    oldbond = commonind(Tten, neighbor)
+    cind = combinedind(c)
+
+    ΔQ = if iszero(ΔQten)
+        zeros(ComplexF64, size(Q))
+    elseif to_right
+        Matrix{ComplexF64}(ΔQten * c, cind, bondind)
+    else
+        Matrix{ComplexF64}(ΔQten * c, bondind, cind)
+    end
+
+    local ΔT, Δneighbor
+    if iszero(Δabsorbed)
+        ΔT = zeros(ComplexF64, size(T))
+        Δneighbor = zero(neighbor)
+    else
+        ΔTten = Δabsorbed * dag(neighbor)
+        Δneighbor = dag(Tten) * Δabsorbed
+        ΔT = to_right ? Matrix{ComplexF64}(ΔTten, bondind, oldbond) :
+                        Matrix{ComplexF64}(ΔTten, oldbond, bondind)
+    end
+
+    if normalize
+        Tn = T/Tnorm
+        ΔT = ΔT/Tnorm - Tn*real(dot(Tn, ΔT))/Tnorm
+    end
+
+    ΔA = zeros(ComplexF64, size(A))
+    if to_right
+        qr_pullback!(ΔA, A, (Q, T), (ΔQ, ΔT))
+        Δcenter = ITensor(ΔA, cind, oldbond) * dag(c)
+        return Δcenter, Δneighbor
+    else
+        lq_pullback!(ΔA, A, (T, Q), (ΔT, ΔQ))
+        Δcenter = ITensor(ΔA, oldbond, cind) * dag(c)
+        return Δneighbor, Δcenter
+    end
+end
+
+
+"True if `trunc` and `maxranks`, as returned by `adapt_truncarg`, can only remove numerical noise."
+gauge_only(trunc, maxranks, dims) = maxranks == dims && keys(trunc) == (:atol,) && trunc.atol <= 2*eps()
+
+"One step of `move_center`: QR/LQ if nothing has to be truncated and the center has full rank, SVD otherwise."
+function center_step(WLten, WRten, linds; gauge, move_ogc, normalize, trunc)
+    if gauge
+        res = QRcontract(WLten, WRten; move_ogc, normalize)
+        isnothing(res) || return res
+    end
+    return SVDcontract([WLten, WRten], linds; move_ogc, normalize, trunc)
+end
+
+center_step_pullback(ΔMf, tape::QRTape) = QRcontract_pullback(ΔMf, tape)
+center_step_pullback(ΔMf, tape::SVDcontractTape) = SVDcontract_pullback(ΔMf, ZeroTangent(), tape)
 
 
 
@@ -1017,6 +1145,7 @@ function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post
 
     # Preparing the maxranks for svd trunc
     trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
+    gauge = gauge_only(trunc, maxranks, linkdims(ψ))
     
     sites = siteinds(ψ)
     links = linkinds(ψ)
@@ -1035,9 +1164,8 @@ function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post
             else
                 cog==1 ? [sites[j];] : [sites[j]; links[cog-1]]
             end
-            tensors = [WLten, WRten]
-            
-            ((W1, W2), Snorm, err), _ = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), _ = center_step(WLten, WRten, linds; 
+                                    gauge=gauge,
                                     move_ogc=:right,
                                     normalize=normalize,
                                     trunc=(trunc..., maxrank=maxranks[j]))
@@ -1058,8 +1186,8 @@ function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post
             WRten = Rten_new
 
             linds = j > 1 ? [sites[j]; links[j-1]] : [sites[j];]
-            tensors = [WLten, WRten]
-            ((W1, W2), Snorm, err), _ = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), _ = center_step(WLten, WRten, linds; 
+                                    gauge=gauge,
                                     move_ogc=:left,
                                     normalize=normalize,
                                     trunc=(trunc..., maxrank=maxranks[j]))
@@ -1093,11 +1221,12 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
 
     # Preparing the maxranks for svd trunc
     trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
+    gauge = gauge_only(trunc, maxranks, linkdims(ψ))
 
     sites = siteinds(ψ)
     links = linkinds(ψ)
     cache = Array{ITensor, 1}(undef, abs(b-cog)+1)
-    tapes = SVDcontractTape[]  # store intermediate data for SVDcontract
+    tapes = Union{SVDcontractTape, QRTape}[]  # store intermediate data for center_step
     Rten_new = ψ[cog]
     errs = Float64[]
     local ψf_vec
@@ -1112,9 +1241,8 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
             else
                 cog==1 ? [sites[j];] : [sites[j]; links[cog-1]] 
             end
-            tensors = [WLten, WRten]
-
-            ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), tape_j = center_step(WLten, WRten, linds; 
+                                        gauge=gauge,
                                         move_ogc=:right,
                                         normalize=normalize,
                                         trunc=(trunc..., maxrank=maxranks[j]))
@@ -1136,9 +1264,8 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
             WRten = Rten_new
 
             linds = j > 1 ? [sites[j]; links[j-1]] : [sites[j];]
-            tensors = [WLten, WRten]
-
-            ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), tape_j = center_step(WLten, WRten, linds; 
+                                        gauge=gauge,
                                         move_ogc=:left,
                                         normalize=normalize,
                                         trunc=(trunc..., maxrank=maxranks[j]))
@@ -1168,7 +1295,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
                 ΔW2 = ΔR_new
                 ΔMf = (ΔW1, ΔW2)
 
-                (ΔWL, ΔWR) = SVDcontract_pullback(ΔMf, ZeroTangent(), tapes[j-cog+1])  # start from the last
+                (ΔWL, ΔWR) = center_step_pullback(ΔMf, tapes[j-cog+1])  # start from the last
 
                 Δψcache[j-cog+2] = ΔWR
                 ΔR_new = ΔWL
@@ -1183,7 +1310,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
                 ΔW2 = Δψf[j+1]
                 ΔMf = (ΔW1, ΔW2)
                 
-                (ΔWL, ΔWR) = SVDcontract_pullback(ΔMf, ZeroTangent(), tapes[cog-j])
+                (ΔWL, ΔWR) = center_step_pullback(ΔMf, tapes[cog-j])
                 # start from the last again, since pullbacks are appended
 
                 Δψcache[j-b+1] = ΔWL
