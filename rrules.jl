@@ -347,15 +347,13 @@ end
 ### ORTHOGONALITY CENTER ACROSS A BOND: QR WHEN MOVING RIGHT, LQ WHEN MOVING LEFT
 struct QRTape
     move_ogc::Symbol
-    normalize::Bool
     neighbor::ITensor           # the tensor that absorbed the triangular factor
     Tten::ITensor               # the triangular factor as it was absorbed
     c::ITensor                  # combiner of the center's non-bond indices
     bondind::Index              # the new bond
     A::Matrix{ComplexF64}       # the center as a matrix
     Q::Matrix{ComplexF64}
-    T::Matrix{ComplexF64}       # R moving right, L moving left, unnormalized
-    Tnorm::Float64
+    T::Matrix{ComplexF64}       # R moving right, L moving left
 end
 
 
@@ -365,11 +363,14 @@ Moves the orthogonality center across the bond between `WLten` and `WRten`: the 
 triangular factor goes into the other tensor. Same output as `SVDcontract` with no
 truncation, up to the gauge of the new bond, without contracting the two tensors first.
 
+Nothing is cut, so the norm is left alone: the `Snorm` returned is always 1, which keeps
+`Snorms` aligned with the tapes and adds nothing to `sum(log.(Snorms))`.
+
 Returns `nothing` if a diagonal element of the triangular factor is below
 `default_pullback_rank_atol`, for then the factor is singular and `qr_pullback!` cannot
 be used. The caller is expected to fall back to `SVDcontract`.
 """
-function QRcontract(WLten::ITensor, WRten::ITensor; move_ogc=:right, normalize=false)
+function QRcontract(WLten::ITensor, WRten::ITensor; move_ogc=:right)
     to_right = move_ogc==:right
     center, neighbor = to_right ? (WLten, WRten) : (WRten, WLten)
     oldbond = commonind(WLten, WRten)
@@ -387,31 +388,28 @@ function QRcontract(WLten::ITensor, WRten::ITensor; move_ogc=:right, normalize=f
     rank_atol = default_pullback_rank_atol(T)
     all(t -> abs(t) >= rank_atol, diagview(T)) || return nothing
 
-    Tnorm = norm(T)
-    Tn = normalize ? T/Tnorm : T
-
     local W1, W2, Tten, bondind
     if to_right
         bondind = Index(size(Q, 2), "Link, u")
-        Tten = ITensor(Tn, bondind, oldbond)
+        Tten = ITensor(T, bondind, oldbond)
         W1 = ITensor(Q, cind, bondind) * dag(c)
         W2 = Tten * neighbor
     else
         bondind = Index(size(Q, 1), "Link, v")
-        Tten = ITensor(Tn, oldbond, bondind)
+        Tten = ITensor(T, oldbond, bondind)
         W1 = neighbor * Tten
         W2 = ITensor(Q, bondind, cind) * dag(c)
     end
 
-    out = ((W1, W2), Tnorm, 0.0)
-    tape = QRTape(move_ogc, normalize, neighbor, Tten, c, bondind, A, Q, T, Tnorm)
+    out = ((W1, W2), 1.0, 0.0)
+    tape = QRTape(move_ogc, neighbor, Tten, c, bondind, A, Q, T)
 
     return out, tape
 end
 
 
 function QRcontract_pullback(ΔMf, tape::QRTape)
-    (; move_ogc, normalize, neighbor, Tten, c, bondind, A, Q, T, Tnorm) = tape
+    (; move_ogc, neighbor, Tten, c, bondind, A, Q, T) = tape
     to_right = move_ogc==:right
     ΔQten, Δabsorbed = to_right ? ΔMf : reverse(ΔMf)
     oldbond = commonind(Tten, neighbor)
@@ -436,11 +434,6 @@ function QRcontract_pullback(ΔMf, tape::QRTape)
                         Matrix{ComplexF64}(ΔTten, oldbond, bondind)
     end
 
-    if normalize
-        Tn = T/Tnorm
-        ΔT = ΔT/Tnorm - Tn*real(dot(Tn, ΔT))/Tnorm
-    end
-
     ΔA = zeros(ComplexF64, size(A))
     if to_right
         qr_pullback!(ΔA, A, (Q, T), (ΔQ, ΔT))
@@ -457,17 +450,34 @@ end
 "True if `trunc` and `maxranks`, as returned by `adapt_truncarg`, can only remove numerical noise."
 gauge_only(trunc, maxranks, dims) = maxranks == dims && keys(trunc) == (:atol,) && trunc.atol <= 2*eps()
 
-"One step of `move_center`: QR/LQ if nothing has to be truncated and the center has full rank, SVD otherwise."
-function center_step(WLten, WRten, linds; gauge, move_ogc, normalize, trunc)
+"""
+True if a bond of dimension `d` with no gate on it can be crossed without an SVD: `trunc`
+has no `maxrank` to enforce there, and nothing but `atol` that would act on it. Values below
+`atol` are not cut on such a bond, that is left to the next gate acting on it.
+"""
+idle_bond(trunc, d) = trunc isa NamedTuple && keys(trunc) ⊆ (:maxrank, :atol) && d <= get(trunc, :maxrank, d)
+
+"Drop `maxrank` from a truncation NamedTuple: what a no-gate step uses when every gate has its own rank."
+drop_maxrank(t::NamedTuple) = Base.structdiff(t, NamedTuple{(:maxrank,)})
+
+"The truncation of gate `i`: `trunc` with `maxranks[i]` as its maxrank (`trunc` itself if `maxranks` is nothing)."
+gate_trunc(trunc, ::Nothing, i) = trunc
+gate_trunc(trunc::NamedTuple, maxranks::AbstractVector{<:Integer}, i) = merge(trunc, (maxrank = maxranks[i],))
+
+"""
+Moves the center across `tensors`: QR/LQ if `gauge` and the center has full rank, SVD otherwise.
+`normalize` only reaches the SVD: a QR step leaves the norm to the next SVD, if there is one.
+"""
+function center_step(tensors, linds; gauge, move_ogc, normalize, trunc)
     if gauge
-        res = QRcontract(WLten, WRten; move_ogc, normalize)
+        res = QRcontract(tensors...; move_ogc)
         isnothing(res) || return res
     end
-    return SVDcontract([WLten, WRten], linds; move_ogc, normalize, trunc)
+    return SVDcontract(tensors, linds; move_ogc, normalize, trunc)
 end
 
-center_step_pullback(ΔMf, tape::QRTape) = QRcontract_pullback(ΔMf, tape)
-center_step_pullback(ΔMf, tape::SVDcontractTape) = SVDcontract_pullback(ΔMf, ZeroTangent(), tape)
+center_step_pullback(ΔMf, ΔSnorm, tape::QRTape) = QRcontract_pullback(ΔMf, tape)
+center_step_pullback(ΔMf, ΔSnorm, tape::SVDcontractTape) = SVDcontract_pullback(ΔMf, ΔSnorm, tape)
 
 
 
@@ -1145,7 +1155,7 @@ function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post
 
     # Preparing the maxranks for svd trunc
     trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
-    gauge = gauge_only(trunc, maxranks, linkdims(ψ))
+    gauge = !normalize && gauge_only(trunc, maxranks, linkdims(ψ))
     
     sites = siteinds(ψ)
     links = linkinds(ψ)
@@ -1164,7 +1174,7 @@ function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post
             else
                 cog==1 ? [sites[j];] : [sites[j]; links[cog-1]]
             end
-            ((W1, W2), Snorm, err), _ = center_step(WLten, WRten, linds; 
+            ((W1, W2), Snorm, err), _ = center_step([WLten, WRten], linds; 
                                     gauge=gauge,
                                     move_ogc=:right,
                                     normalize=normalize,
@@ -1186,7 +1196,7 @@ function move_center(ψ::T, b::Int; trunc=(atol=2*eps(),), normalize=false, post
             WRten = Rten_new
 
             linds = j > 1 ? [sites[j]; links[j-1]] : [sites[j];]
-            ((W1, W2), Snorm, err), _ = center_step(WLten, WRten, linds; 
+            ((W1, W2), Snorm, err), _ = center_step([WLten, WRten], linds; 
                                     gauge=gauge,
                                     move_ogc=:left,
                                     normalize=normalize,
@@ -1221,7 +1231,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
 
     # Preparing the maxranks for svd trunc
     trunc, maxranks = adapt_truncarg(trunc, linkdims(ψ))
-    gauge = gauge_only(trunc, maxranks, linkdims(ψ))
+    gauge = !normalize && gauge_only(trunc, maxranks, linkdims(ψ))
 
     sites = siteinds(ψ)
     links = linkinds(ψ)
@@ -1241,7 +1251,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
             else
                 cog==1 ? [sites[j];] : [sites[j]; links[cog-1]] 
             end
-            ((W1, W2), Snorm, err), tape_j = center_step(WLten, WRten, linds; 
+            ((W1, W2), Snorm, err), tape_j = center_step([WLten, WRten], linds; 
                                         gauge=gauge,
                                         move_ogc=:right,
                                         normalize=normalize,
@@ -1264,7 +1274,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
             WRten = Rten_new
 
             linds = j > 1 ? [sites[j]; links[j-1]] : [sites[j];]
-            ((W1, W2), Snorm, err), tape_j = center_step(WLten, WRten, linds; 
+            ((W1, W2), Snorm, err), tape_j = center_step([WLten, WRten], linds; 
                                         gauge=gauge,
                                         move_ogc=:left,
                                         normalize=normalize,
@@ -1295,7 +1305,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
                 ΔW2 = ΔR_new
                 ΔMf = (ΔW1, ΔW2)
 
-                (ΔWL, ΔWR) = center_step_pullback(ΔMf, tapes[j-cog+1])  # start from the last
+                (ΔWL, ΔWR) = center_step_pullback(ΔMf, ZeroTangent(), tapes[j-cog+1])  # start from the last
 
                 Δψcache[j-cog+2] = ΔWR
                 ΔR_new = ΔWL
@@ -1310,7 +1320,7 @@ function ChainRulesCore.rrule(::typeof(move_center), ψ::T, b::Int; trunc=(atol=
                 ΔW2 = Δψf[j+1]
                 ΔMf = (ΔW1, ΔW2)
                 
-                (ΔWL, ΔWR) = center_step_pullback(ΔMf, tapes[cog-j])
+                (ΔWL, ΔWR) = center_step_pullback(ΔMf, ZeroTangent(), tapes[cog-j])
                 # start from the last again, since pullbacks are appended
 
                 Δψcache[j-b+1] = ΔWL
@@ -1581,16 +1591,23 @@ end
 - APPLY VECTOR OF UNITARIES IN A BRICKWORK PATTERN, SWEEPING LEFT TO RIGHT AND BACK
 - Normalize after every SVD.
 - returns both the state and the norms after each SVD
+- `maxranks` (one per gate, in `Uarray` order): gate i is cut at `maxranks[i]` instead of
+  `trunc.maxrank`, and the steps without a gate never cut by rank, since the rank of a
+  bond is set by the last gate on it.
+- `cut_callback(i, sf, p)` is called after the SVD of gate i with its singular values and kept rank.
 """
 function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS;
                                                 shift=0, 
                                                 to_right=true, 
                                                 normalize=true, 
                                                 trunc=NamedTuple(), 
-                                                post_factorize_callback=identity)
+                                                post_factorize_callback=identity,
+                                            maxranks=nothing,
+                                            cut_callback=nothing)
     N = length(ψ)
     @assert shift==0 || shift==1
     @assert length(Uarray)>0
+    isnothing(maxranks) || @assert length(maxranks) >= length(Uarray)
   
     ψ = move_center(ψ, to_right ? 1 + shift : N)
 
@@ -1600,6 +1617,8 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS;
     Snorms = Float64[]
     i = 1; nU = length(Uarray)
     current_layer_odd = true
+    ogc = to_right ? 1 + shift : N   # the center, it is not always in the pair (shift=1)
+    idle_trunc = isnothing(maxranks) ? trunc : drop_maxrank(trunc)
     local lastj
     while i<=nU
         jvals = to_right ? (1:N-1) : (N-1:-1:1)
@@ -1608,29 +1627,36 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPS;
             end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
             lastj = j
             WLten, WRten = ψfinal[j:j+1]
+            idle = false
+            ig = 0           # index of the gate of this step, 0 if none
 
             if iseven(j+shift+current_layer_odd)
                 Uten = ITensor(Uarray[i], sites[j]', sites[j+1]', sites[j], sites[j+1])
                 linds = j > 1 ? [sites[j]'; commonind(ψfinal[j-1], WLten)] : [sites[j]';]
                 tensors = [WLten, WRten, Uten]
+                ig = i
                 i += 1
             else
                 linds = j > 1 ? [sites[j]; commonind(ψfinal[j-1], WLten)] : [sites[j];]
                 tensors = [WLten, WRten]
+                idle = ogc == (to_right ? j : j+1) && idle_bond(idle_trunc, dim(commonind(WLten, WRten)))
             end
             move_ogc = (to_right ? :right : :left)
-            ((W1, W2), Snorm, err), tape = SVDcontract(tensors, linds; 
-                                        move_ogc = move_ogc, 
+            ((W1, W2), Snorm, err), tape = center_step(tensors, linds; 
+                                        gauge = idle,
+                                        move_ogc = move_ogc,
                                         normalize = normalize,
-                                        trunc = trunc)
+                                        trunc = ig > 0 ? gate_trunc(trunc, maxranks, ig) : idle_trunc)
             push!(Snorms, Snorm)
             push!(errs, err)
+            ig > 0 && !isnothing(cut_callback) && cut_callback(ig, tape.sf, tape.p)
 
             W1 = noprime(W1, tags="Site")
             W2 = noprime(W2, tags="Site")
 
             ψfinal[j] = W1
             ψfinal[j+1] = W2
+            ogc = to_right ? j+1 : j
             i>nU && break # before to_right changes
             if end_of_sweep
                 # this has to be here, because we want to_right to remain as it is
@@ -1651,10 +1677,13 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
                                             to_right=true, 
                                             normalize=true, 
                                             trunc=NamedTuple(), 
-                                            post_factorize_callback=identity)
+                                            post_factorize_callback=identity,
+                                            maxranks=nothing,
+                                            cut_callback=nothing)
     N = length(ψ)
     @assert shift==0 || shift==1
     @assert length(Uarray)>0
+    isnothing(maxranks) || @assert length(maxranks) >= length(Uarray)
 
     ψ, move_center_back = Zygote.pullback(move_center, ψ, to_right ? 1 +shift : N)
 
@@ -1664,7 +1693,9 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
     Snorms = Float64[]
     i = 1; nU = length(Uarray)
     current_layer_odd = true
-    tapes = SVDcontractTape[]  # store intermediate data for the pullback
+    ogc = to_right ? 1 + shift : N   # the center, it is not always in the pair (shift=1)
+    idle_trunc = isnothing(maxranks) ? trunc : drop_maxrank(trunc)
+    tapes = Union{SVDcontractTape, QRTape}[]  # store intermediate data for the pullback
     local lastj      # store last j reached
 
     while i<=nU
@@ -1674,24 +1705,30 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
             end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
             lastj = j
             WLten, WRten = ψfinal[j:j+1]
+            idle = false
+            ig = 0           # index of the gate of this step, 0 if none
 
             if iseven(j+shift+current_layer_odd)
                 Uten = ITensor(Uarray[i], sites[j]', sites[j+1]', sites[j], sites[j+1])
                 linds = j > 1 ? [sites[j]'; commonind(ψfinal[j-1], WLten)] : [sites[j]';]
                 tensors = [WLten, WRten, Uten]
+                ig = i
                 i += 1
             else
                 linds = j > 1 ? [sites[j]; commonind(ψfinal[j-1], WLten)] : [sites[j];]
                 tensors = [WLten, WRten]
+                idle = ogc == (to_right ? j : j+1) && idle_bond(idle_trunc, dim(commonind(WLten, WRten)))
             end
             move_ogc = (to_right ? :right : :left)
 
-            ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), tape_j = center_step(tensors, linds; 
+                                                gauge = idle,
                                                 move_ogc = move_ogc,
                                                 normalize = normalize, 
-                                                trunc = trunc)
+                                                trunc = ig > 0 ? gate_trunc(trunc, maxranks, ig) : idle_trunc)
             push!(Snorms, Snorm)
             push!(errs, err)
+            ig > 0 && !isnothing(cut_callback) && cut_callback(ig, tape_j.sf, tape_j.p)
             push!(tapes, tape_j)
                                                 
             W1 = noprime(W1, tags="Site")
@@ -1699,6 +1736,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
 
             ψfinal[j] = W1
             ψfinal[j+1] = W2
+            ogc = to_right ? j+1 : j
             i>nU && break # before to_right changes
             if end_of_sweep
                 # this has to be here, because we want to_right to remain as it is
@@ -1738,7 +1776,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
                     i -= 1
                 else
                     ΔMf = (ΔW1, ΔW2)
-                    (ΔWLten, ΔWRten) = SVDcontract_pullback(ΔMf, ΔSnorm, tapes[pb_n])
+                    (ΔWLten, ΔWRten) = center_step_pullback(ΔMf, ΔSnorm, tapes[pb_n])
                 end
 
                 pb_n -= 1
@@ -2682,6 +2720,7 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPO;
     Snorms = Float64[]
     i = 1; nU = length(Uarray)
     current_layer_odd = true
+    ogc = to_right ? 1 + shift : N   # the center, it is not always in the pair (shift=1)
     local lastj
     while i<=nU
         jvals = to_right ? (1:N-1) : (N-1:-1:1)
@@ -2690,6 +2729,7 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPO;
             end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
             lastj = j
             WLten, WRten = ψfinal[j:j+1]
+            idle = false
 
             if iseven(j+shift+current_layer_odd)
                 Uten = ITensor(Uarray[i], usites[j]'', usites[j+1]'', usites[j], usites[j+1])
@@ -2700,10 +2740,12 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPO;
             else
                 linds = j > 1 ? [sites[j]; commonind(ψfinal[j-1], WLten)] : [sites[j];]
                 tensors = [WLten, WRten]
+                idle = ogc == (to_right ? j : j+1) && idle_bond(trunc, dim(commonind(WLten, WRten)))
             end
             move_ogc = (to_right ? :right : :left)
-            ((W1, W2), Snorm, err), tape = SVDcontract(tensors, linds; 
-                                        move_ogc = move_ogc, 
+            ((W1, W2), Snorm, err), tape = center_step(tensors, linds; 
+                                        gauge = idle,
+                                        move_ogc = move_ogc,
                                         normalize = normalize,
                                         trunc = trunc)
             push!(Snorms, Snorm)
@@ -2714,6 +2756,7 @@ function apply_brickwork(Uarray::Vector{<:AbstractMatrix}, ψ::MPO;
 
             ψfinal[j] = W1
             ψfinal[j+1] = W2
+            ogc = to_right ? j+1 : j
             i>nU && break # before to_right changes
             if end_of_sweep
                 # this has to be here, because we want to_right to remain as it is
@@ -2749,7 +2792,8 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
     Snorms = Float64[]
     i = 1; nU = length(Uarray)
     current_layer_odd = true
-    tapes = SVDcontractTape[]  # store intermediate data for the pullback
+    ogc = to_right ? 1 + shift : N   # the center, it is not always in the pair (shift=1)
+    tapes = Union{SVDcontractTape, QRTape}[]  # store intermediate data for the pullback
     local lastj      # store last j reached
 
     while i<=nU
@@ -2759,6 +2803,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
             end_of_sweep = (j==N-1 && to_right) || (j==1 && !to_right)
             lastj = j
             WLten, WRten = ψfinal[j:j+1]
+            idle = false
 
             if iseven(j+shift+current_layer_odd)
                 Uten = ITensor(Uarray[i], usites[j]'', usites[j+1]'', usites[j], usites[j+1])
@@ -2769,10 +2814,12 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
             else
                 linds = j > 1 ? [sites[j]; commonind(ψfinal[j-1], WLten)] : [sites[j];]
                 tensors = [WLten, WRten]
+                idle = ogc == (to_right ? j : j+1) && idle_bond(trunc, dim(commonind(WLten, WRten)))
             end
             move_ogc = (to_right ? :right : :left)
 
-            ((W1, W2), Snorm, err), tape_j = SVDcontract(tensors, linds; 
+            ((W1, W2), Snorm, err), tape_j = center_step(tensors, linds; 
+                                                gauge = idle,
                                                 move_ogc = move_ogc,
                                                 normalize = normalize, 
                                                 trunc = trunc)
@@ -2785,6 +2832,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
 
             ψfinal[j] = W1
             ψfinal[j+1] = W2
+            ogc = to_right ? j+1 : j
             i>nU && break # before to_right changes
             if end_of_sweep
                 # this has to be here, because we want to_right to remain as it is
@@ -2824,7 +2872,7 @@ function ChainRulesCore.rrule(::typeof(apply_brickwork), Uarray::Vector{<:Abstra
                     i -= 1
                 else
                     ΔMf = (ΔW1, ΔW2)
-                    (ΔWLten, ΔWRten) = SVDcontract_pullback(ΔMf, ΔSnorm, tapes[pb_n])
+                    (ΔWLten, ΔWRten) = center_step_pullback(ΔMf, ΔSnorm, tapes[pb_n])
                 end
 
                 pb_n -= 1

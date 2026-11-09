@@ -42,11 +42,26 @@ Base.@kwdef mutable struct InversionInstructions
     inner_maxiter::Int = 10000
     inner_gradtol::Float64 = 1e-5
     ρ_growth::Float64 = 2.0
+    # per-gate ranks (arrU order): gate i is cut at max(maxrank, gate_maxranks[i]); gates past
+    # the end of the list (e.g. the layer added at the next depth) at maxrank. Filled by the
+    # degeneracy check and carried to the next depth with the instructions.
+    gate_maxranks::Vector{Int} = Int[]
+    # every degen_check iterations (0 = never) look at the cut of every gate cut at its rank,
+    # with g the relative gap between the last kept and the first discarded value and w the
+    # weight of the latter (relative). The cut is degenerate if g < degen_gap and w/g > degen_score:
+    # it splits a near-degenerate pair carrying enough weight for the cost to jump there. That
+    # gate's rank is raised to the first cut above that is not degenerate even at degen_score/100
+    # (at most rankcap), and the optimisation restarts from that point (see RankRaise).
+    degen_check::Int = 500
+    degen_gap::Float64 = 1e-2
+    degen_score::Float64 = 1e-6
+    rankcap::Int = 100
 end
 
 # copy for a mutable struct (field-by-field)
+# (arrays copied too, so a copy's gate_maxranks can be changed on its own)
 Base.copy(x::InversionInstructions) = InversionInstructions(
-    (getfield(x, f) for f in fieldnames(InversionInstructions))...)
+    ((v = getfield(x, f); v isa AbstractArray ? copy(v) : v) for f in fieldnames(InversionInstructions))...)
 
 # Instruction files whose fields differ from the current struct (written before a
 # field existed, or with fields since removed) come back from JLD2 as a
@@ -211,6 +226,91 @@ Base.showerror(io::IO, e::GradientFreeze) = print(io,
     "Likely an exact spectral degeneracy at the truncation cut made the SVD-adjoint gradient singular.")
 
 
+"""
+Thrown by `invert_maxrank` when the degeneracy check raised the rank of some gates: the
+point is already saved as a checkpoint with the new ranks (both instruction files updated),
+so the caller only has to resume, which also restarts L-BFGS.
+"""
+struct RankRaise <: Exception
+    N::Int
+    tau::Int
+    niter::Int
+    gates::Vector{Int}
+    old::Vector{Int}
+    new::Vector{Int}
+    err::Float64
+    gradnorm::Float64
+end
+
+Base.showerror(io::IO, e::RankRaise) = print(io,
+    "RankRaise: N=$(e.N) tau=$(e.tau) iter=$(e.niter): ranks raised at gates ",
+    join(["$g:$o->$n" for (g, o, n) in zip(e.gates, e.old, e.new)], " "))
+
+"The rank each of the `nU` gates is cut at (see `gate_maxranks` in InversionInstructions)."
+gate_ranks(instr, nU) = [max(instr.maxrank, get(instr.gate_maxranks, i, instr.maxrank)) for i in 1:nU]
+
+"""
+    cut_gap_weight(sf, p) -> (g, w)
+
+At a cut after `p` of the singular values `sf`: the relative gap g between the last kept
+and the first discarded value, and the weight w of the latter relative to the total.
+Nothing discarded: (Inf, 0).
+"""
+function cut_gap_weight(sf, p)
+    (p < length(sf) && sf[p] > 0 && sf[p+1] > 0) || return (Inf, 0.0)
+    return ((sf[p] - sf[p+1]) / sf[p], sf[p+1]^2 / sum(abs2, sf))
+end
+
+"""
+True if the cut after `p` splits a near-degenerate pair (g < `gap`) carrying enough weight
+(w/g > `score`) for the truncated cost to jump there: the jump is ~w and the gradient error ~w/g.
+"""
+function degenerate_cut(sf, p, score, gap)
+    g, w = cut_gap_weight(sf, p)
+    return g < gap && w / g > score
+end
+
+"The first rank above `p` (at most `rankcap`) whose cut is not degenerate even at `score`/100; `p` if none."
+function raised_rank(sf, p, score, gap, rankcap)
+    for q in p+1:min(rankcap, length(sf))
+        degenerate_cut(sf, q, score / 100, gap) || return q
+    end
+    return p
+end
+
+"""
+Check the cut of every gate cut at its rank in `ranks`; return `gate => new rank` for those
+whose cut is degenerate (see `degenerate_cut`, `raised_rank`). Only gates cut at their rank
+are looked at: a cut set by atol carries no weight to speak of, and a rank change would not
+move it. Gates with no clean cut up to `rankcap` are left alone, with a warning the first
+time (gates in `warned` are not warned again).
+"""
+function find_rank_raises(arrU, zeromps, trunc, ranks; score, gap, rankcap, warned = Set{Int}())
+    raises = Dict{Int,Int}()
+    cb = (i, sf, p) -> begin
+        if p == ranks[i] && ranks[i] < rankcap && degenerate_cut(sf, p, score, gap)
+            q = raised_rank(sf, p, score, gap, rankcap)
+            if q > p
+                raises[i] = q
+            elseif !(i in warned)          # once per gate (per call of the caller that owns `warned`)
+                push!(warned, i)
+                @warn "gate $i: degenerate cut at rank $p, no clean cut up to rankcap = $rankcap"
+            end
+        end
+    end
+    apply_brickwork(arrU, zeromps; trunc, maxranks = ranks, cut_callback = cb)
+    return raises
+end
+
+"Log the rank raise `e` and report it."
+function log_rank_raise(pathname, e::RankRaise, instr; logfile = nothing)
+    note = "gate ranks " * join(["$g:$o->$n" for (g, o, n) in zip(e.gates, e.old, e.new)], " ")
+    log_depth_event(pathname, e.N; tau = e.tau, event = "rank_raise", maxrank = instr.maxrank,
+                    atol = instr.atol, niter = e.niter, err = e.err, gradnorm = e.gradnorm, logfile, note)
+    @info "N=$(e.N) tau=$(e.tau) iter $(e.niter): $note; restarting L-BFGS"
+end
+
+
 const DEPTHLOG_HEADER = "timestamp,N,tau,event,maxrank,atol,niter,err,gradnorm,time_s,note"
 
 """
@@ -261,6 +361,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
 
     trunc = (maxrank=maxrank, atol=instr.atol)
     nU = n_unitaries(N, tau)
+    ranks = gate_ranks(instr, nU)
     n_checkpoint = instr.n_checkpoint
 
     savefile = load_locked(pathname*"N$(N)_T$(tau).jld2")
@@ -273,7 +374,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
     overlap_only = (Snorms, ϕ) -> -log(abs(sproduct(ψ, ϕ))) - sum(log.(Snorms))
 
     cost_function = arrU -> begin
-        ϕ, Snorms = apply_brickwork(arrU, zeromps; trunc=trunc)
+        ϕ, Snorms = apply_brickwork(arrU, zeromps; trunc=trunc, maxranks=ranks)
         return overlap_only(Snorms, ϕ)
     end
 
@@ -303,6 +404,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
     # =======================================================================
 
     normgradvec = Float64[]
+    degen_warned = Set{Int}()
     n_stall = 100
     stall_atol = 1e-14
     t_start = Base.time()
@@ -355,28 +457,52 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
         end
 
         if numiter % n_checkpoint == 0
-            ϕ, Snorms = apply_brickwork(x, zeromps; trunc=trunc)
-            overlap_cost = (-log(abs(sproduct(ψ, ϕ))), -sum(log.(Snorms)))
-            err          = -expm1(-sum(overlap_cost))
-            gnorm        = sqrt(inner(x, g, g))
-
-            n = length(normgradvec) ÷ 2
-            vc = copy(normgradvec)
-            ckpt_normgradhistory = permutedims(reshape(vc, 2, n))
-            cum_nghist = vcat(total_nghist, ckpt_normgradhistory)
-            cum_time   = total_time_prior + (Base.time() - t_start)
-
-            ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,
-                    cost=f, overlap_cost=overlap_cost, err=err, time=cum_time,
-                    converged=false, finished=false)
-            save_locked(pathname*"N$(N)_T$(tau).jld2", ckpt)
-
-            ckpt_instr = copy(instr)
-            ckpt_instr.maxiter = max(instr.maxiter - numiter, 1)
-            save_locked(pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2", ckpt_instr)
+            err = write_checkpoint(x, f, g, numiter, instr)
             @info "checkpoint: tau=$tau iter=$numiter gradnorm=$gnorm err=$err"
         end
+
+        # degeneracy check: raise the rank of the gates whose cut splits a near-degenerate
+        # pair, save this point with the new ranks and restart from it
+        if instr.degen_check > 0 && numiter > 0 && numiter % instr.degen_check == 0
+            raises = find_rank_raises(x, zeromps, trunc, ranks; score = instr.degen_score,
+                                      gap = instr.degen_gap, rankcap = instr.rankcap, warned = degen_warned)
+            if !isempty(raises)
+                gates = sort!(collect(keys(raises)))
+                new_ranks = copy(ranks)
+                for i in gates; new_ranks[i] = raises[i]; end
+                new_instr = copy(instr); new_instr.gate_maxranks = new_ranks
+                err = write_checkpoint(x, f, g, numiter, new_instr)
+                plainpath = pathname*"N$(N)_T$(tau)_instructions.jld2"
+                plain = copy(load_locked(plainpath)); plain.gate_maxranks = new_ranks
+                save_locked(plainpath, plain)
+                throw(RankRaise(N, tau, numiter, gates, ranks[gates], new_ranks[gates], err, gnorm))
+            end
+        end
         return x, f, g
+    end
+
+    # save x as the checkpoint the next resume starts from, with instructions `ck_instr`
+    function write_checkpoint(x, f, g, numiter, ck_instr)
+        ϕ, Snorms = apply_brickwork(x, zeromps; trunc=trunc, maxranks=ranks)
+        overlap_cost = (-log(abs(sproduct(ψ, ϕ))), -sum(log.(Snorms)))
+        err          = -expm1(-sum(overlap_cost))
+        gnorm        = sqrt(inner(x, g, g))
+
+        n = length(normgradvec) ÷ 2
+        vc = copy(normgradvec)
+        ckpt_normgradhistory = permutedims(reshape(vc, 2, n))
+        cum_nghist = vcat(total_nghist, ckpt_normgradhistory)
+        cum_time   = total_time_prior + (Base.time() - t_start)
+
+        ckpt = (N=N, tau=tau, arrU=x, gradmin=g, gradnorm=gnorm, normgradhistory=cum_nghist,
+                cost=f, overlap_cost=overlap_cost, err=err, time=cum_time,
+                converged=false, finished=false)
+        save_locked(pathname*"N$(N)_T$(tau).jld2", ckpt)
+
+        ckpt_instr = copy(ck_instr)
+        ckpt_instr.maxiter = max(ck_instr.maxiter - numiter, 1)
+        save_locked(pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2", ckpt_instr)
+        return err
     end
 
     # Converged if the windowed infidelity criterion fired (gradtol kept as a
@@ -397,7 +523,7 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
     cum_time = total_time_prior + elapsed
 
     # --- final diagnostics (overlap term reported separately from penalty) ---
-    ϕf, Snormsf = apply_brickwork(arrUmin, zeromps; trunc=trunc)
+    ϕf, Snormsf = apply_brickwork(arrUmin, zeromps; trunc=trunc, maxranks=ranks)
     overlap_cost  = (-log(abs(sproduct(ψ, ϕf))), -sum(log.(Snormsf)))
     err = -expm1(-sum(overlap_cost))
     final_gnorm = isempty(normgradhistory) ? sqrt(inner(arrUmin, gradmin, gradmin)) : normgradhistory[end, 2]
@@ -501,6 +627,10 @@ function continue_inversion(psi::MPS, maxtau::Int, pathname::String, invertFunct
     try
         invertFunction(psi, tau, pathname; resuming = resuming)
     catch e
+        if e isa RankRaise
+            log_rank_raise(pathname, e, load_locked(pathname*"N$(N)_T$(tau)_checkpoint_instructions.jld2"))
+            return :continue
+        end
         (e isa GradientFreeze && adapt !== nothing) || rethrow()
         raise_maxrank_after_freeze!(pathname, e, adapt) || rethrow()
         return :continue
@@ -740,6 +870,10 @@ function run_depth(psi::MPS, tau::Int, pathname::String; adapt = nothing)
         try
             invert_maxrank(psi, tau, pathname; resuming = !isinf(result.gradnorm), sequential = false)
         catch e
+            if e isa RankRaise
+                log_rank_raise(pathname, e, load_locked(base * "_checkpoint_instructions.jld2"); logfile)
+                continue
+            end
             (e isa GradientFreeze && adapt !== nothing) || rethrow()
             raise_maxrank_after_freeze!(pathname, e, adapt; logfile) || rethrow()
             continue
