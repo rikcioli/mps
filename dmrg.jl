@@ -1,3 +1,4 @@
+include("RGmethods.jl")
 using ITensors, ITensorMPS
 using KrylovKit
 using SparseArrays, LinearAlgebra
