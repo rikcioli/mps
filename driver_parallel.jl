@@ -24,7 +24,9 @@
 #                      (-status and -at may appear anywhere)
 #    -adapt 5,40       on a gradient freeze raise maxrank by 5, up to 40 (default); -adapt none
 #    -blas 1           BLAS threads per worker (default 1; "auto" shares out spare cores)
-#                      (-adapt and -blas go before the first folder)
+#    -smt              also put workers on the hyperthreads: physical cores are filled
+#                      first, so it only matters with more (state, depth) runs than cores
+#                      (-adapt, -blas and -smt go before the first folder)
 #
 #  Examples
 #    driver_parallel.jl /data/xi1.0 -T 1_28,30 -maxrank 20 -maxiter 10000000 -m 20 -err_reltol 0.001 -n_snapshot 10000
@@ -47,8 +49,8 @@ include(SETUPPATH)
 
 # ---------------------------------------------------------------- arguments
 
-const NOVALUE     = ("continue", "status")                 # flags without a value
-const GLOBAL_ONLY = ("status", "at", "adapt", "blas")
+const NOVALUE     = ("continue", "status", "smt")                 # flags without a value
+const GLOBAL_ONLY = ("status", "at", "adapt", "blas", "smt")
 const FOLDER_KEYS = ("T", "N", "continue")
 
 "\"1_28,30\" -> [1, 2, …, 28, 30]"
@@ -68,7 +70,7 @@ function parse_args(args)
             key = a[2:end]
             known = key in NOVALUE || key in GLOBAL_ONLY || key in FOLDER_KEYS || hasfield(InversionInstructions, Symbol(key))
             known || error("unknown flag $a (not a driver flag nor an InversionInstructions field)")
-            # -status and -at are global wherever they appear; -adapt and -blas must come first
+            # -status and -at are global wherever they appear; -adapt, -blas and -smt must come first
             anywhere = key in ("status", "at")
             key in GLOBAL_ONLY && !anywhere && !isempty(folders) &&
                 error("$a applies to the whole call: put it before the first folder")
@@ -77,6 +79,8 @@ function parse_args(args)
                 opts[key] = "true"; i += 1
             else
                 i < length(args) || error("$a needs a value")
+                # a value may contain or start with "-" (1e-8, -5), but not look like a flag
+                occursin(r"^-[A-Za-z]", args[i+1]) && error("$a needs a value, got the flag $(args[i+1])")
                 opts[key] = args[i+1]; i += 2
             end
         else
@@ -94,6 +98,7 @@ at     = haskey(global_opts, "at") ? parse_list(global_opts["at"]) : nothing
 adapt  = get(global_opts, "adapt", "5,40") == "none" ? nothing :
          (s = parse_list(get(global_opts, "adapt", "5,40")); (step = s[1], max = s[2]))
 blas   = get(global_opts, "blas", "1") == "auto" ? :auto : parse(Int, get(global_opts, "blas", "1"))
+smt    = haskey(global_opts, "smt")
 
 tasks = NamedTuple[]
 for (folder, own) in folders
@@ -133,9 +138,9 @@ foreach(t -> mkpath(t.outdir), tasks)   # here, once: workers racing on mkpath c
 
 npairs = sum(length(t.depths) for t in tasks)
 node = detect_node()
-plan = plan_workers(node, npairs; blas_threads = blas, use_mkl = USE_MKL)
+plan = plan_workers(node, npairs; blas_threads = blas, use_mkl = USE_MKL, use_smt = smt)
 print_report(node, plan)
-@info "$(length(tasks)) states, $npairs (state, depth) runs, adapt = $adapt"
+@info "$(length(tasks)) states, $npairs (state, depth) runs, adapt = $adapt, smt = $smt"
 start_workers(plan)
 
 @everywhere workers() begin

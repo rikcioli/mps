@@ -181,3 +181,42 @@ function blocking_scaling_err(ψ::MPS, err::Float64; qstart=2, kargs...)
     end
     return q
 end
+
+
+"""
+    extract_xi(ψ; qmax=length(ψ)÷4, qstep=1, errfloor=1e-12, rtol=0.05, kargs...)
+
+Fits the error per block of `blocking_scaling`, err(q)/cld(N,q), to A exp(-q/ξ) on the window of q where the
+decay is a clean exponential. The curve is computed for q = 2, 3, ... and stops at `qmax` or at the first q
+whose total error falls below `errfloor` (below ~1e-12 the error 1 - overlap is roundoff). The window is set
+by the local decay rates κ_q = log(e_q/e_{q+1}) of consecutive points, compared with their median κ_ref:
+it starts at the first q where two consecutive rates are within `rtol` of κ_ref (the faster correlation
+lengths have decayed) and ends at the last q whose incoming rate is within `rtol` (drops points bent by
+finite size effects or by the floor). Use `qstep = 2` for states with period-2 order (e.g. the XXZ Néel
+phase): odd and even blocks cut the pattern differently and the curve zig-zags. `kargs` go to `invert`.
+
+Returns (ξ, A, qmin, qmax, qs, errs, errs_per_block), with qs, errs, errs_per_block the whole computed curve.
+"""
+function extract_xi(ψ::MPS; qmax::Int = length(ψ) ÷ 4, qstep::Int = 1, errfloor::Real = 1e-12, rtol::Real = 0.05, kargs...)
+    N = length(ψ)
+    qs = Int[]; errs = Float64[]
+    for q in 2:qstep:qmax
+        push!(qs, q)
+        push!(errs, only(blocking_scaling(ψ, [q]; kargs...)))
+        errs[end] < errfloor && (pop!(qs); pop!(errs); break)
+    end
+    length(qs) >= 3 || error("only $(length(qs)) points above errfloor = $errfloor for q ≤ $qmax")
+    eb = errs ./ cld.(N, qs)
+
+    κ = -diff(log.(eb)) ./ diff(qs)              # κ[k]: rate per site between qs[k] and qs[k+1]
+    κref = median(κ)
+    ok = abs.(κ .- κref) .<= rtol * κref
+    kmin = findfirst(k -> ok[k] && ok[k+1], 1:length(κ)-1)
+    kmin === nothing && error("the error per block never settles to an exponential decay (κ = $κ)")
+    kmax = findlast(ok) + 1                      # last point whose incoming rate is ok
+    kmax - kmin >= 2 || error("fit window q = $(qs[kmin]):$(qs[kmax]) too short")
+
+    w = kmin:kmax
+    c = [ones(length(w)) qs[w]] \ log.(eb[w])    # log(e) = log(A) - q/ξ
+    return (ξ = -1 / c[2], A = exp(c[1]), qmin = qs[kmin], qmax = qs[kmax], qs, errs, errs_per_block = eb)
+end

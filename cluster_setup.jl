@@ -172,6 +172,20 @@ function physical_cores(cpus)
     return sort!(collect(values(rep)); by = c -> (c.numa, c.package, c.core))
 end
 
+# Every logical cpu, first one per physical core, then the second hyperthread
+# of each core, and so on: workers fill all the physical cores before any two
+# share one, so use_smt only changes anything when there are more workers
+# than physical cores.
+function smt_order(cpus)
+    sib = Dict{Tuple{Int,Int}, Vector{Int}}()
+    for c in cpus
+        push!(get!(sib, (c.package, c.core), Int[]), c.id)
+    end
+    foreach(sort!, values(sib))
+    rank(c) = findfirst(==(c.id), sib[(c.package, c.core)])
+    return sort(cpus; by = c -> (c.numa, rank(c), c.package, c.core))
+end
+
 # Cut each NUMA node into blocks of b cores, so no worker straddles sockets,
 # then interleave the nodes, so a job with few workers still uses every
 # memory controller and L3 instead of piling onto socket 0.
@@ -199,8 +213,7 @@ per-worker `--heap-size-hint`s.
 function plan_workers(node::NodeInfo, ntasks::Int; blas_threads = 1, use_mkl = true,
                       use_smt = false, master_mem = 2 * 2^30, mem_reserve = 0.10)
     notes = String[]
-    cores = use_smt ? sort(node.cpus; by = c -> (c.numa, c.package, c.core, c.id)) :
-                      physical_cores(node.cpus)
+    cores = use_smt ? smt_order(node.cpus) : physical_cores(node.cpus)
     ncores = length(cores)
 
     if blas_threads === :auto
@@ -220,7 +233,7 @@ function plan_workers(node::NodeInfo, ntasks::Int; blas_threads = 1, use_mkl = t
     pin  = Sys.islinux() && Sys.which("taskset") !== nothing
 
     idle = ncores - nw * b
-    idle > 0 && push!(notes, "$idle of $ncores cores left idle")
+    idle > 0 && push!(notes, "$idle of $ncores $(use_smt ? "logical cpus" : "cores") left idle")
     ntasks > nw && push!(notes, "$ntasks tasks on $nw workers: pmap will queue the rest")
     heap < 2 * 2^30 && push!(notes, "only $(fmtbytes(heap)) heap per worker, consider fewer workers")
     Sys.islinux() && !pin && push!(notes, "taskset not found: workers will NOT be pinned")
