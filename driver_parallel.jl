@@ -35,7 +35,19 @@
 #    driver_parallel.jl /data/xi1.0 /data/xi2.0 -status -at 10000,100000
 # =====================================================================
 
-const USE_MKL = true            # false = OpenBLAS (try it if the node is AMD)
+const MKL_SETTING = :auto       # :auto = MKL on Intel x86, OpenBLAS on AMD / ARM; or force true / false
+
+# CPU vendor of this node: vendor_id from /proc/cpuinfo on Linux, else the model string
+function cpu_is_intel()
+    Sys.ARCH === :x86_64 || return false               # MKL is x86 only (no Apple silicon)
+    if isfile("/proc/cpuinfo")
+        for l in eachline("/proc/cpuinfo")
+            startswith(l, "vendor_id") && return occursin("GenuineIntel", l)
+        end
+    end
+    return occursin("Intel", Sys.cpu_info()[1].model)
+end
+const USE_MKL = MKL_SETTING === :auto ? cpu_is_intel() : MKL_SETTING
 const LIBPATH   = joinpath(@__DIR__, "inversion_lib.jl")
 const SETUPPATH = joinpath(@__DIR__, "cluster_setup.jl")
 
