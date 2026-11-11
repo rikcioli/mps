@@ -63,14 +63,13 @@ end
 
 # settings of the sequential Mac runs (data/nnn_Jz2.5_D2_*_seq/run.jl): stop each depth when the infidelity
 # improves by less than err_reltol over 1000 iterations; rank raises at degenerate cuts at their defaults
-const SEQ_PREPARE = (atol = 1e-10, maxiter = 10_000_000, gradtol = 1e-8, err_reltol = 1e-3,
-                     n_checkpoint = 1000, n_snapshot = 10_000, m = 20)
+const SEQ_PREPARE = (atol = 1e-10, maxiter = 10_000_000, gradtol = 1e-8, err_reltol = 1e-3)
 
 # NNN XXZ, Δ = 2.5, Δ₂ = 1.0, staggered field hs = 0.05 (make_states_nnn_isinghl.jl)
 function nnn_tasks()
     path = LOCAL * "nnn/delta2_1.0/"
     [(label = "nnn Δ2=1.0 N=$N", N = N, outdir = path * "seq_chi48/", h5 = path * "$(N)_mps.h5",
-      make = nothing, prepare = (; maxrank = 48, SEQ_PREPARE...), adapt = (step = 1, max = 100))
+      make = nothing, prepare = (; maxrank = 48, m=20, SEQ_PREPARE...), adapt = (step = 1, max = 100))
      for N in [60, 100, 140, 180, 220, 260, 300]]
 end
 
@@ -94,7 +93,7 @@ end
 function xxzD_tasks()
     [(label = "xxz Jz=2.5 D=$D N=100", N = 100, outdir = LOCAL * "xxz/Jz2.5_D$D/seq_chi24/",
       h5 = LOCAL * "xxz/Jz2.5_D$D/100_mps.h5", make = nothing,
-      prepare = (; maxrank = 24, SEQ_PREPARE...), adapt = (step = 1, max = 100))
+      prepare = (; maxrank = 24, m=20, SEQ_PREPARE...), adapt = (step = 1, max = 100))
      for D in [2, 3, 4, 8, 16]]
 end
 
