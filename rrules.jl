@@ -134,7 +134,7 @@ function svd_trunc_pullback!(
     mask = abs.(S' .- S) .< degeneracy_atol
     Δgauge = norm(view(aUΔU, mask) + view(aVΔV, mask), Inf)
     Δgauge ≤ gauge_atol ||
-        @warn "`svd` cotangents sensitive to gauge choice: (|Δgauge| = $Δgauge)"
+        @warn "`svd` cotangents sensitive to gauge choice: (|Δgauge| = $Δgauge)" maxlog = 10
 
     UdΔAV = (aUΔU .+ aVΔV) .* inv_safe.(S' .- S, degeneracy_atol) .+
         (aUΔU .- aVΔV) .* inv_safe.(S' .+ S, degeneracy_atol)
@@ -157,9 +157,9 @@ function svd_trunc_pullback!(
         Mc = (rX .- rY) .* Gp
         ΔA = mul!(ΔA, Udis, ((Pc .+ Mc) ./ 2) * Vᴴ, 1, 1)
         ΔA = mul!(ΔA, U, ((Pc .- Mc) ./ 2)' * Vdisᴴ, 1, 1)
-        #if σ[1] > degeneracy_atol && S[p] - σ[1] ≤ degeneracy_atol
-        #    @warn "truncation cut inside a degenerate cluster: gap = $(S[p] - σ[1]), σ₁ = $(σ[1])"
-        #end
+        if σ[1] > degeneracy_atol && S[p] - σ[1] ≤ degeneracy_atol
+            @warn "truncation cut inside a degenerate cluster: gap = $(S[p] - σ[1]), σ₁ = $(σ[1])" maxlog = 10
+        end
     end
 
     # directions outside the compact SVD (σ̃ = 0), only when M is rectangular
@@ -307,7 +307,7 @@ function SVDcontract_pullback(ΔMf, ΔSnorm, tape::SVDcontractTape)
     end
 
     ΔM = fill!(similar(Uf, msize), 0)
-    svd_trunc_pullback!(ΔM, (Uf, sf, Vfdg), p, (ΔU, ΔS, ΔVdg); gauge_atol = 1e-12)
+    svd_trunc_pullback!(ΔM, (Uf, sf, Vfdg), p, (ΔU, ΔS, ΔVdg))
 
     ΔM_ten = ITensor(ΔM, cLind, cRind)
     ΔM_ten *= dag(cR)

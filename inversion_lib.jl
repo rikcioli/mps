@@ -20,7 +20,7 @@ load_locked(path)       = lock(IOLOCK) do; upgrade(load_object(path)); end
 Base.@kwdef mutable struct InversionInstructions
     maxrank::Union{Nothing, Int} = nothing
     maxerror::Union{Nothing, Float64} = nothing
-    atol::Float64 = 1e-12
+    atol::Float64 = 1e-10
     maxiter::Int = 1000000
     gradtol::Float64 = 1e-8
     # value-based stop: relative decrease of the error over the last n_conv-iteration window
