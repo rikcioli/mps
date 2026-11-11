@@ -4,11 +4,13 @@
 #      julia --project=$HOME/MyProject driver.jl xxz
 #      julia --project=$HOME/MyProject driver.jl corr
 #      julia --project=$HOME/MyProject driver.jl xxz,corr    # both, one pool
-#  jobs: xxz, ising, corr, xi4 (see JOBS below)
+#      julia --project=$HOME/MyProject driver.jl nnn,isinghl,isingD,xxzD
+#  jobs: xxz, ising, corr, xi4, nnn, isinghl, isingD, xxzD (see JOBS below)
 #  On the cluster: sbatch run_xxz.sh corr
 # =====================================================================
 
 const DATA     = "/home/PERSONALE/riccardo.cioli3/MyProject/Data/"
+const LOCAL    = "/local/cioli/data/"   # states synced by sync_states.sh (nnn, isinghl jobs)
 const MAXTAU   = 30
 const PREPARE  = :auto         # :auto = only tasks whose outdir has no N$(N)_T*.jld2 yet
                                # true   = always (overwrites T1 but NOT deeper files!)
@@ -28,6 +30,7 @@ const USE_MKL  = true          # false = OpenBLAS (try it if the node is AMD)
 #            and written there, so a resumed run inverts the very same state
 #   make     nothing (h5 must already exist) or (:corr, xi)
 #   prepare  kwargs for prepare_start
+#   adapt    (optional) overrides ADAPT for this task
 
 function xxz_tasks()
     path = DATA * "xxz/Jz2.5/"
@@ -57,7 +60,45 @@ function xi4_tasks()
       for xi in [4.0] for N in [20, 50, 100, 200, 500, 1000]]
 end
 
-const JOBS = Dict("xxz" => xxz_tasks, "ising" => ising_tasks, "corr" => corr_tasks, "xi4" => xi4_tasks)
+# settings of the sequential Mac runs (data/nnn_Jz2.5_D2_*_seq/run.jl): stop each depth when the infidelity
+# improves by less than err_reltol over 1000 iterations; rank raises at degenerate cuts at their defaults
+const SEQ_PREPARE = (atol = 1e-10, maxiter = 10_000_000, gradtol = 1e-8, err_reltol = 1e-3,
+                     n_checkpoint = 1000, n_snapshot = 10_000, m = 20)
+
+# NNN XXZ, Δ = 2.5, Δ₂ = 1.0, staggered field hs = 0.05 (make_states_nnn_isinghl.jl)
+function nnn_tasks()
+    path = LOCAL * "nnn/delta2_1.0/"
+    [(label = "nnn Δ2=1.0 N=$N", N = N, outdir = path * "seq_chi48/", h5 = path * "$(N)_mps.h5",
+      make = nothing, prepare = (; maxrank = 48, SEQ_PREPARE...), adapt = (step = 1, max = 100))
+     for N in [60, 100, 140, 180, 220, 260, 300]]
+end
+
+# Ising H = −Σ SˣSˣ − 0.75 Σ Sᶻ − 0.81 Σ Sˣ (spin-1/2 operators; make_states_nnn_isinghl.jl)
+function isinghl_tasks()
+    path = LOCAL * "ising/g0.75_hL0.81/"
+    [(label = "ising g=0.75 hL=0.81 N=$N", N = N, outdir = path * "seq_chi10/", h5 = path * "$(N)_mps.h5",
+      make = nothing, prepare = (; maxrank = 10, SEQ_PREPARE...), adapt = (step = 1, max = 100))
+     for N in [60, 100, 140, 180, 220, 260, 300]]
+end
+
+# N = 100 targets truncated to bond dimension D (step by step D_max → … → D, make_truncated_states.jl),
+# inverted at the maxrank of the full-D runs: Ising g = 0.75 (D_max = 9) at 10, XXZ Jz = 2.5 (D_max = 24) at 24
+function isingD_tasks()
+    [(label = "ising g=0.75 D=$D N=100", N = 100, outdir = LOCAL * "ising/g0.75_D$D/seq_chi10/",
+      h5 = LOCAL * "ising/g0.75_D$D/100_mps.h5", make = nothing,
+      prepare = (; maxrank = 10, SEQ_PREPARE...), adapt = (step = 1, max = 100))
+     for D in [2, 3, 4]]
+end
+
+function xxzD_tasks()
+    [(label = "xxz Jz=2.5 D=$D N=100", N = 100, outdir = LOCAL * "xxz/Jz2.5_D$D/seq_chi24/",
+      h5 = LOCAL * "xxz/Jz2.5_D$D/100_mps.h5", make = nothing,
+      prepare = (; maxrank = 24, SEQ_PREPARE...), adapt = (step = 1, max = 100))
+     for D in [2, 3, 4, 8, 16]]
+end
+
+const JOBS = Dict("xxz" => xxz_tasks, "ising" => ising_tasks, "corr" => corr_tasks, "xi4" => xi4_tasks,
+                  "nnn" => nnn_tasks, "isinghl" => isinghl_tasks, "isingD" => isingD_tasks, "xxzD" => xxzD_tasks)
 
 # ---------------------------------------------------------------- setup
 
@@ -125,6 +166,7 @@ end
     if prepare === true || (prepare === :auto && !has_checkpoints(t))
         prepare_start(psi, t.outdir; t.prepare...)
     end
+    adapt = haskey(t, :adapt) ? t.adapt : adapt
     s = @elapsed while continue_inversion(psi, maxtau, t.outdir, invert_maxrank; adapt) != :done
     end
     return s
