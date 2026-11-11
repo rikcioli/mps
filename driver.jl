@@ -5,6 +5,7 @@
 #      julia --project=$HOME/MyProject driver.jl corr
 #      julia --project=$HOME/MyProject driver.jl xxz,corr    # both, one pool
 #      julia --project=$HOME/MyProject driver.jl nnn,isinghl,isingD,xxzD
+#      julia --project=$HOME/MyProject driver.jl nnn,isinghl -smt   # also use the hyperthreads
 #  jobs: xxz, ising, corr, xi4, nnn, isinghl, isingD, xxzD (see JOBS below)
 #  On the cluster: sbatch run_xxz.sh corr
 # =====================================================================
@@ -108,7 +109,11 @@ const JOBS = Dict("xxz" => xxz_tasks, "ising" => ising_tasks, "corr" => corr_tas
 const LIBPATH   = joinpath(@__DIR__, "inversion_lib.jl")
 const SETUPPATH = joinpath(@__DIR__, "cluster_setup.jl")
 
-jobnames = split(get(ARGS, 1, "xxz"), ',')
+# -smt (anywhere on the command line): also put workers on the hyperthreads. Physical cores are
+# filled first, then their sibling threads (see smt_order in cluster_setup.jl).
+const SMT = "-smt" in ARGS
+jobargs = filter(a -> !startswith(a, "-"), ARGS)
+jobnames = split(get(jobargs, 1, "xxz"), ',')
 for j in jobnames
     haskey(JOBS, j) || error("unknown job \"$j\", choose from $(join(keys(JOBS), ", "))")
 end
@@ -127,9 +132,9 @@ USE_MKL && using MKL
 using LinearAlgebra, OptimKit, Zygote, JLD2, HDF5
 
 node = detect_node()
-plan = plan_workers(node, length(tasks); blas_threads = BLAS_NT, use_mkl = USE_MKL)
+plan = plan_workers(node, length(tasks); blas_threads = BLAS_NT, use_mkl = USE_MKL, use_smt = SMT)
 print_report(node, plan)
-@info "jobs $(join(jobnames, ",")): $(length(tasks)) tasks"
+@info "jobs $(join(jobnames, ",")): $(length(tasks)) tasks, smt = $SMT"
 start_workers(plan)
 
 @everywhere begin
@@ -172,8 +177,13 @@ end
     return s
 end
 
-results = pmap(tasks; on_error = identity) do t
-    run_task(t, MAXTAU, PREPARE, ADAPT)
+# Captured as locals, so the closure ships their values: a closure naming the
+# globals makes Distributed re-create them on the workers, which on Julia 1.13
+# evaluates PREPARE = :auto as `auto` and fails with UndefVarError.
+results = let maxtau = MAXTAU, prepare = PREPARE, adapt = ADAPT
+    pmap(tasks; on_error = identity) do t
+        run_task(t, maxtau, prepare, adapt)
+    end
 end
 
 for (t, r) in zip(tasks, results)
