@@ -6,7 +6,8 @@
 #      julia --project=$HOME/MyProject driver.jl xxz,corr    # both, one pool
 #      julia --project=$HOME/MyProject driver.jl nnn,isinghl,isingD,xxzD
 #      julia --project=$HOME/MyProject driver.jl nnn,isinghl -smt   # also use the hyperthreads
-#  jobs: xxz, ising, corr, xi4, nnn, isinghl, isingD, xxzD (see JOBS below)
+#      julia --project=$HOME/MyProject driver.jl xxzseq,nnnseq      # N=100 runs continued from the Mac
+#  jobs: xxz, ising, corr, xi4, nnn, isinghl, isingD, xxzD, xxzseq, nnnseq (see JOBS below)
 #  On the cluster: sbatch run_xxz.sh corr
 # =====================================================================
 
@@ -97,8 +98,30 @@ function xxzD_tasks()
      for D in [2, 3, 4, 8, 16]]
 end
 
+# N = 100 sequential runs with the exact settings of the Mac runs data/*_N100_chi*_seq/run.jl
+# (n_checkpoint / n_snapshot as there). The Mac checkpoints are copied into the same outdir by
+# push_seq_runs.sh, so those tasks resume where the Mac stopped; the others start from T1.
+const SEQ100_PREPARE = (; m = 20, n_checkpoint = 1000, SEQ_PREPARE...)
+
+# XXZ, H = Σ [(S+S- + h.c.)/2 + Jz SzSz] − 0.05 Σ (−1)^j Sz, maxrank 24 (Jz = 2.5 resumes from the Mac run)
+function xxzseq_tasks()
+    [(label = "xxz Jz=$Jz seq N=100", N = 100, outdir = LOCAL * "xxz/Jz$Jz/seq_chi24/", h5 = LOCAL * "xxz/Jz$Jz/100_mps.h5",
+      make = nothing, prepare = (; maxrank = 24, SEQ100_PREPARE...), adapt = (step = 1, max = 100))
+     for Jz in ["2.5", "5", "10", "20"]]
+end
+
+# NNN XXZ Δ = 2.5, hs = 0.05, every Δ₂ at the maxranks run on the Mac (all resume from the Mac runs).
+# Δ₂ = 1.0 χ48 is not here: the `nnn` job already runs N = 100 in nnn/delta2_1.0/seq_chi48/.
+function nnnseq_tasks()
+    [(label = "nnn Δ2=$d2 χ=$chi seq N=100", N = 100, outdir = LOCAL * "nnn/delta2_$d2/seq_chi$chi/",
+      h5 = LOCAL * "nnn/delta2_$d2/100_mps.h5", make = nothing,
+      prepare = (; maxrank = chi, SEQ100_PREPARE...), adapt = (step = 1, max = 100))
+     for (d2, chi) in [("0.125", 36), ("0.25", 36), ("0.5", 36), ("0.5", 48), ("0.75", 36), ("1.0", 36), ("1.0", 64)]]
+end
+
 const JOBS = Dict("xxz" => xxz_tasks, "ising" => ising_tasks, "corr" => corr_tasks, "xi4" => xi4_tasks,
-                  "nnn" => nnn_tasks, "isinghl" => isinghl_tasks, "isingD" => isingD_tasks, "xxzD" => xxzD_tasks)
+                  "nnn" => nnn_tasks, "isinghl" => isinghl_tasks, "isingD" => isingD_tasks, "xxzD" => xxzD_tasks,
+                  "xxzseq" => xxzseq_tasks, "nnnseq" => nnnseq_tasks)
 
 # ---------------------------------------------------------------- setup
 
