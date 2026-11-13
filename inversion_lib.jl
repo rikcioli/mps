@@ -23,7 +23,7 @@ Base.@kwdef mutable struct InversionInstructions
     atol::Float64 = 1e-10
     maxiter::Int = 1000000
     gradtol::Float64 = 1e-8
-    # value-based stop: relative decrease of the error over the last n_conv-iteration window
+    # value-based stop: relative decrease of the cost -ln F over the last n_conv-iteration window (≈ the error when it is ≪ 1)
     # (err_reltol = 0 switches the value criterion off entirely, absolute floor included)
     err_reltol::Float64 = 1e-3
     n_checkpoint::Int = 1000
@@ -414,21 +414,23 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
         push!(normgradvec, gnorm)
 
         # --- windowed value-based convergence check --------------------------
-        # f == sum(overlap_cost), so the infidelity is err = -expm1(-f);
-        # expm1 avoids cancellation when f is exponentially small.
+        # Tested on the cost f = sum(overlap_cost) = -ln F (+ norm loss), not on the infidelity
+        # err = -expm1(-f): for err ≪ 1 the two are the same (f ≈ err), but when err ≈ 1 (e.g. random
+        # MPS at shallow depth) a real decrease of f changes err by almost nothing relative to err, and
+        # a test on err would stop every depth at its first check.
         # MUST run before the stall block so a value-converged run isn't flagged as stuck.
         if err_reltol > 0 && numiter % n_conv == 0
-            err_now = -expm1(-f)
+            val_now = f
             if !isnan(last_ckpt_err[])
-                Δ = last_ckpt_err[] - err_now                       # > 0 means error decreased
+                Δ = last_ckpt_err[] - val_now                       # > 0 means the cost decreased
                 if abs(Δ) < err_floor_atol                          # within the noise floor ⇒ converged
                     converged_by_value[] = true
-                elseif Δ ≥ 0 && Δ / abs(err_now) < err_reltol       # decreasing, but slowly ⇒ converged
+                elseif Δ ≥ 0 && Δ / abs(val_now) < err_reltol       # decreasing, but slowly ⇒ converged
                     converged_by_value[] = true
                 end
-                # Δ < 0 and above the floor ⇒ error rose meaningfully ⇒ keep going
+                # Δ < 0 and above the floor ⇒ cost rose meaningfully ⇒ keep going
             end
-            last_ckpt_err[] = err_now
+            last_ckpt_err[] = val_now
         end
 
         if numiter % n_stall == 0

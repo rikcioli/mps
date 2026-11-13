@@ -101,7 +101,7 @@ end
 # N = 100 sequential runs with the exact settings of the Mac runs data/*_N100_chi*_seq/run.jl
 # (n_checkpoint / n_snapshot as there). The Mac checkpoints are copied into the same outdir by
 # push_seq_runs.sh, so those tasks resume where the Mac stopped; the others start from T1.
-const SEQ100_PREPARE = (; m = 20, n_checkpoint = 1000, SEQ_PREPARE...)
+const SEQ100_PREPARE = (; m = 20, SEQ_PREPARE...)
 
 # XXZ, H = Σ [(S+S- + h.c.)/2 + Jz SzSz] − 0.05 Σ (−1)^j Sz, maxrank 24 (Jz = 2.5 resumes from the Mac run)
 function xxzseq_tasks()
