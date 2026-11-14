@@ -13,6 +13,12 @@
 #    -T 1_28,30        depths (ranges with _), required unless -status
 #    -N 100,200        only these states (default: all <N>_mps.h5 in the folder)
 #    -continue         continue the depths instead of starting them
+#    -refine 15        restart every depth of -T except 15 from the latest depth-15 circuit (shallower:
+#                      its last layers removed; deeper: identity layers appended; their previous files
+#                      go to parallel/refine_backup/), and continue depth 15 itself; -<field> overrides
+#                      apply to all of them as with -continue (e.g. -refine 15 -T 14_16 -maxiter 100000).
+#                      Every refine is recorded in parallel/refine_backup/refines.csv (with a copy of the
+#                      source as it was); -status shows previous vs current error of each refined depth
 #    -<field> <value>  any InversionInstructions field: -maxrank 20 -maxiter 10000000
 #                      -m 20 -err_reltol 0.001 -gradtol 0 -n_snapshot 10000 -atol 1e-10 ...
 #                      start: the instructions of the depths this call prepares
@@ -33,6 +39,9 @@
 #    driver_parallel.jl /data/xi1.0 -continue -T 12_14 -maxiter 50000 -err_reltol 1e-4
 #    driver_parallel.jl -T 1_30 -maxiter 10000000  /data/xi1.0 -maxrank 20  /data/xi2.0 -maxrank 30 -T 1_20  /data/xi5.0 -continue -T 12
 #    driver_parallel.jl /data/xi1.0 /data/xi2.0 -status -at 10000,100000
+#    driver_parallel.jl /data/xxz/Jz2.5 -N 100 -refine 15 -T 15_19 -maxiter 200000
+#    driver_parallel.jl /data/xxz/Jz2.5 -continue -T 1_8  /data/xxz/Jz2.5 -refine 9 -T 9_28
+#                      (same folder twice, each with its own flags; the depth lists must not overlap)
 # =====================================================================
 
 const MKL_SETTING = :auto       # :auto = MKL on Intel x86, OpenBLAS on AMD / ARM; or force true / false
@@ -63,7 +72,7 @@ include(SETUPPATH)
 
 const NOVALUE     = ("continue", "status", "smt")                 # flags without a value
 const GLOBAL_ONLY = ("status", "at", "adapt", "blas", "smt")
-const FOLDER_KEYS = ("T", "N", "continue")
+const FOLDER_KEYS = ("T", "N", "continue", "refine")
 
 "\"1_28,30\" -> [1, 2, …, 28, 30]"
 parse_depths(s) = sort(unique(reduce(vcat, [occursin('_', p) ? collect(range(parse.(Int, split(p, '_'))...)) :
@@ -124,9 +133,25 @@ for (folder, own) in folders
     settings = (; (Symbol(k) => parse_value(v) for (k, v) in o
                    if !(k in FOLDER_KEYS || k in GLOBAL_ONLY))...)
     for N in Ns
+        refine = haskey(o, "refine") ? parse(Int, o["refine"]) : nothing
+        if refine !== nothing && !status
+            refine in depths || error("$folder: -refine $refine needs depth $refine among -T $(o["T"])")
+            isfile(dir * "/parallel/N$(N)_T$(refine).jld2") || error("$folder N=$N: no results for the -refine source depth $refine")
+        end
+        mode = refine !== nothing ? :refine : haskey(o, "continue") ? :continue : :start
         push!(tasks, (label = "$dir N=$N", N = N, outdir = dir * "/parallel/", h5 = dir * "/$(N)_mps.h5",
-                      make = nothing, depths = depths, mode = haskey(o, "continue") ? :continue : :start,
-                      settings = settings))
+                      make = nothing, depths = depths, mode = mode, refine = refine, settings = settings))
+    end
+end
+
+# The same folder may be given several times with different flags (e.g. -continue -T 1_8 and
+# -refine 9 -T 9_28), but a (state, depth) pair must belong to one task only: two workers on the
+# same depth would write the same files.
+let seen = Dict{Tuple{String,Int,Int},Int}()
+    for (k, t) in enumerate(tasks), tau in something(t.depths, Int[])
+        key = (t.outdir, t.N, tau)
+        haskey(seen, key) && error("$(t.label): depth $tau is requested twice (in two flag groups of the same folder)")
+        seen[key] = k
     end
 end
 
@@ -137,6 +162,7 @@ if status
         println("\n==== ", t.label, "   ", t.outdir)
         isdir(t.outdir) && any(f -> occursin(Regex("^N$(t.N)_T\\d+\\.jld2\$"), f), readdir(t.outdir)) ?
             parallel_status(t.outdir, t.N; at, depths = t.depths) : println("  (nothing yet)")
+        isdir(t.outdir) && refine_compare(t.outdir, t.N)
     end
     exit()
 end
@@ -173,4 +199,5 @@ nfail = count(r -> r.result isa Exception, results)
 for t in tasks
     println("\n==== ", t.label)
     parallel_status(t.outdir, t.N; depths = t.depths)
+    refine_compare(t.outdir, t.N)
 end

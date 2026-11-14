@@ -7,6 +7,7 @@ using LinearAlgebra
 using JLD2
 using HDF5
 using Distributed
+using Printf
 #using LaTeXStrings
 #using Plots
 
@@ -405,6 +406,27 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
 
     normgradvec = Float64[]
     degen_warned = Set{Int}()
+
+    # degeneracy check at the start of a new depth (not on a resume): the circuit inherited from the
+    # previous depth may already cut through near-degenerate pairs, where the cost has kinks that can stop
+    # L-BFGS before the periodic check (every degen_check iterations) ever runs. Raise those ranks now.
+    if instr.degen_check > 0 && !resuming
+        raises0 = find_rank_raises(arrU0, zeromps, trunc, ranks; score = instr.degen_score,
+                                   gap = instr.degen_gap, rankcap = instr.rankcap, warned = degen_warned)
+        if !isempty(raises0)
+            gates0 = sort!(collect(keys(raises0)))
+            old0 = ranks[gates0]
+            for i in gates0; ranks[i] = raises0[i]; end         # in place: the cost closures see the new ranks
+            instr.gate_maxranks = copy(ranks)
+            plainpath0 = pathname*"N$(N)_T$(tau)_instructions.jld2"
+            plain0 = copy(load_locked(plainpath0)); plain0.gate_maxranks = copy(ranks)
+            save_locked(plainpath0, plain0)
+            note = "start of depth: gate ranks " * join(["$g:$o->$(ranks[g])" for (g, o) in zip(gates0, old0)], " ")
+            log_depth_event(pathname, N; tau = tau, event = "rank_raise", maxrank = maxrank, atol = instr.atol,
+                            niter = 0, err = NaN, gradnorm = NaN, note)
+            @info "N=$N tau=$tau: $note"
+        end
+    end
     n_stall = 100
     stall_atol = 1e-14
     t_start = Base.time()
@@ -530,6 +552,29 @@ function invert_maxrank(ψ::MPS, tau::Int, pathname::String; resuming = false, e
     err = -expm1(-sum(overlap_cost))
     final_gnorm = isempty(normgradhistory) ? sqrt(inner(arrUmin, gradmin, gradmin)) : normgradhistory[end, 2]
     converged = converged_by_value[] || (final_gnorm <= gradtol)   # value criterion counts
+
+    # L-BFGS stopped without converging (typically "linesearch made no progress" at a kink of the
+    # truncated cost, where a kept and a discarded singular value nearly cross): look for such cuts
+    # now instead of finishing the depth, and if there are any raise their ranks and restart from here,
+    # exactly as the periodic degeneracy check does. Each raise increases ranks (up to rankcap), so
+    # this cannot loop forever.
+    if !converged && instr.degen_check > 0
+        raises = find_rank_raises(arrUmin, zeromps, trunc, ranks; score = instr.degen_score,
+                                  gap = instr.degen_gap, rankcap = instr.rankcap, warned = degen_warned)
+        if !isempty(raises)
+            gates = sort!(collect(keys(raises)))
+            new_ranks = copy(ranks)
+            for i in gates; new_ranks[i] = raises[i]; end
+            new_instr = copy(instr); new_instr.gate_maxranks = new_ranks
+            niter_here = length(normgradvec) ÷ 2
+            errk = write_checkpoint(arrUmin, fmin, gradmin, niter_here, new_instr)
+            plainpath = pathname*"N$(N)_T$(tau)_instructions.jld2"
+            plain = copy(load_locked(plainpath)); plain.gate_maxranks = new_ranks
+            save_locked(plainpath, plain)
+            @info "N=$N tau=$tau: L-BFGS stopped unconverged (|g| = $final_gnorm); degenerate cuts found, raising ranks"
+            throw(RankRaise(N, tau, niter_here, gates, ranks[gates], new_ranks[gates], errk, final_gnorm))
+        end
+    end
     finished = true
     @show err, converged, finished
 
@@ -905,6 +950,136 @@ function run_depth_pairs(pairs; adapt = nothing)
 end
 
 """
+    refine_depths!(t, source, targets) -> Vector{String}
+
+Restart the parallel depths `targets` of task `t` from the latest circuit of depth `source`
+(its final circuit, or its last checkpoint if it is still running). A shallower target t < s
+keeps the first n_unitaries(N, t) gates, i.e. the source with its last s - t layers removed
+(output side, so the brickwork parity is untouched); a deeper target gets s - t exact identity
+layers appended (as prepare_parallel pads), so it starts at the source's error. The per-gate
+ranks of the source (gate_maxranks, from the instructions its circuit ran with) are carried
+over gate by gate, truncated or padded with the target's maxrank.
+
+Each target's previous files (its .jld2, instructions, checkpoint instructions, snapshots,
+gradbreak) are moved to `<outdir>/refine_backup/T<t>_<timestamp>/` (its _log.csv is copied
+there and kept, with a "refine" event appended), a copy of the source depth's files (no
+snapshots) goes to `<outdir>/refine_backup/T<s>_source_<timestamp>/`, and one row per target is
+appended to `<outdir>/refine_backup/refines.csv` (errors and iterations of the source, of the
+previous target circuit and of the new start; see refine_compare); then the target is written as a depth that
+was never started, with its old plain instructions (maxrank, budget, ...) and the carried
+ranks, so run_depth starts it from this circuit. The source itself is not touched (it simply
+continues). Run on the master, with no worker running these depths.
+"""
+function refine_depths!(t, source::Int, targets)
+    N, out = t.N, t.outdir
+    sbase = out * "N$(N)_T$(source)"
+    isfile(sbase * ".jld2") || error("$(t.label): source depth $source has no files")
+    rs = load_locked(sbase * ".jld2")
+    arrUs = Vector{Matrix{ComplexF64}}(rs.arrU)
+    nUs = n_unitaries(N, source)
+    length(arrUs) == nUs || error("$(t.label): T$source circuit has $(length(arrUs)) gates, expected $nUs")
+    splain = load_locked(sbase * "_instructions.jld2")
+    sinstr = (!get(rs, :finished, false) && isfile(sbase * "_checkpoint_instructions.jld2")) ?
+             load_locked(sbase * "_checkpoint_instructions.jld2") : splain
+    sranks = gate_ranks(sinstr, nUs)
+    ψ = dense(task_state(t))
+    z = MPS(siteinds(ψ), ["0" for _ in 1:N]); orthogonalize!(z, 1)
+    stamp = Libc.strftime("%Y%m%d-%H%M%S", time())
+    notes = String[]
+    broot = out * "refine_backup/"; mkpath(broot)
+    # a copy of the source depth as it was when it was used (it keeps running and changing)
+    sdir = broot * "T$(source)_source_$(stamp)/"; mkpath(sdir)
+    for f in filter(f -> occursin(Regex("^N$(N)_T$(source)(\\.jld2|_.+)\$"), f), readdir(out))
+        occursin("_snap_it", f) || cp(out * f, sdir * f; force = true)
+    end
+    manifest = broot * "refines.csv"
+    isfile(manifest) || open(io -> println(io, "timestamp,N,target,source,source_err,source_iters,prev_err,prev_iters,start_err,backup"), manifest, "w")
+    serr, sits = get(rs, :err, NaN), size(rs.normgradhistory, 1)
+    for tau in sort(collect(targets))
+        tau == source && continue
+        base = out * "N$(N)_T$(tau)"
+        nU = n_unitaries(N, tau)
+        arrU = tau < source ? arrUs[1:nU] : vcat(arrUs, [Matrix{ComplexF64}(I, 4, 4) for _ in 1:(nU - nUs)])
+        plain = copy(isfile(base * "_instructions.jld2") ? load_locked(base * "_instructions.jld2") : splain)
+        mr = something(plain.maxrank, sinstr.maxrank)
+        plain.gate_maxranks = [i <= nUs ? sranks[i] : mr for i in 1:nU]
+        # error of the new starting circuit, with the ranks it will run with
+        ϕ, Sn = apply_brickwork(arrU, z; trunc = (maxrank = mr, atol = plain.atol), maxranks = gate_ranks(plain, nU))
+        err_new = -expm1(log(abs(sproduct(ψ, ϕ))) + sum(log.(Sn)))
+        rold = isfile(base * ".jld2") ? load_locked(base * ".jld2") : nothing
+        err_old = rold === nothing ? NaN : get(rold, :err, NaN)
+        if rold !== nothing && isnan(err_old)        # a circuit that never ran (e.g. refined before): compute it
+            iold = isfile(base * "_instructions.jld2") ? load_locked(base * "_instructions.jld2") : plain
+            ϕo, Sno = apply_brickwork(Vector{Matrix{ComplexF64}}(rold.arrU), z;
+                                      trunc = (maxrank = something(iold.maxrank, mr), atol = iold.atol),
+                                      maxranks = gate_ranks(iold, length(rold.arrU)))
+            err_old = -expm1(log(abs(sproduct(ψ, ϕo))) + sum(log.(Sno)))
+        end
+        its_old = rold === nothing ? 0 : size(rold.normgradhistory, 1)
+        # back up the previous files of this depth
+        olds = filter(f -> occursin(Regex("^N$(N)_T$(tau)(\\.jld2|_.+)\$"), f), readdir(out))
+        if !isempty(olds)
+            bdir = out * "refine_backup/T$(tau)_$(stamp)/"; mkpath(bdir)
+            for f in olds
+                f == "N$(N)_T$(tau)_log.csv" ? cp(out * f, bdir * f; force = true) : mv(out * f, bdir * f; force = true)
+            end
+        end
+        save_locked(base * "_instructions.jld2", plain)
+        save_locked(base * ".jld2", (N = N, tau = tau, arrU = arrU, gradnorm = Inf, numfg = 0,
+                                     normgradhistory = Matrix{Float64}(undef, 0, 2), time = 0.0,
+                                     converged = false, finished = false))
+        how = tau < source ? "removed the last $(source - tau) layer(s)" : "appended $(tau - source) identity layer(s)"
+        note = "refined from T$source ($how): start err $(round(err_new; sigdigits = 4)), previous err $(round(err_old; sigdigits = 4))" *
+               (isempty(olds) ? "" : "; old files in refine_backup/T$(tau)_$(stamp)/")
+        log_depth_event(out, N; tau, event = "refine", maxrank = mr, atol = plain.atol, err = err_new,
+                        logfile = base * "_log.csv", note)
+        open(manifest, "a") do io
+            println(io, join([Libc.strftime("%Y-%m-%d %H:%M:%S", time()), N, tau, source, serr, sits, err_old, its_old, err_new,
+                              isempty(olds) ? "" : "refine_backup/T$(tau)_$(stamp)/"], ","))
+        end
+        push!(notes, "T$tau: $note")
+    end
+    return notes
+end
+
+"""
+    refine_compare(pathname, N; io = stdout)
+
+For every refine recorded in `<pathname>/refine_backup/refines.csv` (N only): the error the
+target depth had before (its backed-up circuit), the error it started from, and the error it
+has now (its live file), plus the best of the two circuits; a target refined several times
+appears once per refine. Returns the rows as NamedTuples.
+"""
+function refine_compare(pathname::String, N::Int; io = stdout)
+    manifest = pathname * "refine_backup/refines.csv"
+    isfile(manifest) || return NamedTuple[]
+    rows = NamedTuple[]
+    lines = readlines(manifest)
+    for l in lines[2:end]
+        c = split(l, ",")
+        parse(Int, c[2]) == N || continue
+        tau = parse(Int, c[3]); src = parse(Int, c[4])
+        prev, start = parse(Float64, c[7]), parse(Float64, c[9])
+        f = pathname * "N$(N)_T$(tau).jld2"
+        r = isfile(f) ? load_locked(f) : nothing
+        now = r === nothing ? NaN : get(r, :err, NaN)
+        its = r === nothing ? 0 : size(r.normgradhistory, 1)
+        isnan(now) && r !== nothing && isinf(r.gradnorm) && (now = start)     # not started yet: still at its start
+        best = isnan(now) ? "previous" : (isnan(prev) || now < prev) ? "refined" : "previous"
+        push!(rows, (when = c[1], tau = tau, source = src, prev_err = prev, prev_iters = parse(Int, c[8]),
+                     start_err = start, now_err = now, now_iters = its, best = best, backup = c[10]))
+    end
+    isempty(rows) && return rows
+    println(io, "  refines (refine_backup/refines.csv):")
+    println(io, "    when                 T   from  previous err (iters)   start err   now err (iters)      best")
+    for x in rows
+        @printf(io, "    %-19s  %2d   T%-3d  %.4e (%7d)    %.3e   %.4e (%7d)   %s\n", x.when, x.tau, x.source,
+                x.prev_err, x.prev_iters, x.start_err, x.now_err, x.now_iters, x.best)
+    end
+    return rows
+end
+
+"""
     run_parallel_tasks(tasks; adapt = nothing)
 
 The common runner. Besides the fields above, every task carries its own `depths`,
@@ -915,6 +1090,9 @@ The common runner. Besides the fields above, every task carries its own `depths`
   :run       run the existing depths only, preparing nothing
   :continue  reopen the depths with `settings` as overrides (see reopen_depth!),
              then run them
+  :refine    first restart every depth except `t.refine` from the latest circuit
+             of depth `t.refine` (see refine_depths!), then as :continue (the
+             source depth continues from where it is)
 Preparing and reopening happen here, on the master; then all (state, depth) pairs
 of all tasks run in one worker pool, the most expensive first.
 """
@@ -932,7 +1110,14 @@ function run_parallel_tasks(tasks; adapt = nothing)
                 isempty(added) || @info "$(t.label): prepared depths $(added)"
             end
             append!(todo, [(t, tau) for tau in t.depths if exists(tau)])
-        elseif t.mode === :continue
+        elseif t.mode === :continue || t.mode === :refine
+            if t.mode === :refine
+                src = t.refine
+                src in t.depths || error("$(t.label): the refine source depth $src must be one of the depths $(t.depths)")
+                for n in refine_depths!(t, src, t.depths)
+                    @info "$(t.label) $n"
+                end
+            end
             for tau in t.depths
                 if !exists(tau)
                     @warn "$(t.label): depth $tau has no files, skipped"
