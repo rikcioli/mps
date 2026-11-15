@@ -15,8 +15,9 @@
 #    -continue         continue the depths instead of starting them
 #    -refine 15        restart every depth of -T except 15 from the latest depth-15 circuit (shallower:
 #                      its last layers removed; deeper: identity layers appended; their previous files
-#                      go to parallel/refine_backup/), and continue depth 15 itself; -<field> overrides
-#                      apply to all of them as with -continue (e.g. -refine 15 -T 14_16 -maxiter 100000).
+#                      go to parallel/refine_backup/); depth 15 is continued too only if it is in -T
+#                      (it may also be run by another flag group of the same folder, e.g. -continue);
+#                      -<field> overrides apply as with -continue (e.g. -refine 15 -T 14_16 -maxiter 100000).
 #                      Every refine is recorded in parallel/refine_backup/refines.csv (with a copy of the
 #                      source as it was); -status shows previous vs current error of each refined depth
 #    -<field> <value>  any InversionInstructions field: -maxrank 20 -maxiter 10000000
@@ -40,7 +41,7 @@
 #    driver_parallel.jl -T 1_30 -maxiter 10000000  /data/xi1.0 -maxrank 20  /data/xi2.0 -maxrank 30 -T 1_20  /data/xi5.0 -continue -T 12
 #    driver_parallel.jl /data/xi1.0 /data/xi2.0 -status -at 10000,100000
 #    driver_parallel.jl /data/xxz/Jz2.5 -N 100 -refine 15 -T 15_19 -maxiter 200000
-#    driver_parallel.jl /data/xxz/Jz2.5 -continue -T 1_8  /data/xxz/Jz2.5 -refine 9 -T 9_28
+#    driver_parallel.jl /data/xxz/Jz2.5 -continue -T 1_10  /data/xxz/Jz2.5 -refine 9 -T 11_28
 #                      (same folder twice, each with its own flags; the depth lists must not overlap)
 # =====================================================================
 
@@ -135,7 +136,6 @@ for (folder, own) in folders
     for N in Ns
         refine = haskey(o, "refine") ? parse(Int, o["refine"]) : nothing
         if refine !== nothing && !status
-            refine in depths || error("$folder: -refine $refine needs depth $refine among -T $(o["T"])")
             isfile(dir * "/parallel/N$(N)_T$(refine).jld2") || error("$folder N=$N: no results for the -refine source depth $refine")
         end
         mode = refine !== nothing ? :refine : haskey(o, "continue") ? :continue : :start

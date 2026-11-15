@@ -1112,9 +1112,9 @@ function run_parallel_tasks(tasks; adapt = nothing)
             append!(todo, [(t, tau) for tau in t.depths if exists(tau)])
         elseif t.mode === :continue || t.mode === :refine
             if t.mode === :refine
-                src = t.refine
-                src in t.depths || error("$(t.label): the refine source depth $src must be one of the depths $(t.depths)")
-                for n in refine_depths!(t, src, t.depths)
+                # the source is only read here (all refines and reopens happen before any worker
+                # starts); it is run too only if it is one of t.depths
+                for n in refine_depths!(t, t.refine, t.depths)
                     @info "$(t.label) $n"
                 end
             end
