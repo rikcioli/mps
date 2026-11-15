@@ -7,7 +7,7 @@
 #      julia --project=$HOME/MyProject driver.jl nnn,isinghl,isingD,xxzD
 #      julia --project=$HOME/MyProject driver.jl nnn,isinghl -smt   # also use the hyperthreads
 #      julia --project=$HOME/MyProject driver.jl xxzseq,nnnseq      # N=100 runs continued from the Mac
-#  jobs: xxz, ising, corr, xi4, nnn, isinghl, isingD, xxzD, xxzseq, nnnseq (see JOBS below)
+#  jobs: xxz, ising, corr, xi4, nnn, isinghl, isingD, xxzD, xxzseq, nnnseq, isingseqN, xxzseqN (see JOBS below)
 #  On the cluster: sbatch run_xxz.sh corr
 # =====================================================================
 
@@ -119,7 +119,24 @@ function nnnseq_tasks()
      for (d2, chi) in [("0.125", 36), ("0.25", 36), ("0.5", 36), ("0.5", 48), ("0.75", 36), ("1.0", 36), ("1.0", 64)]]
 end
 
-const JOBS = Dict("xxz" => xxz_tasks, "ising" => ising_tasks, "corr" => corr_tasks, "xi4" => xi4_tasks,
+# N = 60 .. 300 sequential runs resumed from the Mac (they all exist already, so nothing is prepared):
+#   Ising g = 0.75 in ising/g0.75/seq_chi10/ (Mac testdata/ising/g0.75/m5_long: maxrank 20, m 5, atol 1e-10)
+#   XXZ Jz = 2.5   in xxz/Jz2.5/seq_chi24/  (N = 100: the xxzseq run; the other N: Mac testdata/xxz/Jz2.5/m20_driver,
+#                  maxrank 24, m 20, atol 1e-8)
+# `prepare` is only used if a state has no files at all.
+function isingseqN_tasks()
+    [(label = "ising g=0.75 seq N=$N", N = N, outdir = LOCAL * "ising/g0.75/seq_chi10/", h5 = LOCAL * "ising/g0.75/$(N)_mps.h5",
+      make = nothing, prepare = (; maxrank = 20, m = 5, SEQ_PREPARE...), adapt = (step = 1, max = 100))
+     for N in [60, 100, 140, 180, 220, 260, 300]]
+end
+
+function xxzseqN_tasks()
+    [(label = "xxz Jz=2.5 seq N=$N", N = N, outdir = LOCAL * "xxz/Jz2.5/seq_chi24/", h5 = LOCAL * "xxz/Jz2.5/$(N)_mps.h5",
+      make = nothing, prepare = (; maxrank = 24, SEQ100_PREPARE...), adapt = (step = 1, max = 100))
+     for N in [60, 100, 140, 180, 220, 260, 300]]
+end
+
+const JOBS = Dict("isingseqN" => isingseqN_tasks, "xxzseqN" => xxzseqN_tasks, "xxz" => xxz_tasks, "ising" => ising_tasks, "corr" => corr_tasks, "xi4" => xi4_tasks,
                   "nnn" => nnn_tasks, "isinghl" => isinghl_tasks, "isingD" => isingD_tasks, "xxzD" => xxzD_tasks,
                   "xxzseq" => xxzseq_tasks, "nnnseq" => nnnseq_tasks)
 
