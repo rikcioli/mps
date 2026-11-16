@@ -7,7 +7,7 @@
 #      julia --project=$HOME/MyProject driver.jl nnn,isinghl,isingD,xxzD
 #      julia --project=$HOME/MyProject driver.jl nnn,isinghl -smt   # also use the hyperthreads
 #      julia --project=$HOME/MyProject driver.jl xxzseq,nnnseq      # N=100 runs continued from the Mac
-#  jobs: xxz, ising, corr, xi4, nnn, isinghl, isingD, xxzD, xxzseq, nnnseq, isingseqN, xxzseqN (see JOBS below)
+#  jobs: xxz, ising, corr, xi4, nnn, isinghl, isingD, xxzD, xxzseq, nnnseq, isingseqN, xxzseqN, xxzseqN36 (see JOBS below)
 #  On the cluster: sbatch run_xxz.sh corr
 # =====================================================================
 
@@ -136,7 +136,15 @@ function xxzseqN_tasks()
      for N in [60, 100, 140, 180, 220, 260, 300]]
 end
 
-const JOBS = Dict("isingseqN" => isingseqN_tasks, "xxzseqN" => xxzseqN_tasks, "xxz" => xxz_tasks, "ising" => ising_tasks, "corr" => corr_tasks, "xi4" => xi4_tasks,
+# XXZ Jz = 2.5, N = 60 .. 300, maxrank 36, m 20, err_reltol 1e-3, new runs in xxz/Jz2.5/seq_chi36/
+# (the folder also holds parallel/, the χ=36 driver_parallel run, which these files never touch)
+function xxzseqN36_tasks()
+    [(label = "xxz Jz=2.5 seq χ=36 N=$N", N = N, outdir = LOCAL * "xxz/Jz2.5/seq_chi36/", h5 = LOCAL * "xxz/Jz2.5/$(N)_mps.h5",
+      make = nothing, prepare = (; maxrank = 36, SEQ100_PREPARE...), adapt = (step = 1, max = 100))
+     for N in [60, 100, 140, 180, 220, 260, 300]]
+end
+
+const JOBS = Dict("isingseqN" => isingseqN_tasks, "xxzseqN" => xxzseqN_tasks, "xxzseqN36" => xxzseqN36_tasks, "xxz" => xxz_tasks, "ising" => ising_tasks, "corr" => corr_tasks, "xi4" => xi4_tasks,
                   "nnn" => nnn_tasks, "isinghl" => isinghl_tasks, "isingD" => isingD_tasks, "xxzD" => xxzD_tasks,
                   "xxzseq" => xxzseq_tasks, "nnnseq" => nnnseq_tasks)
 
